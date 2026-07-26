@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -319,6 +321,59 @@ func TestScanBatchBoundsTargetConcurrencyAndClosesOnCancellation(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	for range scanner.ScanBatch(cancelled, targets) {
+	}
+}
+
+func TestScannerOptionallyStoresOnlyJavaScript(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case "/":
+			writer.Header().Set("Content-Type", "text/html")
+			_, _ = writer.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write([]byte(`fetch("/api/data")`))
+		case "/api/data":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"sensitive":"body"}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.Mode = ModeDirect
+	config.Output.Directory = t.TempDir()
+	config.Output.DownloadJS = true
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := scanner.Scan(context.Background(), Target{URL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scriptPath string
+	for _, resource := range result.Resources {
+		if resource.Type == ResourceTypeScript {
+			scriptPath = resource.LocalPath
+		}
+		if resource.Type == ResourceTypeAPI && resource.LocalPath != "" {
+			t.Fatalf("API body was persisted at %q", resource.LocalPath)
+		}
+	}
+	if scriptPath == "" {
+		t.Fatal("script LocalPath is empty")
+	}
+	if _, err := os.Stat(filepath.Join(
+		config.Output.Directory,
+		filepath.FromSlash(scriptPath),
+	)); err != nil {
+		t.Fatalf("stored script: %v", err)
 	}
 }
 

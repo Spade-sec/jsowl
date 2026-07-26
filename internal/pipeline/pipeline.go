@@ -16,6 +16,7 @@ import (
 	"github.com/youmulijiang/jsowl/internal/model"
 	"github.com/youmulijiang/jsowl/internal/scheduler"
 	"github.com/youmulijiang/jsowl/internal/scope"
+	"github.com/youmulijiang/jsowl/internal/storage"
 )
 
 // Options supplies the immutable dependencies for one target pipeline.
@@ -158,13 +159,39 @@ func (p *Pipeline) RunDetailed(
 				Size:        int64(len(collected.response.Body)),
 				Depth:       collected.item.Depth,
 			}
-			result.Resources = append(result.Resources, resource)
 			if collected.response.Truncated {
 				result.Issues = append(result.Issues, model.Issue{
 					Code: "body_truncated", Stage: "collect", URL: resource.URL,
 					Message: "response exceeded max_body_size",
 				})
 			}
+			if p.options.Config.Output.DownloadJS &&
+				(resource.Type == model.ResourceTypeScript ||
+					resource.Type == model.ResourceTypeChunk) {
+				if collected.response.Truncated {
+					result.Issues = append(result.Issues, model.Issue{
+						Code: "js_not_saved", Stage: "storage", URL: resource.URL,
+						Message: "truncated JavaScript body was not persisted",
+					})
+				} else {
+					localPath, saveErr := storage.SaveJSIn(
+						p.options.Config.Output.Directory,
+						root,
+						p.options.Config.Output.JSDirectory,
+						resource,
+						collected.response.Body,
+					)
+					if saveErr != nil {
+						result.Issues = append(result.Issues, model.Issue{
+							Code: "js_save_failed", Stage: "storage", URL: resource.URL,
+							Message: saveErr.Error(),
+						})
+					} else {
+						resource.LocalPath = localPath
+					}
+				}
+			}
+			result.Resources = append(result.Resources, resource)
 			if collected.item.Kind == model.ResourceTypeAPI {
 				if index, exists := endpointIndex[collected.item.URL]; exists {
 					result.Endpoints[index].StatusCode = collected.response.StatusCode

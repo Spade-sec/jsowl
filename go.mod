@@ -12,6 +12,7 @@ require (
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/enetx/g v1.0.202 // indirect
 	github.com/enetx/http v1.0.24 // indirect
 	github.com/enetx/http2 v1.0.24 // indirect

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>JsOwl 安全信息收集报告</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b1020;--panel:#151c31;--line:#29334f;--text:#e8edf8;--muted:#9aa8c7;--accent:#79d7ff;--warn:#ffcb6b}
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif}
+    main{max-width:1400px;margin:auto;padding:28px}.warning{padding:14px;border:1px solid #806c32;background:#332d18;color:var(--warn);border-radius:10px}
+    .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0}.card,section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+    .number{font-size:28px;color:var(--accent)}section{margin:16px 0;overflow:auto}table{width:100%;border-collapse:collapse;min-width:800px}
+    th,td{padding:9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}code{white-space:pre-wrap;word-break:break-all;color:#d8f3ff}
+    .muted{color:var(--muted)}select{background:var(--bg);color:var(--text);border:1px solid var(--line);padding:7px;border-radius:6px}
+  </style>
+</head>
+<body>
+<main>
+  <h1>JsOwl 安全信息收集报告</h1>
+  <p class="warning">警告：本报告包含完整敏感信息，请限制访问并安全保存。</p>
+  <p><strong>目标：</strong><code>{{.Target}}</code></p>
+  <p class="muted">模式：{{.Mode}} · User-Agent：{{.UserAgent}}</p>
+  {{if .BrowserStatus.Attempted}}<p>浏览器：{{if .BrowserStatus.Used}}已使用{{else}}未使用{{end}}{{if .BrowserStatus.Degraded}} · 已降级：{{.BrowserStatus.Reason}}{{end}}</p>{{end}}
+  <div class="cards">
+    <div class="card"><div class="number">{{.Statistics.Resources}}</div>资源</div>
+    <div class="card"><div class="number">{{.Statistics.Scripts}}</div>脚本</div>
+    <div class="card"><div class="number">{{.Statistics.Chunks}}</div>Chunk</div>
+    <div class="card"><div class="number">{{.Statistics.Endpoints}}</div>端点</div>
+    <div class="card"><div class="number">{{.Statistics.Findings}}</div>发现</div>
+  </div>
+  <section>
+    <h2>敏感信息与 URL 发现</h2>
+    <label>严重性 <select id="severity"><option value="">全部</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>info</option></select></label>
+    <table id="findings"><thead><tr><th>规则</th><th>严重性</th><th>完整值</th><th>来源</th><th>位置</th></tr></thead><tbody>
+    {{range .Findings}}<tr data-severity="{{.Severity}}"><td>{{.RuleName}}<br><span class="muted">{{.RuleID}}</span></td><td>{{.Severity}}</td><td><code>{{.Value}}</code></td><td><code>{{.SourceURL}}</code></td><td>{{.Line}}:{{.Column}}</td></tr>{{end}}
+    </tbody></table>
+  </section>
+  <section><h2>API 与路由</h2><table><thead><tr><th>URL</th><th>来源</th><th>授权</th><th>GET 状态</th></tr></thead><tbody>
+    {{range .Endpoints}}<tr><td><code>{{.URL}}</code></td><td><code>{{.SourceURL}}</code></td><td>{{.Authorized}}</td><td>{{.StatusCode}}</td></tr>{{end}}
+  </tbody></table></section>
+  <section><h2>资源</h2><table><thead><tr><th>类型</th><th>URL</th><th>状态</th><th>大小</th><th>本地路径</th></tr></thead><tbody>
+    {{range .Resources}}<tr><td>{{.Type}}</td><td><code>{{.URL}}</code></td><td>{{.StatusCode}}</td><td>{{.Size}}</td><td><code>{{.LocalPath}}</code></td></tr>{{end}}
+  </tbody></table></section>
+  <section><h2>诊断</h2><table><thead><tr><th>代码</th><th>阶段</th><th>URL</th><th>消息</th></tr></thead><tbody>
+    {{range .Issues}}<tr><td>{{.Code}}</td><td>{{.Stage}}</td><td><code>{{.URL}}</code></td><td>{{.Message}}</td></tr>{{end}}
+  </tbody></table></section>
+</main>
+<script>
+document.getElementById("severity").addEventListener("change",function(){
+  document.querySelectorAll("#findings tbody tr").forEach(row=>{
+    row.hidden=this.value!==""&&row.dataset.severity!==this.value;
+  });
+});
+</script>
+</body>
+</html>
