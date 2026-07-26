@@ -92,6 +92,7 @@ type RulesConfig struct {
 	Custom   []Rule   `yaml:"custom" json:"custom"`
 }
 
+// Config contains every library and CLI scan setting.
 type Config struct {
 	Mode        Mode              `yaml:"mode" json:"mode"`
 	Request     RequestConfig     `yaml:"request" json:"request"`
@@ -103,12 +104,14 @@ type Config struct {
 	Rules       RulesConfig       `yaml:"rules" json:"rules"`
 }
 
+// Target describes one isolated scan target and its request state.
 type Target struct {
 	URL     string         `json:"url"`
 	Headers http.Header    `json:"headers,omitempty"`
 	Cookies []*http.Cookie `json:"-"`
 }
 
+// Rule defines one compiled URL or sensitive-information extraction pattern.
 type Rule struct {
 	ID          string       `yaml:"id" json:"id"`
 	Name        string       `yaml:"name" json:"name"`
@@ -146,6 +149,7 @@ type Endpoint struct {
 	StatusCode int    `json:"status_code,omitempty"`
 }
 
+// Finding records one rule match and its source location.
 type Finding struct {
 	RuleID    string       `json:"rule_id"`
 	RuleName  string       `json:"rule_name"`
@@ -158,6 +162,7 @@ type Finding struct {
 	Context   string       `json:"context"`
 }
 
+// Issue records a non-fatal resource error or diagnostic event.
 type Issue struct {
 	Code      string `json:"code"`
 	Stage     string `json:"stage"`
@@ -174,6 +179,7 @@ type Statistics struct {
 	Findings  int `json:"findings"`
 }
 
+// Result is the deterministic, serializable output of one target scan.
 type Result struct {
 	Target        string        `json:"target"`
 	StartedAt     time.Time     `json:"started_at"`

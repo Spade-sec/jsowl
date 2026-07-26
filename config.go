@@ -18,10 +18,12 @@ const (
 	ModeBrowser = model.ModeBrowser
 )
 
+// DefaultConfig returns a complete, bounded configuration suitable for auto mode.
 func DefaultConfig() Config {
 	return model.DefaultConfig()
 }
 
+// LoadConfig loads a strict YAML file on top of DefaultConfig and validates it.
 func LoadConfig(path string) (Config, error) {
 	return model.LoadConfig(path)
 }

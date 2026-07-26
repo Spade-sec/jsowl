@@ -13,6 +13,7 @@ var desktop = []string{
 	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
 }
 
+// ForTarget resolves header and configured overrides before selecting a random desktop UA.
 func ForTarget(configured string, headers http.Header, random io.Reader) (string, error) {
 	if value := headers.Get("User-Agent"); value != "" {
 		return value, nil

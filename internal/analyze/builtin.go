@@ -2,6 +2,7 @@ package analyze
 
 import "github.com/youmulijiang/jsowl/internal/model"
 
+// BuiltinRules returns the RE2-compatible rules shipped with JsOwl.
 func BuiltinRules() []model.Rule {
 	return []model.Rule{
 		urlRule(

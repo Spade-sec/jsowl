@@ -11,6 +11,7 @@ import (
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
+// Scope decides which normalized URLs may be fetched as scripts or probed as endpoints.
 type Scope struct {
 	root        *url.URL
 	config      model.ScopeConfig
@@ -18,6 +19,7 @@ type Scope struct {
 	allowSuffix []string
 }
 
+// New builds an authorization scope rooted at one HTTP or HTTPS target.
 func New(root *url.URL, config model.ScopeConfig) (*Scope, error) {
 	if err := validateHTTPURL(root); err != nil {
 		return nil, fmt.Errorf("root URL: %w", err)
@@ -46,6 +48,7 @@ func New(root *url.URL, config model.ScopeConfig) (*Scope, error) {
 	return s, nil
 }
 
+// Resolve converts a URL reference to an absolute HTTP(S) URL and rejects credentials.
 func (s *Scope) Resolve(raw string, base *url.URL) (*url.URL, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -68,6 +71,7 @@ func (s *Scope) Resolve(raw string, base *url.URL) (*url.URL, error) {
 	return resolved, nil
 }
 
+// CanFetchScript reports whether a script URL is permitted by the external-script policy.
 func (s *Scope) CanFetchScript(candidate *url.URL) bool {
 	if validateHTTPURL(candidate) != nil {
 		return false
@@ -75,6 +79,7 @@ func (s *Scope) CanFetchScript(candidate *url.URL) bool {
 	return sameOrigin(s.root, candidate) || s.config.FetchExternalScripts
 }
 
+// CanProbe reports whether an endpoint URL is same-origin or explicitly authorized.
 func (s *Scope) CanProbe(candidate *url.URL) bool {
 	if validateHTTPURL(candidate) != nil {
 		return false
@@ -94,6 +99,7 @@ func (s *Scope) CanProbe(candidate *url.URL) bool {
 	return false
 }
 
+// Canonical returns a stable URL string for queue and result deduplication.
 func Canonical(candidate *url.URL) string {
 	if candidate == nil {
 		return ""

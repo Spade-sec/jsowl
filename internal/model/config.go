@@ -12,6 +12,7 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
+// DefaultConfig returns the canonical internal defaults used by the library and CLI.
 func DefaultConfig() Config {
 	return Config{
 		Mode: ModeAuto,
@@ -49,6 +50,7 @@ func DefaultConfig() Config {
 	}
 }
 
+// LoadConfig decodes a strict YAML configuration while preserving unspecified defaults.
 func LoadConfig(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -79,6 +81,7 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
+// Validate rejects configuration values that could disable scan safety bounds.
 func (c Config) Validate() error {
 	if c.Mode != ModeAuto && c.Mode != ModeDirect && c.Mode != ModeBrowser {
 		return fmt.Errorf("invalid mode %q", c.Mode)

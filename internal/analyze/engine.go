@@ -13,11 +13,13 @@ import (
 
 const contextRadius = 160
 
+// ResourceRef identifies the source being analyzed without retaining its body.
 type ResourceRef struct {
 	URL  string
 	Type model.ResourceType
 }
 
+// Candidate records a URL-like rule capture and its byte offset.
 type Candidate struct {
 	Raw    string
 	RuleID string
@@ -29,10 +31,12 @@ type compiledRule struct {
 	re   *regexp.Regexp
 }
 
+// Engine owns an immutable, compiled set of extraction rules.
 type Engine struct {
 	rules []compiledRule
 }
 
+// New compiles built-in and custom rules after applying disabled rule IDs.
 func New(custom []model.Rule, disabled []string) (*Engine, error) {
 	disabledSet := make(map[string]struct{}, len(disabled))
 	for _, id := range disabled {
@@ -82,6 +86,7 @@ func New(custom []model.Rule, disabled []string) (*Engine, error) {
 	return engine, nil
 }
 
+// Analyze extracts stable, deduplicated findings and URL candidates from one body.
 func (e *Engine) Analyze(source ResourceRef, body []byte) ([]model.Finding, []Candidate) {
 	type locatedFinding struct {
 		finding model.Finding
