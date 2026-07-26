@@ -40,7 +40,7 @@ func New(config model.BrowserConfig) (*Collector, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read browser collector script: %w", err)
 		}
-		script = string(data)
+		script += "\n" + string(data)
 	}
 	return &Collector{config: config, script: script}, nil
 }

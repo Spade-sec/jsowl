@@ -6,13 +6,32 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
+
+func TestNewCombinesCustomAndEmbeddedCollectorScripts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "collect_resource_urls.js")
+	const marker = `window.__customCollectorLoaded = true;`
+	if err := os.WriteFile(path, []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	collector, err := New(model.BrowserConfig{CollectorScript: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(collector.script, "__jsowlCollector") ||
+		!strings.Contains(collector.script, marker) {
+		t.Fatalf("combined collector script = %q", collector.script)
+	}
+}
 
 func TestCollectorCapturesDynamicResourceURLs(t *testing.T) {
 	bin, found := launcher.LookPath()

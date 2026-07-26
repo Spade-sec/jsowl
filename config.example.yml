@@ -10,11 +10,14 @@ request:
   cookies: {}
 
 browser:
+  # 留空时只搜索已安装的本地 Chrome/Chromium，永不自动下载。
   path: ""
+  # 页面 load 与网络空闲后，继续等待异步 JavaScript 的时间。
   wait: 3s
   idle: 800ms
   timeout: 45s
   headless: true
+  # 可覆盖为 collect_resource_urls.js 的绝对路径。
   collector_script: ""
   disable_injection: false
 
@@ -36,6 +39,7 @@ output:
   directory: ./jsowl-report
   json: true
   html: true
+  # 只保存普通 JavaScript 和 chunk；API 正文不会保存。
   download_js: false
   js_directory: js
 

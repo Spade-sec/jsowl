@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -97,6 +99,62 @@ func (c Config) Validate() error {
 	}
 	if c.Limits.MaxDepth < 0 || c.Limits.MaxResources <= 0 || c.Limits.MaxBodySize <= 0 {
 		return errors.New("resource limits are invalid")
+	}
+	if err := validateProxy(c.Request.Proxy); err != nil {
+		return err
+	}
+	for _, domain := range c.Scope.AllowDomains {
+		if err := validateAllowDomain(domain); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateProxy(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	proxyURL, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid request proxy: %w", err)
+	}
+	switch strings.ToLower(proxyURL.Scheme) {
+	case "http", "https", "socks5":
+	default:
+		return fmt.Errorf("invalid request proxy scheme %q", proxyURL.Scheme)
+	}
+	if proxyURL.Hostname() == "" {
+		return errors.New("request proxy host is empty")
+	}
+	return nil
+}
+
+func validateAllowDomain(raw string) error {
+	domain := strings.ToLower(strings.TrimSpace(raw))
+	domain = strings.TrimSuffix(domain, ".")
+	if strings.HasPrefix(domain, ".") {
+		domain = strings.TrimPrefix(domain, ".")
+	}
+	if domain == "" || len(domain) > 253 {
+		return fmt.Errorf("invalid allowlist domain %q", raw)
+	}
+	if net.ParseIP(domain) != nil {
+		return nil
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || len(label) > 63 ||
+			label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("invalid allowlist domain %q", raw)
+		}
+		for _, character := range label {
+			if character >= 'a' && character <= 'z' ||
+				character >= '0' && character <= '9' ||
+				character == '-' {
+				continue
+			}
+			return fmt.Errorf("invalid allowlist domain %q", raw)
+		}
 	}
 	return nil
 }

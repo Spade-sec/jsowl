@@ -99,3 +99,28 @@ func TestConfigValidateRejectsUnsafeBounds(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigValidateRejectsMalformedProxyAndAllowlist(t *testing.T) {
+	for name, mutate := range map[string]func(*Config){
+		"proxy scheme": func(config *Config) {
+			config.Request.Proxy = "file:///tmp/proxy"
+		},
+		"proxy host": func(config *Config) {
+			config.Request.Proxy = "http://"
+		},
+		"allowlist wildcard": func(config *Config) {
+			config.Scope.AllowDomains = []string{"*.example.test"}
+		},
+		"allowlist label": func(config *Config) {
+			config.Scope.AllowDomains = []string{"bad label.example"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config := DefaultConfig()
+			mutate(&config)
+			if err := config.Validate(); err == nil {
+				t.Fatal("Validate() error = nil")
+			}
+		})
+	}
+}
