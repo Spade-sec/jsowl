@@ -37,6 +37,9 @@ jsowl -u https://example.com -c config.yml
 jsowl -u https://example.com -o reports
 jsowl -u https://example.com -m direct
 jsowl -u https://example.com -t 32
+jsowl -u https://example.com -p http://127.0.0.1:8080
+jsowl -u https://example.com --base-url https://static.example.com/assets/
+jsowl -u https://example.com --silent
 jsowl -u https://example.com -H "Authorization: Bearer token"
 jsowl --check -c config.yml
 jsowl -v
@@ -52,8 +55,11 @@ jsowl -h
 | `-c, --config` | YAML 配置文件 |
 | `-o, --output` | 覆盖报告目录 |
 | `-m, --mode` | `auto`、`direct` 或 `browser` |
+| `-p, --proxy` | 覆盖 Surf 与 Rod 使用的 HTTP(S)/SOCKS5 代理 |
+| `--base-url` | 覆盖发现的相对 script、chunk、API 和 route 的解析基准 |
 | `-H, --header` | `Name: value` 请求头，可重复 |
 | `-t, --threads` | 覆盖单目标资源并发数 |
+| `-s, --silent` | 不输出成功结果行，错误仍输出到 stderr |
 | `-v, --version` | 显示版本 |
 | `--check` | 检查配置、规则、输出目录、本地浏览器、CDP、JS 与注入快照 |
 
@@ -88,6 +94,7 @@ limits:
   max_body_size: 10MiB
 scope:
   allow_domains: []
+  suffix_blacklist: [.png, .jpg, .woff2, .mp4, .zip]
   fetch_external_scripts: true
   probe_external_endpoints: false
 output:
@@ -103,6 +110,11 @@ Rod 的路径、等待、网络空闲、超时、窗口模式和注入脚本只�
 JsOwl 始终显式解析本地浏览器路径，并禁用了 Rod 的自动下载路径。找不到 Chrome/Chromium 时，`browser` 模式返回错误，`auto` 模式降级到 Surf。
 
 `request.proxy` 同时用于 Surf 与 Rod。目标初始 Cookie 会在导航前写入浏览器，Rod 运行时产生的 Cookie 会同步回 Surf，用于后续脚本、chunk 和 API GET。
+
+`--base-url` 不会替换入口目标，只改变相对资源和 API 的解析基准。绝对
+URL 保持原值。`scope.suffix_blacklist` 在请求入队前按 URL path 过滤，
+忽略后缀大小写、query 和 fragment；`.js`、`.json`、`.map`、`.txt`、
+`.xml`、`.svg` 与 `.css` 默认不会过滤。
 
 上述 GET 限制针对 JsOwl 主动发起的 API 探测。Rod 会按站点原生行为执行页面 JavaScript，不改写或阻断页面自身的请求方法，因此目标脚本本身可能发出 POST 等请求。
 
@@ -120,6 +132,15 @@ browser:
 内置收集器是该脚本的增强版，会在页面脚本之前注入，并合并 fetch、XHR、MutationObserver、DOM、Performance API 与 CDP 网络响应。
 
 ## 输出
+
+默认每个成功目标输出一行：
+
+```text
+https://example.com/ [18240] [200] [text/html; charset=utf-8]
+```
+
+依次为 URL、响应体长度、状态码和 Content-Type。使用 `--silent` 可关闭
+成功行输出，但报告写入和 stderr 错误输出不受影响。
 
 ```text
 jsowl-report/

@@ -42,6 +42,15 @@ func DefaultConfig() Config {
 		},
 		Scope: ScopeConfig{
 			FetchExternalScripts: true,
+			SuffixBlacklist: []string{
+				".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
+				".bmp", ".tif", ".tiff",
+				".woff", ".woff2", ".ttf", ".otf", ".eot",
+				".mp3", ".wav", ".ogg", ".flac",
+				".mp4", ".webm", ".avi", ".mov", ".mkv",
+				".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
+				".pdf", ".wasm", ".exe", ".dll", ".dmg", ".iso",
+			},
 		},
 		Output: OutputConfig{
 			Directory:   "./jsowl-report",
@@ -107,6 +116,20 @@ func (c Config) Validate() error {
 		if err := validateAllowDomain(domain); err != nil {
 			return err
 		}
+	}
+	for _, suffix := range c.Scope.SuffixBlacklist {
+		if err := validateSuffix(suffix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSuffix(raw string) error {
+	suffix := strings.TrimSpace(raw)
+	suffix = strings.TrimPrefix(suffix, ".")
+	if suffix == "" || strings.ContainsAny(suffix, `/\?#`) {
+		return fmt.Errorf("invalid suffix blacklist entry %q", raw)
 	}
 	return nil
 }

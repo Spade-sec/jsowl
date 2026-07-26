@@ -69,6 +69,9 @@ func cloneConfig(config model.Config) model.Config {
 	cloned.Scope.AllowDomains = append(
 		[]string(nil), config.Scope.AllowDomains...,
 	)
+	cloned.Scope.SuffixBlacklist = append(
+		[]string(nil), config.Scope.SuffixBlacklist...,
+	)
 	cloned.Rules.Disabled = append(
 		[]string(nil), config.Rules.Disabled...,
 	)

@@ -41,8 +41,11 @@ type options struct {
 	config  string
 	output  string
 	mode    string
+	proxy   string
+	baseURL string
 	headers []string
 	threads int
+	silent  bool
 	version bool
 	check   bool
 }
@@ -82,7 +85,12 @@ func newRootCommand(deps dependencies) *cobra.Command {
 			if len(targets) == 0 {
 				return errors.New("at least one target is required; use -u or -l")
 			}
-			return runScans(command.Context(), deps, config, targets)
+			if err := applyBaseURL(targets, opts.baseURL); err != nil {
+				return err
+			}
+			return runScans(
+				command.Context(), deps, config, targets, opts.silent,
+			)
 		},
 	}
 	command.SetOut(deps.stdout)
@@ -93,8 +101,11 @@ func newRootCommand(deps dependencies) *cobra.Command {
 	flags.StringVarP(&opts.config, "config", "c", "", "YAML configuration file")
 	flags.StringVarP(&opts.output, "output", "o", "", "report output directory")
 	flags.StringVarP(&opts.mode, "mode", "m", "", "auto, direct, or browser")
+	flags.StringVarP(&opts.proxy, "proxy", "p", "", "HTTP(S) or SOCKS5 proxy URL")
+	flags.StringVar(&opts.baseURL, "base-url", "", "base URL for relative discoveries")
 	flags.StringArrayVarP(&opts.headers, "header", "H", nil, "request header Name: value")
 	flags.IntVarP(&opts.threads, "threads", "t", 0, "per-target resource concurrency")
+	flags.BoolVarP(&opts.silent, "silent", "s", false, "suppress successful result lines")
 	flags.BoolVarP(&opts.version, "version", "v", false, "print version")
 	flags.BoolVar(&opts.check, "check", false, "check config, rules, and browser")
 	return command
@@ -179,6 +190,9 @@ func applyOverrides(
 	if command.Flags().Changed("threads") {
 		config.Concurrency.ResourcesPerTarget = opts.threads
 	}
+	if command.Flags().Changed("proxy") {
+		config.Request.Proxy = opts.proxy
+	}
 	if config.Request.Headers == nil {
 		config.Request.Headers = make(map[string]string)
 	}
@@ -195,6 +209,23 @@ func applyOverrides(
 		config.Request.Headers[name] = value
 	}
 	return config.Validate()
+}
+
+func applyBaseURL(targets []jsowl.Target, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	base, err := url.Parse(raw)
+	if err != nil || !base.IsAbs() || base.Host == "" ||
+		(base.Scheme != "http" && base.Scheme != "https") ||
+		base.User != nil {
+		return fmt.Errorf("invalid base URL %q", raw)
+	}
+	for index := range targets {
+		targets[index].BaseURL = base.String()
+	}
+	return nil
 }
 
 func parseHeader(raw string) (string, string, error) {
@@ -298,6 +329,7 @@ func runScans(
 	deps dependencies,
 	config jsowl.Config,
 	targets []jsowl.Target,
+	silent bool,
 ) error {
 	if err := deps.ensureOutput(config.Output.Directory); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
@@ -319,12 +351,40 @@ func runScans(
 			_, _ = fmt.Fprintf(deps.stderr, "%s: %v\n", item.Target.URL, item.Err)
 			continue
 		}
-		_, _ = fmt.Fprintf(deps.stdout, "[done] %s\n", item.Target.URL)
+		if !silent {
+			_, _ = fmt.Fprintln(deps.stdout, formatResultLine(item.Result))
+		}
 	}
 	if failures > 0 {
 		return fmt.Errorf("%d target or report task(s) failed", failures)
 	}
 	return nil
+}
+
+func formatResultLine(result *jsowl.Result) string {
+	if result == nil {
+		return ""
+	}
+	targetURL := result.Target
+	var size int64
+	var statusCode int
+	var contentType string
+	for _, resource := range result.Resources {
+		if resource.Type != jsowl.ResourceTypeDocument || resource.Depth != 0 {
+			continue
+		}
+		if targetURL == "" {
+			targetURL = resource.URL
+		}
+		size = resource.Size
+		statusCode = resource.StatusCode
+		contentType = resource.ContentType
+		break
+	}
+	return fmt.Sprintf(
+		"%s [%d] [%d] [%s]",
+		targetURL, size, statusCode, contentType,
+	)
 }
 
 func writeReports(

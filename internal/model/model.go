@@ -76,6 +76,7 @@ type LimitsConfig struct {
 
 type ScopeConfig struct {
 	AllowDomains           []string `yaml:"allow_domains" json:"allow_domains"`
+	SuffixBlacklist        []string `yaml:"suffix_blacklist" json:"suffix_blacklist"`
 	FetchExternalScripts   bool     `yaml:"fetch_external_scripts" json:"fetch_external_scripts"`
 	ProbeExternalEndpoints bool     `yaml:"probe_external_endpoints" json:"probe_external_endpoints"`
 }
@@ -108,6 +109,7 @@ type Config struct {
 // Target describes one isolated scan target and its request state.
 type Target struct {
 	URL     string         `json:"url"`
+	BaseURL string         `json:"base_url,omitempty"`
 	Headers http.Header    `json:"headers,omitempty"`
 	Cookies []*http.Cookie `json:"-"`
 }

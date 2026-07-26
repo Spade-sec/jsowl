@@ -14,6 +14,7 @@ import (
 
 type fakeScanner struct {
 	targets []jsowl.Target
+	result  *jsowl.Result
 }
 
 func (f *fakeScanner) ScanBatch(
@@ -23,9 +24,13 @@ func (f *fakeScanner) ScanBatch(
 	f.targets = append([]jsowl.Target(nil), targets...)
 	output := make(chan jsowl.BatchItem, len(targets))
 	for _, target := range targets {
+		result := f.result
+		if result == nil {
+			result = &jsowl.Result{Target: target.URL}
+		}
 		output <- jsowl.BatchItem{
 			Target: target,
-			Result: &jsowl.Result{Target: target.URL},
+			Result: result,
 		}
 	}
 	close(output)
@@ -55,6 +60,8 @@ func TestRootFlagsOverrideConfigAndMergeTargets(t *testing.T) {
 		"-l", list,
 		"-m", "direct",
 		"-t", "32",
+		"-p", "socks5://127.0.0.1:1080",
+		"--base-url", "https://static.example/assets/",
 		"-o", t.TempDir(),
 		"-H", "Authorization: Bearer abc",
 		"-H", "X-Test: one:two",
@@ -68,6 +75,9 @@ func TestRootFlagsOverrideConfigAndMergeTargets(t *testing.T) {
 	if captured.Concurrency.ResourcesPerTarget != 32 {
 		t.Fatalf("threads = %d", captured.Concurrency.ResourcesPerTarget)
 	}
+	if captured.Request.Proxy != "socks5://127.0.0.1:1080" {
+		t.Fatalf("proxy = %q", captured.Request.Proxy)
+	}
 	if captured.Request.Headers["Authorization"] != "Bearer abc" ||
 		captured.Request.Headers["X-Test"] != "one:two" {
 		t.Fatalf("headers = %#v", captured.Request.Headers)
@@ -75,8 +85,55 @@ func TestRootFlagsOverrideConfigAndMergeTargets(t *testing.T) {
 	if len(fake.targets) != 2 {
 		t.Fatalf("targets = %#v", fake.targets)
 	}
+	for _, target := range fake.targets {
+		if target.BaseURL != "https://static.example/assets/" {
+			t.Errorf("target BaseURL = %q", target.BaseURL)
+		}
+	}
 	if len(command.Commands()) != 0 {
 		t.Fatalf("root command unexpectedly has subcommands: %#v", command.Commands())
+	}
+}
+
+func TestRootPrintsHTTPXStyleResultLine(t *testing.T) {
+	var output bytes.Buffer
+	deps := testDependencies()
+	deps.stdout = &output
+	deps.newScanner = func(jsowl.Config) (scanService, error) {
+		return &fakeScanner{result: &jsowl.Result{
+			Target: "https://example.test/",
+			Resources: []jsowl.Resource{{
+				URL:         "https://example.test/",
+				Type:        jsowl.ResourceTypeDocument,
+				StatusCode:  201,
+				ContentType: "text/html; charset=utf-8",
+				Size:        321,
+				Depth:       0,
+			}},
+		}}, nil
+	}
+	command := newRootCommand(deps)
+	command.SetArgs([]string{"-u", "https://example.test"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	want := "https://example.test/ [321] [201] [text/html; charset=utf-8]\n"
+	if output.String() != want {
+		t.Fatalf("stdout = %q, want %q", output.String(), want)
+	}
+}
+
+func TestRootSilentSuppressesSuccessfulResultLines(t *testing.T) {
+	var output bytes.Buffer
+	deps := testDependencies()
+	deps.stdout = &output
+	command := newRootCommand(deps)
+	command.SetArgs([]string{"-u", "https://example.test", "--silent"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if output.Len() != 0 {
+		t.Fatalf("silent stdout = %q", output.String())
 	}
 }
 

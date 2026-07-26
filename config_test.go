@@ -3,6 +3,7 @@ package jsowl
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,16 @@ func TestDefaultConfigProvidesBoundedScanDefaults(t *testing.T) {
 	}
 	if cfg.Output.DownloadJS {
 		t.Fatal("Output.DownloadJS = true, want false")
+	}
+	for _, suffix := range []string{".png", ".woff2", ".mp4", ".zip"} {
+		if !slices.Contains(cfg.Scope.SuffixBlacklist, suffix) {
+			t.Errorf("default suffix blacklist does not contain %q", suffix)
+		}
+	}
+	for _, suffix := range []string{".js", ".json", ".svg", ".css"} {
+		if slices.Contains(cfg.Scope.SuffixBlacklist, suffix) {
+			t.Errorf("default suffix blacklist unexpectedly contains %q", suffix)
+		}
 	}
 }
 

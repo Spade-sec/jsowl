@@ -121,6 +121,28 @@ func TestProbeExternalEndpointsRequiresExplicitOptIn(t *testing.T) {
 	}
 }
 
+func TestSuffixBlacklistIgnoresCaseAndQuery(t *testing.T) {
+	root := parseURL(t, "https://example.com")
+	s, err := New(root, model.ScopeConfig{
+		SuffixBlacklist: []string{"png", ".WOFF2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, raw := range []string{
+		"https://example.com/logo.PNG?cache=1",
+		"https://example.com/font.woff2#fragment",
+	} {
+		if !s.IsSuffixBlocked(parseURL(t, raw)) {
+			t.Errorf("IsSuffixBlocked(%q) = false", raw)
+		}
+	}
+	if s.IsSuffixBlocked(parseURL(t, "https://example.com/app.js?image=.png")) {
+		t.Fatal("query string incorrectly triggered suffix blacklist")
+	}
+}
+
 func parseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	parsed, err := url.Parse(raw)

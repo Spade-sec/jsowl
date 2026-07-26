@@ -79,6 +79,19 @@ func (p *Pipeline) RunDetailed(
 	if err != nil {
 		return nil, discover.SPAEvidence{}, err
 	}
+	resolutionBase := root
+	if strings.TrimSpace(target.BaseURL) != "" {
+		parsedBase, parseErr := url.Parse(target.BaseURL)
+		if parseErr != nil || !parsedBase.IsAbs() || parsedBase.Host == "" {
+			return nil, discover.SPAEvidence{}, fmt.Errorf(
+				"invalid base URL %q", target.BaseURL,
+			)
+		}
+		resolutionBase, err = targetScope.Resolve(target.BaseURL, root)
+		if err != nil {
+			return nil, discover.SPAEvidence{}, fmt.Errorf("base URL: %w", err)
+		}
+	}
 
 	result := &model.Result{
 		Target:    scope.Canonical(root),
@@ -100,6 +113,9 @@ func (p *Pipeline) RunDetailed(
 	for _, seed := range seeds {
 		seedURL, parseErr := url.Parse(seed.URL)
 		if parseErr != nil {
+			continue
+		}
+		if targetScope.IsSuffixBlocked(seedURL) {
 			continue
 		}
 		allowed := seed.Kind == model.ResourceTypeScript &&
@@ -135,7 +151,9 @@ func (p *Pipeline) RunDetailed(
 			return result, spa, err
 		}
 		batch := queue.Take(p.options.Config.Concurrency.ResourcesPerTarget)
-		outcomes := p.collectBatch(ctx, batch, headers, entry, root)
+		outcomes := p.collectBatch(
+			ctx, batch, headers, entry, root, resolutionBase,
+		)
 		for _, collected := range outcomes {
 			if collected.err != nil {
 				if contextErr := ctx.Err(); contextErr != nil {
@@ -217,8 +235,17 @@ func (p *Pipeline) RunDetailed(
 				continue
 			}
 			for _, candidate := range collected.candidates {
-				resolved, resolveErr := targetScope.Resolve(candidate.Raw, base)
+				candidateBase := base
+				if resolutionBase != root && isRelativeReference(candidate.Raw) {
+					candidateBase = resolutionBase
+				}
+				resolved, resolveErr := targetScope.Resolve(
+					candidate.Raw, candidateBase,
+				)
 				if resolveErr != nil {
+					continue
+				}
+				if targetScope.IsSuffixBlocked(resolved) {
 					continue
 				}
 				canonical := scope.Canonical(resolved)
@@ -287,6 +314,7 @@ func (p *Pipeline) collectBatch(
 	headers http.Header,
 	entry *collect.Response,
 	root *url.URL,
+	resolutionBase *url.URL,
 ) []outcome {
 	outcomes := make([]outcome, len(batch))
 	var wait sync.WaitGroup
@@ -294,7 +322,9 @@ func (p *Pipeline) collectBatch(
 	for index, item := range batch {
 		go func() {
 			defer wait.Done()
-			outcomes[index] = p.collectOne(ctx, item, headers, entry, root)
+			outcomes[index] = p.collectOne(
+				ctx, item, headers, entry, root, resolutionBase,
+			)
 		}()
 	}
 	wait.Wait()
@@ -307,6 +337,7 @@ func (p *Pipeline) collectOne(
 	headers http.Header,
 	entry *collect.Response,
 	root *url.URL,
+	resolutionBase *url.URL,
 ) outcome {
 	target, err := url.Parse(item.URL)
 	if err != nil {
@@ -331,6 +362,10 @@ func (p *Pipeline) collectOne(
 	if err != nil {
 		return result
 	}
+	discoveryBase := source
+	if resolutionBase != root {
+		discoveryBase = resolutionBase
+	}
 	contentType := response.Header.Get("Content-Type")
 	if parsed, _, parseErr := mime.ParseMediaType(contentType); parseErr == nil {
 		contentType = parsed
@@ -338,7 +373,7 @@ func (p *Pipeline) collectOne(
 
 	switch {
 	case item.Kind == model.ResourceTypeDocument || strings.Contains(contentType, "html"):
-		htmlResult := discover.FromHTML(source, response.Body)
+		htmlResult := discover.FromHTML(discoveryBase, response.Body)
 		mergeSPAEvidence(&result.spa, htmlResult.SPA)
 		result.candidates = append(result.candidates, htmlResult.Candidates...)
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
@@ -359,11 +394,19 @@ func (p *Pipeline) collectOne(
 		result.candidates = append(result.candidates, jsResult.Candidates...)
 		result.candidates = append(
 			result.candidates,
-			discover.FromWebpack(source, response.Body, p.options.Config.Limits.MaxResources)...,
+			discover.FromWebpack(
+				discoveryBase,
+				response.Body,
+				p.options.Config.Limits.MaxResources,
+			)...,
 		)
 		result.candidates = append(
 			result.candidates,
-			discover.FromRequireJS(source, response.Body, p.options.Config.Limits.MaxResources)...,
+			discover.FromRequireJS(
+				discoveryBase,
+				response.Body,
+				p.options.Config.Limits.MaxResources,
+			)...,
 		)
 	case isTextualContentType(contentType):
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
@@ -372,6 +415,11 @@ func (p *Pipeline) collectOne(
 		result.candidates = append(result.candidates, textResult.Candidates...)
 	}
 	return result
+}
+
+func isRelativeReference(raw string) bool {
+	reference, err := url.Parse(strings.TrimSpace(raw))
+	return err == nil && reference.Scheme == "" && reference.Host == ""
 }
 
 func isTextualContentType(contentType string) bool {

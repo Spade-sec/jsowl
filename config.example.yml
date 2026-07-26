@@ -34,6 +34,44 @@ limits:
 
 scope:
   allow_domains: []
+  # 请求队列会忽略 URL path 以这些后缀结尾的资源；匹配忽略大小写和 query。
+  suffix_blacklist:
+    - .png
+    - .jpg
+    - .jpeg
+    - .gif
+    - .webp
+    - .ico
+    - .bmp
+    - .tif
+    - .tiff
+    - .woff
+    - .woff2
+    - .ttf
+    - .otf
+    - .eot
+    - .mp3
+    - .wav
+    - .ogg
+    - .flac
+    - .mp4
+    - .webm
+    - .avi
+    - .mov
+    - .mkv
+    - .zip
+    - .rar
+    - .7z
+    - .tar
+    - .gz
+    - .bz2
+    - .xz
+    - .pdf
+    - .wasm
+    - .exe
+    - .dll
+    - .dmg
+    - .iso
   fetch_external_scripts: true
   probe_external_endpoints: false
 

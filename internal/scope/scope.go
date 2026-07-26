@@ -17,6 +17,7 @@ type Scope struct {
 	config      model.ScopeConfig
 	allowExact  map[string]struct{}
 	allowSuffix []string
+	blocked     []string
 }
 
 // New builds an authorization scope rooted at one HTTP or HTTPS target.
@@ -44,6 +45,13 @@ func New(root *url.URL, config model.ScopeConfig) (*Scope, error) {
 			continue
 		}
 		s.allowExact[host] = struct{}{}
+	}
+	for _, entry := range config.SuffixBlacklist {
+		suffix := strings.ToLower(strings.TrimSpace(entry))
+		if !strings.HasPrefix(suffix, ".") {
+			suffix = "." + suffix
+		}
+		s.blocked = append(s.blocked, suffix)
 	}
 	return s, nil
 }
@@ -93,6 +101,21 @@ func (s *Scope) CanProbe(candidate *url.URL) bool {
 	}
 	for _, suffix := range s.allowSuffix {
 		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsSuffixBlocked reports whether the URL path ends in a configured
+// case-insensitive suffix. Query parameters and fragments are ignored.
+func (s *Scope) IsSuffixBlocked(candidate *url.URL) bool {
+	if candidate == nil {
+		return false
+	}
+	candidatePath := strings.ToLower(candidate.Path)
+	for _, suffix := range s.blocked {
+		if strings.HasSuffix(candidatePath, suffix) {
 			return true
 		}
 	}

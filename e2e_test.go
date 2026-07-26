@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sync/atomic"
 	"testing"
 )
 
@@ -90,6 +91,106 @@ func TestEndToEndLibraryAndCLIWorkflow(t *testing.T) {
 	}
 	if !containsFinding(&cliResult, "secret.jwt") {
 		t.Fatalf("CLI JSON finding missing: %#v", cliResult.Findings)
+	}
+}
+
+func TestScannerSkipsBlacklistedCandidateSuffixes(t *testing.T) {
+	var blockedRequests atomic.Int32
+	var textRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case "/":
+			writer.Header().Set("Content-Type", "text/html")
+			_, _ = writer.Write([]byte(`<script>
+fetch("/api/export.PNG?cache=1");
+fetch("/api/data.json");
+</script>`))
+		case "/api/export.PNG":
+			blockedRequests.Add(1)
+			_, _ = writer.Write([]byte("image data"))
+		case "/api/data.json":
+			textRequests.Add(1)
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.Mode = ModeDirect
+	config.Output.JSON = false
+	config.Output.HTML = false
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scanner.Scan(context.Background(), Target{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if got := blockedRequests.Load(); got != 0 {
+		t.Fatalf("blacklisted PNG requests = %d, want 0", got)
+	}
+	if got := textRequests.Load(); got != 1 {
+		t.Fatalf("JSON requests = %d, want 1", got)
+	}
+}
+
+func TestScannerUsesBaseURLOnlyForRelativeCandidates(t *testing.T) {
+	var entryAPIRequests atomic.Int32
+	entry := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		if request.URL.Path == "/" {
+			writer.Header().Set("Content-Type", "text/html")
+			_, _ = writer.Write([]byte(`<script>fetch("/api/users")</script>`))
+			return
+		}
+		entryAPIRequests.Add(1)
+		http.NotFound(writer, request)
+	}))
+	defer entry.Close()
+
+	var baseAPIRequests atomic.Int32
+	base := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		if request.URL.Path == "/api/users" {
+			baseAPIRequests.Add(1)
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"ok":true}`))
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer base.Close()
+
+	config := DefaultConfig()
+	config.Mode = ModeDirect
+	config.Scope.ProbeExternalEndpoints = true
+	config.Output.JSON = false
+	config.Output.HTML = false
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = scanner.Scan(context.Background(), Target{
+		URL: entry.URL, BaseURL: base.URL + "/assets/",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := entryAPIRequests.Load(); got != 0 {
+		t.Fatalf("entry server relative API requests = %d, want 0", got)
+	}
+	if got := baseAPIRequests.Load(); got != 1 {
+		t.Fatalf("base server API requests = %d, want 1", got)
 	}
 }
 
