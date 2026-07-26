@@ -53,7 +53,11 @@ func Check(ctx context.Context, config model.BrowserConfig) CheckReport {
 	}
 	defer os.RemoveAll(userDataDir)
 
-	control, browserLauncher, err := launch(checkContext, config, bin, userDataDir)
+	checkConfig := config
+	checkConfig.Headless = true
+	control, browserLauncher, err := launch(
+		checkContext, checkConfig, bin, userDataDir,
+	)
 	if err != nil {
 		return appendFailure(report, "launch", err)
 	}
@@ -71,6 +75,13 @@ func Check(ctx context.Context, config model.BrowserConfig) CheckReport {
 	report.Checks = append(report.Checks, CheckItem{
 		Name: "cdp", Passed: true, Message: "DevTools protocol connected",
 	})
+	browserVersion, err := proto.BrowserGetVersion{}.Call(rodBrowser)
+	if err != nil {
+		return appendFailure(report, "browser_version", err)
+	}
+	report.Checks = append(report.Checks, CheckItem{
+		Name: "browser_version", Passed: true, Message: browserVersion.Product,
+	})
 
 	page, err := rodBrowser.Page(proto.TargetCreateTarget{})
 	if err != nil {
@@ -86,6 +97,27 @@ func Check(ctx context.Context, config model.BrowserConfig) CheckReport {
 	}
 	report.Checks = append(report.Checks, CheckItem{
 		Name: "javascript", Passed: true, Message: "JavaScript execution succeeded",
+	})
+	collector, err := New(config)
+	if err != nil {
+		return appendFailure(report, "collector", err)
+	}
+	removeScript, err := page.EvalOnNewDocument(collector.script)
+	if err != nil {
+		return appendFailure(report, "collector", err)
+	}
+	defer removeScript()
+	if err := page.Navigate("data:text/html,<main id=\"app\"></main>"); err != nil {
+		return appendFailure(report, "collector", err)
+	}
+	if err := page.WaitLoad(); err != nil {
+		return appendFailure(report, "collector", err)
+	}
+	if _, err := snapshotURLs(page, false); err != nil {
+		return appendFailure(report, "collector", err)
+	}
+	report.Checks = append(report.Checks, CheckItem{
+		Name: "collector", Passed: true, Message: "resource collector snapshot succeeded",
 	})
 	report.Passed = true
 	return report
