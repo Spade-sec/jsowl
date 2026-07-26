@@ -21,3 +21,22 @@ type Response struct {
 type Getter interface {
 	Get(context.Context, *url.URL, http.Header) (Response, error)
 }
+
+// NetworkRecord describes one response observed by a browser collector.
+type NetworkRecord struct {
+	URL         string
+	StatusCode  int
+	ContentType string
+}
+
+// BrowserResult contains the rendered document and resources observed at runtime.
+type BrowserResult struct {
+	HTML    []byte
+	URLs    []string
+	Network []NetworkRecord
+}
+
+// BrowserCollector renders one entry URL and observes its runtime resources.
+type BrowserCollector interface {
+	Collect(context.Context, *url.URL, http.Header) (BrowserResult, error)
+}
