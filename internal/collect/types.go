@@ -24,9 +24,10 @@ type Getter interface {
 
 // NetworkRecord describes one response observed by a browser collector.
 type NetworkRecord struct {
-	URL         string
-	StatusCode  int
-	ContentType string
+	URL          string
+	StatusCode   int
+	ContentType  string
+	ResourceType string
 }
 
 // BrowserResult contains the rendered document and resources observed at runtime.

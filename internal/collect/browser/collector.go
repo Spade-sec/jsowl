@@ -123,9 +123,10 @@ func (c *Collector) Collect(
 		}
 		networkMu.Lock()
 		network[event.Response.URL] = collect.NetworkRecord{
-			URL:         event.Response.URL,
-			StatusCode:  int(event.Response.Status),
-			ContentType: event.Response.MIMEType,
+			URL:          event.Response.URL,
+			StatusCode:   int(event.Response.Status),
+			ContentType:  event.Response.MIMEType,
+			ResourceType: string(event.Type),
 		}
 		networkMu.Unlock()
 	})

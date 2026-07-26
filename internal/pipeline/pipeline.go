@@ -30,12 +30,19 @@ type Pipeline struct {
 	options Options
 }
 
+// Seed describes one browser-observed URL to feed into the shared pipeline.
+type Seed struct {
+	URL  string
+	Kind model.ResourceType
+}
+
 type outcome struct {
 	item       scheduler.Item
 	response   collect.Response
 	err        error
 	findings   []model.Finding
 	candidates []discover.Candidate
+	spa        discover.SPAEvidence
 }
 
 // New constructs a direct resource pipeline.
@@ -49,13 +56,26 @@ func (p *Pipeline) Run(
 	target model.Target,
 	headers http.Header,
 ) (*model.Result, error) {
+	result, _, err := p.RunDetailed(ctx, target, headers, nil, nil)
+	return result, err
+}
+
+// RunDetailed runs the shared pipeline with optional browser-rendered entry
+// content and runtime URL seeds, returning aggregate SPA evidence.
+func (p *Pipeline) RunDetailed(
+	ctx context.Context,
+	target model.Target,
+	headers http.Header,
+	entry *collect.Response,
+	seeds []Seed,
+) (*model.Result, discover.SPAEvidence, error) {
 	root, err := url.Parse(target.URL)
 	if err != nil {
-		return nil, fmt.Errorf("parse target URL: %w", err)
+		return nil, discover.SPAEvidence{}, fmt.Errorf("parse target URL: %w", err)
 	}
 	targetScope, err := scope.New(root, p.options.Config.Scope)
 	if err != nil {
-		return nil, err
+		return nil, discover.SPAEvidence{}, err
 	}
 
 	result := &model.Result{
@@ -70,22 +90,53 @@ func (p *Pipeline) Run(
 		p.options.Config.Limits.MaxResources,
 		p.options.Config.Limits.MaxDepth,
 	)
+	endpointIndex := make(map[string]int)
 	queue.Add(scheduler.Item{
 		URL: scope.Canonical(root), Kind: model.ResourceTypeDocument,
 	})
+	for _, seed := range seeds {
+		seedURL, parseErr := url.Parse(seed.URL)
+		if parseErr != nil {
+			continue
+		}
+		allowed := seed.Kind == model.ResourceTypeScript &&
+			targetScope.CanFetchScript(seedURL)
+		if seed.Kind == model.ResourceTypeAPI {
+			allowed = targetScope.CanProbe(seedURL)
+		}
+		if !allowed {
+			continue
+		}
+		queue.Add(scheduler.Item{
+			URL:       scope.Canonical(seedURL),
+			Kind:      seed.Kind,
+			SourceURL: scope.Canonical(root),
+			Depth:     1,
+		})
+		if seed.Kind == model.ResourceTypeAPI {
+			canonical := scope.Canonical(seedURL)
+			if _, exists := endpointIndex[canonical]; !exists {
+				endpointIndex[canonical] = len(result.Endpoints)
+				result.Endpoints = append(result.Endpoints, model.Endpoint{
+					Raw: canonical, URL: canonical,
+					SourceURL: scope.Canonical(root), Authorized: true,
+				})
+			}
+		}
+	}
 
-	endpointIndex := make(map[string]int)
 	findingSeen := make(map[string]struct{})
+	var spa discover.SPAEvidence
 	for queue.Len() > 0 {
 		if err := ctx.Err(); err != nil {
-			return result, err
+			return result, spa, err
 		}
 		batch := queue.Take(p.options.Config.Concurrency.ResourcesPerTarget)
-		outcomes := p.collectBatch(ctx, batch, headers)
+		outcomes := p.collectBatch(ctx, batch, headers, entry)
 		for _, collected := range outcomes {
 			if collected.err != nil {
 				if collected.item.Depth == 0 {
-					return result, collected.err
+					return result, spa, collected.err
 				}
 				result.Issues = append(result.Issues, model.Issue{
 					Code:      "resource_get_failed",
@@ -96,6 +147,7 @@ func (p *Pipeline) Run(
 				})
 				continue
 			}
+			mergeSPAEvidence(&spa, collected.spa)
 
 			resource := model.Resource{
 				URL:         collected.response.URL,
@@ -184,13 +236,14 @@ func (p *Pipeline) Run(
 	}
 
 	finalize(result)
-	return result, nil
+	return result, spa, nil
 }
 
 func (p *Pipeline) collectBatch(
 	ctx context.Context,
 	batch []scheduler.Item,
 	headers http.Header,
+	entry *collect.Response,
 ) []outcome {
 	outcomes := make([]outcome, len(batch))
 	var wait sync.WaitGroup
@@ -198,7 +251,7 @@ func (p *Pipeline) collectBatch(
 	for index, item := range batch {
 		go func() {
 			defer wait.Done()
-			outcomes[index] = p.collectOne(ctx, item, headers)
+			outcomes[index] = p.collectOne(ctx, item, headers, entry)
 		}()
 	}
 	wait.Wait()
@@ -209,14 +262,20 @@ func (p *Pipeline) collectOne(
 	ctx context.Context,
 	item scheduler.Item,
 	headers http.Header,
+	entry *collect.Response,
 ) outcome {
 	target, err := url.Parse(item.URL)
 	if err != nil {
 		return outcome{item: item, err: err}
 	}
-	response, err := p.options.Getter.Get(ctx, target, headers)
-	if err != nil {
-		return outcome{item: item, err: err}
+	var response collect.Response
+	if entry != nil && item.Depth == 0 && item.Kind == model.ResourceTypeDocument {
+		response = *entry
+	} else {
+		response, err = p.options.Getter.Get(ctx, target, headers)
+		if err != nil {
+			return outcome{item: item, err: err}
+		}
 	}
 
 	result := outcome{item: item, response: response}
@@ -232,18 +291,22 @@ func (p *Pipeline) collectOne(
 	switch {
 	case item.Kind == model.ResourceTypeDocument || strings.Contains(contentType, "html"):
 		htmlResult := discover.FromHTML(source, response.Body)
+		mergeSPAEvidence(&result.spa, htmlResult.SPA)
 		result.candidates = append(result.candidates, htmlResult.Candidates...)
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
+		mergeSPAEvidence(&result.spa, textResult.SPA)
 		result.findings = append(result.findings, textResult.Findings...)
 		result.candidates = append(result.candidates, textResult.Candidates...)
 		for _, inline := range htmlResult.InlineScripts {
 			inlineResult := discover.FromJavaScript(source, []byte(inline), p.options.Analyzer)
+			mergeSPAEvidence(&result.spa, inlineResult.SPA)
 			result.findings = append(result.findings, inlineResult.Findings...)
 			result.candidates = append(result.candidates, inlineResult.Candidates...)
 		}
 	case item.Kind == model.ResourceTypeScript || item.Kind == model.ResourceTypeChunk ||
 		strings.Contains(contentType, "javascript"):
 		jsResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
+		mergeSPAEvidence(&result.spa, jsResult.SPA)
 		result.findings = append(result.findings, jsResult.Findings...)
 		result.candidates = append(result.candidates, jsResult.Candidates...)
 		result.candidates = append(
@@ -256,10 +319,21 @@ func (p *Pipeline) collectOne(
 		)
 	default:
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
+		mergeSPAEvidence(&result.spa, textResult.SPA)
 		result.findings = append(result.findings, textResult.Findings...)
 		result.candidates = append(result.candidates, textResult.Candidates...)
 	}
 	return result
+}
+
+func mergeSPAEvidence(target *discover.SPAEvidence, source discover.SPAEvidence) {
+	target.RootNode = target.RootNode || source.RootNode
+	target.DynamicImport = target.DynamicImport || source.DynamicImport
+	target.HistoryRouting = target.HistoryRouting || source.HistoryRouting
+	target.DynamicScript = target.DynamicScript || source.DynamicScript
+	target.Webpack = target.Webpack || source.Webpack
+	target.RequireJS = target.RequireJS || source.RequireJS
+	target.LargeBundle = target.LargeBundle || source.LargeBundle
 }
 
 func finalize(result *model.Result) {
