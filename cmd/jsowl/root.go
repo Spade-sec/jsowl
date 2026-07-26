@@ -352,7 +352,9 @@ func runScans(
 			continue
 		}
 		if !silent {
-			_, _ = fmt.Fprintln(deps.stdout, formatResultLine(item.Result))
+			for _, line := range formatResultLines(item.Result) {
+				_, _ = fmt.Fprintln(deps.stdout, line)
+			}
 		}
 	}
 	if failures > 0 {
@@ -361,30 +363,24 @@ func runScans(
 	return nil
 }
 
-func formatResultLine(result *jsowl.Result) string {
+func formatResultLines(result *jsowl.Result) []string {
 	if result == nil {
-		return ""
+		return nil
 	}
-	targetURL := result.Target
-	var size int64
-	var statusCode int
-	var contentType string
+	lines := make([]string, 0, max(1, len(result.Resources)))
 	for _, resource := range result.Resources {
-		if resource.Type != jsowl.ResourceTypeDocument || resource.Depth != 0 {
-			continue
-		}
-		if targetURL == "" {
-			targetURL = resource.URL
-		}
-		size = resource.Size
-		statusCode = resource.StatusCode
-		contentType = resource.ContentType
-		break
+		lines = append(lines, fmt.Sprintf(
+			"%s [%d] [%d] [%s]",
+			resource.URL,
+			resource.Size,
+			resource.StatusCode,
+			resource.ContentType,
+		))
 	}
-	return fmt.Sprintf(
-		"%s [%d] [%d] [%s]",
-		targetURL, size, statusCode, contentType,
-	)
+	if len(lines) == 0 {
+		lines = append(lines, fmt.Sprintf("%s [0] [0] []", result.Target))
+	}
+	return lines
 }
 
 func writeReports(

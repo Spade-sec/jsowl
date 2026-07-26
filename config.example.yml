@@ -41,6 +41,7 @@ scope:
     - .jpeg
     - .gif
     - .webp
+    - .svg
     - .ico
     - .bmp
     - .tif
@@ -72,6 +73,7 @@ scope:
     - .dll
     - .dmg
     - .iso
+    - .css
   fetch_external_scripts: true
   probe_external_endpoints: false
 

@@ -94,7 +94,7 @@ limits:
   max_body_size: 10MiB
 scope:
   allow_domains: []
-  suffix_blacklist: [.png, .jpg, .woff2, .mp4, .zip]
+  suffix_blacklist: [.png, .jpg, .svg, .css, .woff2, .mp4, .zip]
   fetch_external_scripts: true
   probe_external_endpoints: false
 output:
@@ -113,8 +113,8 @@ JsOwl 始终显式解析本地浏览器路径，并禁用了 Rod 的自动下载
 
 `--base-url` 不会替换入口目标，只改变相对资源和 API 的解析基准。绝对
 URL 保持原值。`scope.suffix_blacklist` 在请求入队前按 URL path 过滤，
-忽略后缀大小写、query 和 fragment；`.js`、`.json`、`.map`、`.txt`、
-`.xml`、`.svg` 与 `.css` 默认不会过滤。
+忽略后缀大小写、query 和 fragment；`.css` 与 `.svg` 默认过滤，
+`.js`、`.json`、`.map`、`.txt`、`.xml` 默认不会过滤。
 
 上述 GET 限制针对 JsOwl 主动发起的 API 探测。Rod 会按站点原生行为执行页面 JavaScript，不改写或阻断页面自身的请求方法，因此目标脚本本身可能发出 POST 等请求。
 
@@ -133,7 +133,7 @@ browser:
 
 ## 输出
 
-默认每个成功目标输出一行：
+默认对每个已爬取资源输出一行：
 
 ```text
 https://example.com/ [18240] [200] [text/html; charset=utf-8]

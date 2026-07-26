@@ -43,13 +43,13 @@ func DefaultConfig() Config {
 		Scope: ScopeConfig{
 			FetchExternalScripts: true,
 			SuffixBlacklist: []string{
-				".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico",
+				".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
 				".bmp", ".tif", ".tiff",
 				".woff", ".woff2", ".ttf", ".otf", ".eot",
 				".mp3", ".wav", ".ogg", ".flac",
 				".mp4", ".webm", ".avi", ".mov", ".mkv",
 				".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
-				".pdf", ".wasm", ".exe", ".dll", ".dmg", ".iso",
+				".pdf", ".wasm", ".exe", ".dll", ".dmg", ".iso", ".css",
 			},
 		},
 		Output: OutputConfig{

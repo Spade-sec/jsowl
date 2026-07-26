@@ -12,7 +12,7 @@
 
 - `--base-url` changes only relative discovered URL resolution, never the entry request.
 - Page-native browser request methods remain unchanged.
-- Default suffixes exclude only clearly non-text assets.
+- Default suffixes also exclude CSS and SVG as requested.
 - No new third-party dependencies.
 
 ---
@@ -77,4 +77,3 @@
 - [ ] Document the new YAML key and CLI examples.
 - [ ] Run `gofmt -l .`, `go test ./...`, `go vet ./...`, and `go build ./cmd/jsowl`.
 - [ ] Confirm `bin/` and `report/` remain untouched.
-

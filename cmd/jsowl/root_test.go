@@ -95,21 +95,31 @@ func TestRootFlagsOverrideConfigAndMergeTargets(t *testing.T) {
 	}
 }
 
-func TestRootPrintsHTTPXStyleResultLine(t *testing.T) {
+func TestRootPrintsHTTPXStyleLineForEveryCollectedResource(t *testing.T) {
 	var output bytes.Buffer
 	deps := testDependencies()
 	deps.stdout = &output
 	deps.newScanner = func(jsowl.Config) (scanService, error) {
 		return &fakeScanner{result: &jsowl.Result{
 			Target: "https://example.test/",
-			Resources: []jsowl.Resource{{
-				URL:         "https://example.test/",
-				Type:        jsowl.ResourceTypeDocument,
-				StatusCode:  201,
-				ContentType: "text/html; charset=utf-8",
-				Size:        321,
-				Depth:       0,
-			}},
+			Resources: []jsowl.Resource{
+				{
+					URL:         "https://example.test/",
+					Type:        jsowl.ResourceTypeDocument,
+					StatusCode:  201,
+					ContentType: "text/html; charset=utf-8",
+					Size:        321,
+					Depth:       0,
+				},
+				{
+					URL:         "https://example.test/app.js",
+					Type:        jsowl.ResourceTypeScript,
+					StatusCode:  200,
+					ContentType: "application/javascript",
+					Size:        654,
+					Depth:       1,
+				},
+			},
 		}}, nil
 	}
 	command := newRootCommand(deps)
@@ -117,7 +127,9 @@ func TestRootPrintsHTTPXStyleResultLine(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	want := "https://example.test/ [321] [201] [text/html; charset=utf-8]\n"
+	want := "" +
+		"https://example.test/ [321] [201] [text/html; charset=utf-8]\n" +
+		"https://example.test/app.js [654] [200] [application/javascript]\n"
 	if output.String() != want {
 		t.Fatalf("stdout = %q, want %q", output.String(), want)
 	}
