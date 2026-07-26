@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/cespare/xxhash/v2"
 	"github.com/spf13/cobra"
 	"github.com/youmulijiang/jsowl"
 )
@@ -359,6 +360,10 @@ func targetReportDirectory(root, rawTarget string) (string, error) {
 	name := strings.Trim(invalidDirectoryCharacter.ReplaceAllString(parsed.Host, "_"), " .")
 	if name == "" {
 		return "", errors.New("target host produced an empty report directory")
+	}
+	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" {
+		parsed.Fragment = ""
+		name += fmt.Sprintf("-%08x", uint32(xxhash.Sum64String(parsed.String())))
 	}
 	return filepath.Join(root, name), nil
 }

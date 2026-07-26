@@ -48,6 +48,25 @@ func (q *Queue) Add(item Item) bool {
 	return true
 }
 
+// MarkSeen imports canonical URLs collected by an earlier scan phase without
+// enqueueing them, preserving one combined resource budget.
+func (q *Queue) MarkSeen(urls []string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, raw := range urls {
+		if raw == "" {
+			continue
+		}
+		if _, exists := q.seen[raw]; exists {
+			continue
+		}
+		if len(q.seen) >= q.maxItems {
+			return
+		}
+		q.seen[raw] = struct{}{}
+	}
+}
+
 // Take removes up to limit items while preserving insertion order.
 func (q *Queue) Take(limit int) []Item {
 	q.mu.Lock()

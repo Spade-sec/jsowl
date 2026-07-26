@@ -45,3 +45,20 @@ func TestQueueTakePreservesOrderAcrossDynamicAdds(t *testing.T) {
 		t.Fatalf("Len() = %d, want 0", queue.Len())
 	}
 }
+
+func TestQueueMarkSeenPreventsCrossPhaseDuplicates(t *testing.T) {
+	queue := New(3, 2)
+	if !queue.Add(Item{URL: "https://example.test/"}) {
+		t.Fatal("root was not added")
+	}
+	queue.MarkSeen([]string{"https://example.test/app.js"})
+	if queue.Add(Item{URL: "https://example.test/app.js", Depth: 1}) {
+		t.Fatal("previously collected script was added again")
+	}
+	if !queue.Add(Item{URL: "https://example.test/new.js", Depth: 1}) {
+		t.Fatal("new script was not added within combined resource budget")
+	}
+	if queue.Add(Item{URL: "https://example.test/overflow.js", Depth: 1}) {
+		t.Fatal("combined resource budget was exceeded")
+	}
+}

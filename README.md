@@ -99,6 +99,8 @@ Rod 的路径、等待、网络空闲、超时、窗口模式和注入脚本只�
 
 JsOwl 始终显式解析本地浏览器路径，并禁用了 Rod 的自动下载路径。找不到 Chrome/Chromium 时，`browser` 模式返回错误，`auto` 模式降级到 Surf。
 
+上述 GET 限制针对 JsOwl 主动发起的 API 探测。Rod 会按站点原生行为执行页面 JavaScript，不改写或阻断页面自身的请求方法，因此目标脚本本身可能发出 POST 等请求。
+
 若需要使用外部收集器：
 
 ```yaml
@@ -120,6 +122,8 @@ jsowl-report/
         └── chunks/
             └── users.<hash>.js
 ```
+
+同一主机的非根路径或带 query 的多个扫描目标会在主机名后添加稳定 URL 哈希，避免报告相互覆盖。
 
 `output.download_js` 默认为 `false`。开启后只保存普通 JS 和 chunk，文件名会清理 Windows 非法字符并使用稳定哈希避免 query/重名覆盖。超过正文上限的脚本不会保存，并在结果中记录 Issue。
 

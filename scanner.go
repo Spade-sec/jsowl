@@ -102,21 +102,22 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 	switch s.config.Mode {
 	case ModeDirect:
 		result, _, err = resourcePipeline.RunDetailed(
-			targetContext, target, headers, nil, nil,
+			targetContext, target, headers, nil, nil, nil,
 		)
 	case ModeBrowser:
 		result, err = s.scanWithBrowser(
-			targetContext, root, target, headers, resourcePipeline,
+			targetContext, root, target, headers, resourcePipeline, nil,
 		)
 	case ModeAuto:
 		var evidence discover.SPAEvidence
 		result, evidence, err = resourcePipeline.RunDetailed(
-			targetContext, target, headers, nil, nil,
+			targetContext, target, headers, nil, nil, nil,
 		)
 		if err == nil && needsBrowser(evidence, result) {
 			var browserResult *model.Result
 			browserResult, err = s.scanWithBrowser(
 				targetContext, root, target, headers, resourcePipeline,
+				collectedURLs(result),
 			)
 			if err != nil {
 				result.BrowserStatus = model.BrowserStatus{
@@ -191,6 +192,7 @@ func (s *Scanner) scanWithBrowser(
 	target model.Target,
 	headers http.Header,
 	resourcePipeline *pipeline.Pipeline,
+	previouslySeen []string,
 ) (*model.Result, error) {
 	collector, err := s.browserFactory(s.config.Browser)
 	if err != nil {
@@ -207,12 +209,20 @@ func (s *Scanner) scanWithBrowser(
 	}
 	seeds := browserSeeds(rendered)
 	result, _, err := resourcePipeline.RunDetailed(
-		ctx, target, headers, &entry, seeds,
+		ctx, target, headers, &entry, seeds, previouslySeen,
 	)
 	if result != nil {
 		result.BrowserStatus = model.BrowserStatus{Attempted: true, Used: true}
 	}
 	return result, err
+}
+
+func collectedURLs(result *model.Result) []string {
+	urls := make([]string, 0, len(result.Resources))
+	for _, resource := range result.Resources {
+		urls = append(urls, resource.URL)
+	}
+	return urls
 }
 
 func needsBrowser(evidence discover.SPAEvidence, result *model.Result) bool {

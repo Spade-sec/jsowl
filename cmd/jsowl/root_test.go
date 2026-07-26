@@ -158,6 +158,28 @@ func TestParseHeader(t *testing.T) {
 	}
 }
 
+func TestTargetReportDirectorySeparatesSameHostTargets(t *testing.T) {
+	root := t.TempDir()
+	first, err := targetReportDirectory(root, "https://example.test/app-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := targetReportDirectory(root, "https://example.test/app-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("report directories collide at %q", first)
+	}
+	base, err := targetReportDirectory(root, "https://example.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(base) != "example.test" {
+		t.Fatalf("root report directory = %q", base)
+	}
+}
+
 func testDependencies() dependencies {
 	return dependencies{
 		stdout: &bytes.Buffer{},

@@ -273,6 +273,52 @@ func TestAutoMergesBrowserResourcesWithoutDuplicates(t *testing.T) {
 	}
 }
 
+func TestAutoDoesNotRefetchDirectResourcesDuringBrowserMerge(t *testing.T) {
+	var scriptRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case "/":
+			writer.Header().Set("Content-Type", "text/html")
+			_, _ = writer.Write([]byte(
+				`<main id="app"></main><script src="/app.js"></script>`,
+			))
+		case "/app.js":
+			scriptRequests.Add(1)
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write([]byte(`window.applicationLoaded = true`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	browser := &fakeBrowser{result: collect.BrowserResult{
+		HTML: []byte(`<main id="app"></main><script src="/app.js"></script>`),
+		URLs: []string{server.URL + "/app.js"},
+		Network: []collect.NetworkRecord{{
+			URL: server.URL + "/app.js", ResourceType: "Script",
+		}},
+	}}
+	config := DefaultConfig()
+	config.Mode = ModeAuto
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner.browserFactory = func(model.BrowserConfig) (collect.BrowserCollector, error) {
+		return browser, nil
+	}
+	if _, err := scanner.Scan(context.Background(), Target{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if scriptRequests.Load() != 1 {
+		t.Fatalf("app.js requests = %d, want 1", scriptRequests.Load())
+	}
+}
+
 func TestScanBatchBoundsTargetConcurrencyAndClosesOnCancellation(t *testing.T) {
 	var active atomic.Int32
 	var maximum atomic.Int32

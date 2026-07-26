@@ -57,7 +57,7 @@ func (p *Pipeline) Run(
 	target model.Target,
 	headers http.Header,
 ) (*model.Result, error) {
-	result, _, err := p.RunDetailed(ctx, target, headers, nil, nil)
+	result, _, err := p.RunDetailed(ctx, target, headers, nil, nil, nil)
 	return result, err
 }
 
@@ -69,6 +69,7 @@ func (p *Pipeline) RunDetailed(
 	headers http.Header,
 	entry *collect.Response,
 	seeds []Seed,
+	previouslySeen []string,
 ) (*model.Result, discover.SPAEvidence, error) {
 	root, err := url.Parse(target.URL)
 	if err != nil {
@@ -95,6 +96,7 @@ func (p *Pipeline) RunDetailed(
 	queue.Add(scheduler.Item{
 		URL: scope.Canonical(root), Kind: model.ResourceTypeDocument,
 	})
+	queue.MarkSeen(previouslySeen)
 	for _, seed := range seeds {
 		seedURL, parseErr := url.Parse(seed.URL)
 		if parseErr != nil {
