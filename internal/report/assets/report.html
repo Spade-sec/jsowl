@@ -31,8 +31,9 @@
   <section>
     <h2>敏感信息与 URL 发现</h2>
     <label>严重性 <select id="severity"><option value="">全部</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>info</option></select></label>
+    <label>分类 <select id="category"><option value="">全部</option><option>sensitive</option><option>url</option></select></label>
     <table id="findings"><thead><tr><th>规则</th><th>严重性</th><th>完整值</th><th>来源</th><th>位置</th></tr></thead><tbody>
-    {{range .Findings}}<tr data-severity="{{.Severity}}"><td>{{.RuleName}}<br><span class="muted">{{.RuleID}}</span></td><td>{{.Severity}}</td><td><code>{{.Value}}</code></td><td><code>{{.SourceURL}}</code></td><td>{{.Line}}:{{.Column}}</td></tr>{{end}}
+    {{range .Findings}}<tr data-severity="{{.Severity}}" data-category="{{.Category}}"><td>{{.RuleName}}<br><span class="muted">{{.RuleID}}</span></td><td>{{.Severity}}</td><td><code>{{.Value}}</code></td><td><code>{{.SourceURL}}</code></td><td>{{.Line}}:{{.Column}}</td></tr>{{end}}
     </tbody></table>
   </section>
   <section><h2>API 与路由</h2><table><thead><tr><th>URL</th><th>来源</th><th>授权</th><th>GET 状态</th></tr></thead><tbody>
@@ -46,11 +47,16 @@
   </tbody></table></section>
 </main>
 <script>
-document.getElementById("severity").addEventListener("change",function(){
+function filterFindings(){
+  const severity=document.getElementById("severity").value;
+  const category=document.getElementById("category").value;
   document.querySelectorAll("#findings tbody tr").forEach(row=>{
-    row.hidden=this.value!==""&&row.dataset.severity!==this.value;
+    row.hidden=(severity!==""&&row.dataset.severity!==severity)||
+      (category!==""&&row.dataset.category!==category);
   });
-});
+}
+document.getElementById("severity").addEventListener("change",filterFindings);
+document.getElementById("category").addEventListener("change",filterFindings);
 </script>
 </body>
 </html>

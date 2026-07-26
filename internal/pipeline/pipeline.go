@@ -135,9 +135,12 @@ func (p *Pipeline) RunDetailed(
 			return result, spa, err
 		}
 		batch := queue.Take(p.options.Config.Concurrency.ResourcesPerTarget)
-		outcomes := p.collectBatch(ctx, batch, headers, entry)
+		outcomes := p.collectBatch(ctx, batch, headers, entry, root)
 		for _, collected := range outcomes {
 			if collected.err != nil {
+				if contextErr := ctx.Err(); contextErr != nil {
+					return result, spa, contextErr
+				}
 				if collected.item.Depth == 0 {
 					return result, spa, collected.err
 				}
@@ -264,6 +267,16 @@ func (p *Pipeline) RunDetailed(
 		}
 	}
 
+	if spa.RootNode || spa.DynamicImport || spa.HistoryRouting || spa.DynamicScript {
+		result.Technologies = append(result.Technologies, "spa")
+	}
+	if spa.Webpack {
+		result.Technologies = append(result.Technologies, "webpack")
+	}
+	if spa.RequireJS {
+		result.Technologies = append(result.Technologies, "requirejs")
+	}
+	sort.Strings(result.Technologies)
 	finalize(result)
 	return result, spa, nil
 }
@@ -273,6 +286,7 @@ func (p *Pipeline) collectBatch(
 	batch []scheduler.Item,
 	headers http.Header,
 	entry *collect.Response,
+	root *url.URL,
 ) []outcome {
 	outcomes := make([]outcome, len(batch))
 	var wait sync.WaitGroup
@@ -280,7 +294,7 @@ func (p *Pipeline) collectBatch(
 	for index, item := range batch {
 		go func() {
 			defer wait.Done()
-			outcomes[index] = p.collectOne(ctx, item, headers, entry)
+			outcomes[index] = p.collectOne(ctx, item, headers, entry, root)
 		}()
 	}
 	wait.Wait()
@@ -292,6 +306,7 @@ func (p *Pipeline) collectOne(
 	item scheduler.Item,
 	headers http.Header,
 	entry *collect.Response,
+	root *url.URL,
 ) outcome {
 	target, err := url.Parse(item.URL)
 	if err != nil {
@@ -301,7 +316,11 @@ func (p *Pipeline) collectOne(
 	if entry != nil && item.Depth == 0 && item.Kind == model.ResourceTypeDocument {
 		response = *entry
 	} else {
-		response, err = p.options.Getter.Get(ctx, target, headers)
+		response, err = p.options.Getter.Get(
+			ctx,
+			target,
+			collect.HeadersForURL(headers, root, target),
+		)
 		if err != nil {
 			return outcome{item: item, err: err}
 		}
@@ -346,13 +365,29 @@ func (p *Pipeline) collectOne(
 			result.candidates,
 			discover.FromRequireJS(source, response.Body, p.options.Config.Limits.MaxResources)...,
 		)
-	default:
+	case isTextualContentType(contentType):
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, textResult.SPA)
 		result.findings = append(result.findings, textResult.Findings...)
 		result.candidates = append(result.candidates, textResult.Candidates...)
 	}
 	return result
+}
+
+func isTextualContentType(contentType string) bool {
+	contentType = strings.ToLower(contentType)
+	if contentType == "" || strings.HasPrefix(contentType, "text/") {
+		return true
+	}
+	for _, marker := range []string{
+		"json", "xml", "yaml", "javascript", "graphql",
+		"x-www-form-urlencoded",
+	} {
+		if strings.Contains(contentType, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeSPAEvidence(target *discover.SPAEvidence, source discover.SPAEvidence) {

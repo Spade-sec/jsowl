@@ -7,16 +7,37 @@ import (
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
+// Config contains all reusable library and CLI scan settings.
 type Config = model.Config
+
+// Mode selects automatic, direct, or browser collection.
 type Mode = model.Mode
+
+// RequestConfig controls Surf requests and target-level timeouts.
 type RequestConfig = model.RequestConfig
+
+// BrowserConfig controls local Rod browser collection.
 type BrowserConfig = model.BrowserConfig
+
+// ConcurrencyConfig bounds target and per-target resource workers.
 type ConcurrencyConfig = model.ConcurrencyConfig
+
+// LimitsConfig bounds recursion, resource count, and response size.
 type LimitsConfig = model.LimitsConfig
+
+// ScopeConfig controls cross-origin script and API authorization.
 type ScopeConfig = model.ScopeConfig
+
+// OutputConfig controls reports and optional JavaScript storage.
 type OutputConfig = model.OutputConfig
+
+// RulesConfig enables custom extraction rules and built-in rule disabling.
 type RulesConfig = model.RulesConfig
+
+// BrowserCheck records one browser integrity check.
 type BrowserCheck = browser.CheckItem
+
+// BrowserCheckReport contains ordered browser integrity checks.
 type BrowserCheckReport = browser.CheckReport
 
 const (

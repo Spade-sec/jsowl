@@ -28,6 +28,20 @@ func TestWriteJSONRoundTripsResult(t *testing.T) {
 		decoded.Findings[0].Value != result.Findings[0].Value {
 		t.Fatalf("decoded result = %#v", decoded)
 	}
+	result.Target = "https://updated.example.test"
+	if err := WriteJSON(path, result); err != nil {
+		t.Fatalf("overwrite JSON report: %v", err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Target != result.Target {
+		t.Fatalf("overwritten target = %q", decoded.Target)
+	}
 }
 
 func TestWriteHTMLContainsSecurityDataAndEscapesTargetContent(t *testing.T) {
@@ -49,6 +63,7 @@ func TestWriteHTMLContainsSecurityDataAndEscapesTargetContent(t *testing.T) {
 		"503",
 		"chrome missing",
 		"&lt;script&gt;alert(1)&lt;/script&gt;",
+		`id="category"`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("HTML report does not contain %q", want)

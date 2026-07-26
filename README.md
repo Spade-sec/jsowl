@@ -12,6 +12,7 @@ JsOwl 是一个使用 Go 编写的高性能 Web 安全信息收集工具和可�
 - 从 HTML、内联脚本、普通 bundle、Webpack 3/4/5 runtime 和 RequireJS 配置中递归发现脚本、chunk、路由与 API。
 - 同源或显式 allowlist 的 API 仅使用 GET 获取并继续执行正则匹配；不会提交表单或发送 POST/PUT/PATCH/DELETE。
 - 页面明确引用的跨域脚本默认允许下载分析；跨域 API 默认不会探测。
+- `Authorization`、`Cookie`、`X-API-Key` 等目标请求头仅发送到同源；跨域脚本只携带 UA、Accept 等安全协商头。
 - 未配置 User-Agent 时，每个目标随机选择一个现代桌面 UA，并在该目标的 Surf、Rod、chunk 和 API 请求中保持一致。
 - 可选保存 JS/chunk；API 响应正文永不保存。
 
@@ -98,6 +99,8 @@ output:
 Rod 的路径、等待、网络空闲、超时、窗口模式和注入脚本只通过 YAML 配置。`wait` 默认 `3s`，表示页面加载并达到网络空闲后，继续等待异步 JS 的时间。`headless: false` 可显示浏览器窗口，等待时间仍受 `browser.timeout` 限制。
 
 JsOwl 始终显式解析本地浏览器路径，并禁用了 Rod 的自动下载路径。找不到 Chrome/Chromium 时，`browser` 模式返回错误，`auto` 模式降级到 Surf。
+
+`request.proxy` 同时用于 Surf 与 Rod。目标初始 Cookie 会在导航前写入浏览器，Rod 运行时产生的 Cookie 会同步回 Surf，用于后续脚本、chunk 和 API GET。
 
 上述 GET 限制针对 JsOwl 主动发起的 API 探测。Rod 会按站点原生行为执行页面 JavaScript，不改写或阻断页面自身的请求方法，因此目标脚本本身可能发出 POST 等请求。
 

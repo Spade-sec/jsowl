@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -420,6 +421,176 @@ func TestScannerOptionallyStoresOnlyJavaScript(t *testing.T) {
 		filepath.FromSlash(scriptPath),
 	)); err != nil {
 		t.Fatalf("stored script: %v", err)
+	}
+}
+
+func TestScannerDoesNotForwardTargetHeadersToExternalScripts(t *testing.T) {
+	var externalAuthorization atomic.Value
+	external := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		externalAuthorization.Store(request.Header.Get("Authorization"))
+		writer.Header().Set("Content-Type", "application/javascript")
+		_, _ = writer.Write([]byte(`window.externalLoaded = true`))
+	}))
+	defer external.Close()
+
+	target := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		_ *http.Request,
+	) {
+		writer.Header().Set("Content-Type", "text/html")
+		_, _ = writer.Write([]byte(
+			`<script src="` + external.URL + `/external.js"></script>`,
+		))
+	}))
+	defer target.Close()
+
+	config := DefaultConfig()
+	config.Mode = ModeDirect
+	config.Request.Headers["Authorization"] = "Bearer target-secret"
+	config.Request.Headers["X-API-Key"] = "target-key"
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scanner.Scan(context.Background(), Target{URL: target.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := externalAuthorization.Load().(string); got != "" {
+		t.Fatalf("external script received Authorization %q", got)
+	}
+}
+
+func TestScannerPropagatesNestedResourceDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		if request.URL.Path == "/" {
+			writer.Header().Set("Content-Type", "text/html")
+			_, _ = writer.Write([]byte(`<script src="/slow.js"></script>`))
+			return
+		}
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.Mode = ModeDirect
+	config.Request.TargetTimeout = 40 * time.Millisecond
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = scanner.Scan(context.Background(), Target{URL: server.URL})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Scan() error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestScannerDeepCopiesConfiguration(t *testing.T) {
+	var authorization atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		authorization.Store(request.Header.Get("Authorization"))
+		_, _ = writer.Write([]byte("<html></html>"))
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.Mode = ModeDirect
+	config.Request.Headers["Authorization"] = "Bearer original"
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Request.Headers["Authorization"] = "Bearer mutated"
+	config.Scope.AllowDomains = append(config.Scope.AllowDomains, "mutated.test")
+	if _, err := scanner.Scan(context.Background(), Target{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := authorization.Load().(string); got != "Bearer original" {
+		t.Fatalf("Authorization = %q, want immutable original", got)
+	}
+}
+
+func TestBrowserCookiesFlowBackToSurfResourceGETs(t *testing.T) {
+	var scriptCookie atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		if request.URL.Path == "/app.js" {
+			scriptCookie.Store(request.Header.Get("Cookie"))
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write([]byte(`window.ok = true`))
+			return
+		}
+		_, _ = writer.Write([]byte("<html></html>"))
+	}))
+	defer server.Close()
+
+	browser := &fakeBrowser{result: collect.BrowserResult{
+		HTML: []byte(`<script src="/app.js"></script>`),
+		URLs: []string{server.URL + "/app.js"},
+		Cookies: []*http.Cookie{{
+			Name: "runtime", Value: "updated", Path: "/",
+		}},
+	}}
+	config := DefaultConfig()
+	config.Mode = ModeBrowser
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner.browserFactory = func(model.BrowserConfig) (collect.BrowserCollector, error) {
+		return browser, nil
+	}
+	if _, err := scanner.Scan(context.Background(), Target{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := scriptCookie.Load().(string); !strings.Contains(got, "runtime=updated") {
+		t.Fatalf("Surf script Cookie = %q", got)
+	}
+}
+
+func TestScannerSkipsSensitiveAnalysisForBinaryBodies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		switch request.URL.Path {
+		case "/":
+			writer.Header().Set("Content-Type", "text/html")
+			_, _ = writer.Write([]byte(`<script src="/app.js"></script>`))
+		case "/app.js":
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write([]byte(`fetch("/api/binary")`))
+		case "/api/binary":
+			writer.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = writer.Write([]byte(`password="binary-secret"`))
+		}
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.Mode = ModeDirect
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := scanner.Scan(context.Background(), Target{URL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, finding := range result.Findings {
+		if urlPath(finding.SourceURL) == "/api/binary" {
+			t.Fatalf("binary response produced finding %#v", finding)
+		}
 	}
 }
 

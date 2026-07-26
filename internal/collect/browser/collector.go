@@ -28,12 +28,16 @@ var ErrBrowserNotFound = errors.New("Chromium-compatible browser not found")
 
 // Collector renders entry pages with Rod and records runtime resource URLs.
 type Collector struct {
-	config model.BrowserConfig
-	script string
+	config  model.BrowserConfig
+	request model.RequestConfig
+	script  string
 }
 
 // New constructs a Rod collector without launching or downloading a browser.
-func New(config model.BrowserConfig) (*Collector, error) {
+func New(
+	config model.BrowserConfig,
+	request ...model.RequestConfig,
+) (*Collector, error) {
 	script := embeddedCollectorScript
 	if config.CollectorScript != "" {
 		data, err := os.ReadFile(config.CollectorScript)
@@ -42,7 +46,13 @@ func New(config model.BrowserConfig) (*Collector, error) {
 		}
 		script += "\n" + string(data)
 	}
-	return &Collector{config: config, script: script}, nil
+	var requestConfig model.RequestConfig
+	if len(request) > 0 {
+		requestConfig = request[0]
+	}
+	return &Collector{
+		config: config, request: requestConfig, script: script,
+	}, nil
 }
 
 // Collect renders target, waits for network quiet plus the configured grace
@@ -70,7 +80,9 @@ func (c *Collector) Collect(
 	}
 	defer os.RemoveAll(userDataDir)
 
-	control, browserLauncher, err := launch(scanContext, c.config, bin, userDataDir)
+	control, browserLauncher, err := launch(
+		scanContext, c.config, c.request.Proxy, bin, userDataDir,
+	)
 	if err != nil {
 		return collect.BrowserResult{}, err
 	}
@@ -99,12 +111,22 @@ func (c *Collector) Collect(
 			return collect.BrowserResult{}, fmt.Errorf("set browser User-Agent: %w", err)
 		}
 	}
-	extraHeaders := flattenHeaders(headers, "User-Agent")
+	if err := setBrowserCookies(page, target, headers); err != nil {
+		return collect.BrowserResult{}, err
+	}
+	extraHeaders := flattenHeaders(headers, "User-Agent", "Cookie")
 	restoreHeaders, err := page.SetExtraHeaders(extraHeaders)
 	if err != nil {
 		return collect.BrowserResult{}, fmt.Errorf("set browser headers: %w", err)
 	}
 	defer restoreHeaders()
+
+	headerRouter, err := installHeaderIsolation(page, target)
+	if err != nil {
+		return collect.BrowserResult{}, err
+	}
+	go headerRouter.Run()
+	defer headerRouter.Stop()
 
 	if !c.config.DisableInjection {
 		removeScript, injectErr := page.EvalOnNewDocument(c.script)
@@ -133,17 +155,18 @@ func (c *Collector) Collect(
 	go waitEvents()
 	defer stopEvents()
 
+	idle := c.config.Idle
+	if idle <= 0 {
+		idle = 800 * time.Millisecond
+	}
+	waitForIdle := page.WaitRequestIdle(idle, nil, nil, nil)
 	if err := page.Navigate(target.String()); err != nil {
 		return collect.BrowserResult{}, fmt.Errorf("navigate browser page: %w", err)
 	}
 	if err := page.WaitLoad(); err != nil {
 		return collect.BrowserResult{}, fmt.Errorf("wait for page load: %w", err)
 	}
-	idle := c.config.Idle
-	if idle <= 0 {
-		idle = 800 * time.Millisecond
-	}
-	page.WaitRequestIdle(idle, nil, nil, nil)()
+	waitForIdle()
 	if err := waitDuration(scanContext, c.config.Wait); err != nil {
 		return collect.BrowserResult{}, err
 	}
@@ -155,6 +178,10 @@ func (c *Collector) Collect(
 	injectedURLs, err := snapshotURLs(page, c.config.DisableInjection)
 	if err != nil {
 		return collect.BrowserResult{}, err
+	}
+	browserCookies, err := page.Cookies([]string{target.String()})
+	if err != nil {
+		return collect.BrowserResult{}, fmt.Errorf("read browser cookies: %w", err)
 	}
 
 	networkMu.Lock()
@@ -177,12 +204,47 @@ func (c *Collector) Collect(
 
 	return collect.BrowserResult{
 		HTML: []byte(html), URLs: urls, Network: records,
+		Cookies: convertCookies(browserCookies),
 	}, nil
+}
+
+func installHeaderIsolation(
+	page *rod.Page,
+	root *url.URL,
+) (*rod.HijackRouter, error) {
+	router := page.HijackRequests()
+	err := router.Add("*", "", func(request *rod.Hijack) {
+		requestURL := request.Request.URL()
+		if collect.SameOrigin(root, requestURL) {
+			request.ContinueRequest(&proto.FetchContinueRequest{})
+			return
+		}
+		actual := make(http.Header)
+		for name, value := range request.Request.Headers() {
+			actual.Set(name, value.Str())
+		}
+		filtered := collect.HeadersForURL(actual, root, requestURL)
+		entries := make([]*proto.FetchHeaderEntry, 0, len(filtered))
+		for name, values := range filtered {
+			for _, value := range values {
+				entries = append(entries, &proto.FetchHeaderEntry{
+					Name: name, Value: value,
+				})
+			}
+		}
+		request.ContinueRequest(&proto.FetchContinueRequest{Headers: entries})
+	})
+	if err != nil {
+		_ = router.Stop()
+		return nil, fmt.Errorf("isolate cross-origin browser headers: %w", err)
+	}
+	return router, nil
 }
 
 func launch(
 	ctx context.Context,
 	config model.BrowserConfig,
+	proxy string,
 	bin string,
 	userDataDir string,
 ) (string, *launcher.Launcher, error) {
@@ -192,11 +254,44 @@ func launch(
 		Leakless(false).
 		Headless(config.Headless).
 		UserDataDir(userDataDir)
+	if proxy != "" {
+		browserLauncher = browserLauncher.Proxy(proxy)
+	}
 	control, err := browserLauncher.Launch()
 	if err != nil {
 		return "", browserLauncher, fmt.Errorf("launch browser: %w", err)
 	}
 	return control, browserLauncher, nil
+}
+
+func convertCookies(browserCookies []*proto.NetworkCookie) []*http.Cookie {
+	cookies := make([]*http.Cookie, 0, len(browserCookies))
+	for _, cookie := range browserCookies {
+		converted := &http.Cookie{
+			Name: cookie.Name, Value: cookie.Value,
+			Domain: cookie.Domain, Path: cookie.Path,
+			Secure: cookie.Secure, HttpOnly: cookie.HTTPOnly,
+			SameSite: sameSite(cookie.SameSite),
+		}
+		if !cookie.Session {
+			converted.Expires = time.Unix(int64(cookie.Expires), 0)
+		}
+		cookies = append(cookies, converted)
+	}
+	return cookies
+}
+
+func sameSite(value proto.NetworkCookieSameSite) http.SameSite {
+	switch value {
+	case proto.NetworkCookieSameSiteStrict:
+		return http.SameSiteStrictMode
+	case proto.NetworkCookieSameSiteLax:
+		return http.SameSiteLaxMode
+	case proto.NetworkCookieSameSiteNone:
+		return http.SameSiteNoneMode
+	default:
+		return http.SameSiteDefaultMode
+	}
 }
 
 func resolveBrowserPath(configured string) (string, error) {
@@ -216,10 +311,32 @@ func resolveBrowserPath(configured string) (string, error) {
 	return "", ErrBrowserNotFound
 }
 
-func flattenHeaders(headers http.Header, excluded string) []string {
+func setBrowserCookies(
+	page *rod.Page,
+	target *url.URL,
+	headers http.Header,
+) error {
+	request := &http.Request{Header: headers}
+	cookies := request.Cookies()
+	if len(cookies) == 0 {
+		return nil
+	}
+	params := make([]*proto.NetworkCookieParam, 0, len(cookies))
+	for _, cookie := range cookies {
+		params = append(params, &proto.NetworkCookieParam{
+			Name: cookie.Name, Value: cookie.Value, URL: target.String(),
+		})
+	}
+	if err := page.SetCookies(params); err != nil {
+		return fmt.Errorf("set browser cookies: %w", err)
+	}
+	return nil
+}
+
+func flattenHeaders(headers http.Header, excluded ...string) []string {
 	flat := make([]string, 0, len(headers)*2)
 	for name, values := range headers {
-		if strings.EqualFold(name, excluded) {
+		if containsFold(excluded, name) {
 			continue
 		}
 		for _, value := range values {
@@ -227,6 +344,15 @@ func flattenHeaders(headers http.Header, excluded string) []string {
 		}
 	}
 	return flat
+}
+
+func containsFold(values []string, candidate string) bool {
+	for _, value := range values {
+		if strings.EqualFold(value, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func waitDuration(ctx context.Context, duration time.Duration) error {

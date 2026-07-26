@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,12 +41,28 @@ func TestCollectorCapturesDynamicResourceURLs(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
+	var mainAuthorization atomic.Bool
+	var mainCookie atomic.Value
+	var externalAuthorization atomic.Value
+	var fetchCompleted atomic.Bool
+	external := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		externalAuthorization.Store(request.Header.Get("Authorization"))
+		writer.Header().Set("Content-Type", "application/javascript")
+		fmt.Fprint(writer, `window.__externalLoaded = true`)
+	}))
+	defer external.Close()
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, request *http.Request) {
+		mainAuthorization.Store(request.Header.Get("Authorization") == "Bearer target-secret")
+		mainCookie.Store(request.Header.Get("Cookie"))
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprintf(w, `<!doctype html><html><body><main id="app"></main><script>
+		http.SetCookie(w, &http.Cookie{Name: "runtime", Value: "updated", Path: "/"})
+		fmt.Fprintf(w, `<!doctype html><html><body><main id="app"></main><script src=%q></script><script>
 fetch(%q);
 const xhr = new XMLHttpRequest();
 xhr.open("GET", %q);
@@ -55,11 +72,13 @@ setTimeout(() => {
   script.src = %q;
   document.body.appendChild(script);
 }, 75);
-</script></body></html>`, server.URL+"/fetch", server.URL+"/xhr", server.URL+"/late.js")
+</script></body></html>`, external.URL+"/external.js", server.URL+"/fetch", server.URL+"/xhr", server.URL+"/late.js")
 	})
 	mux.HandleFunc("/fetch", func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(400 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"api":"/from-fetch"}`)
+		fetchCompleted.Store(true)
 	})
 	mux.HandleFunc("/xhr", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -88,7 +107,12 @@ setTimeout(() => {
 	result, err := collector.Collect(
 		context.Background(),
 		target,
-		http.Header{"User-Agent": {"JsOwl-Test"}},
+		http.Header{
+			"User-Agent":    {"JsOwl-Test"},
+			"Authorization": {"Bearer target-secret"},
+			"X-API-Key":     {"target-key"},
+			"Cookie":        {"session=configured"},
+		},
 	)
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
@@ -105,4 +129,28 @@ setTimeout(() => {
 			t.Errorf("Collect() URLs do not contain %q: %#v", want, result.URLs)
 		}
 	}
+	if !mainAuthorization.Load() {
+		t.Fatal("same-origin document did not receive target Authorization")
+	}
+	if got, _ := mainCookie.Load().(string); !strings.Contains(got, "session=configured") {
+		t.Fatalf("same-origin document Cookie = %q", got)
+	}
+	if got, _ := externalAuthorization.Load().(string); got != "" {
+		t.Fatalf("external script received Authorization %q", got)
+	}
+	if !fetchCompleted.Load() {
+		t.Fatal("Collect() returned before an in-flight fetch completed")
+	}
+	if !containsCookie(result.Cookies, "runtime", "updated") {
+		t.Fatalf("browser cookies = %#v", result.Cookies)
+	}
+}
+
+func containsCookie(cookies []*http.Cookie, name, value string) bool {
+	for _, cookie := range cookies {
+		if cookie.Name == name && cookie.Value == value {
+			return true
+		}
+	}
+	return false
 }

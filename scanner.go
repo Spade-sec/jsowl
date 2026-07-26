@@ -35,17 +35,45 @@ func New(config Config) (*Scanner, error) {
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
-	engine, err := analyze.New(config.Rules.Custom, config.Rules.Disabled)
+	ownedConfig := cloneConfig(config)
+	engine, err := analyze.New(
+		ownedConfig.Rules.Custom,
+		ownedConfig.Rules.Disabled,
+	)
 	if err != nil {
 		return nil, err
 	}
 	return &Scanner{
-		config: config, analyzer: engine, browserFactory: func(
+		config: ownedConfig, analyzer: engine, browserFactory: func(
 			config model.BrowserConfig,
 		) (collect.BrowserCollector, error) {
-			return browser.New(config)
+			return browser.New(config, ownedConfig.Request)
 		},
 	}, nil
+}
+
+func cloneConfig(config model.Config) model.Config {
+	cloned := config
+	cloned.Request.Headers = make(
+		map[string]string, len(config.Request.Headers),
+	)
+	for name, value := range config.Request.Headers {
+		cloned.Request.Headers[name] = value
+	}
+	cloned.Request.Cookies = make(
+		map[string]string, len(config.Request.Cookies),
+	)
+	for name, value := range config.Request.Cookies {
+		cloned.Request.Cookies[name] = value
+	}
+	cloned.Scope.AllowDomains = append(
+		[]string(nil), config.Scope.AllowDomains...,
+	)
+	cloned.Rules.Disabled = append(
+		[]string(nil), config.Rules.Disabled...,
+	)
+	cloned.Rules.Custom = append([]model.Rule(nil), config.Rules.Custom...)
+	return cloned
 }
 
 // Scan executes an isolated scan for one target and returns partial diagnostics on failure.
@@ -106,7 +134,7 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 		)
 	case ModeBrowser:
 		result, err = s.scanWithBrowser(
-			targetContext, root, target, headers, resourcePipeline, nil,
+			targetContext, root, target, headers, jar, resourcePipeline, nil,
 		)
 	case ModeAuto:
 		var evidence discover.SPAEvidence
@@ -116,7 +144,7 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 		if err == nil && needsBrowser(evidence, result) {
 			var browserResult *model.Result
 			browserResult, err = s.scanWithBrowser(
-				targetContext, root, target, headers, resourcePipeline,
+				targetContext, root, target, headers, jar, resourcePipeline,
 				collectedURLs(result),
 			)
 			if err != nil {
@@ -191,6 +219,7 @@ func (s *Scanner) scanWithBrowser(
 	root *url.URL,
 	target model.Target,
 	headers http.Header,
+	jar http.CookieJar,
 	resourcePipeline *pipeline.Pipeline,
 	previouslySeen []string,
 ) (*model.Result, error) {
@@ -198,10 +227,15 @@ func (s *Scanner) scanWithBrowser(
 	if err != nil {
 		return nil, fmt.Errorf("create browser collector: %w", err)
 	}
-	rendered, err := collector.Collect(ctx, root, headers)
+	browserHeaders := headers.Clone()
+	if cookieHeader := serializeCookies(jar.Cookies(root)); cookieHeader != "" {
+		browserHeaders.Set("Cookie", cookieHeader)
+	}
+	rendered, err := collector.Collect(ctx, root, browserHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("collect browser page: %w", err)
 	}
+	jar.SetCookies(root, rendered.Cookies)
 	entry := collect.Response{
 		URL: root.String(), StatusCode: http.StatusOK,
 		Header: http.Header{"Content-Type": {"text/html; charset=utf-8"}},
@@ -215,6 +249,17 @@ func (s *Scanner) scanWithBrowser(
 		result.BrowserStatus = model.BrowserStatus{Attempted: true, Used: true}
 	}
 	return result, err
+}
+
+func serializeCookies(cookies []*http.Cookie) string {
+	parts := make([]string, 0, len(cookies))
+	for _, cookie := range cookies {
+		if cookie == nil || cookie.Name == "" {
+			continue
+		}
+		parts = append(parts, cookie.Name+"="+cookie.Value)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func collectedURLs(result *model.Result) []string {
@@ -313,6 +358,18 @@ func mergeResults(primary, secondary *model.Result) *model.Result {
 		findingSeen[key] = struct{}{}
 		primary.Findings = append(primary.Findings, finding)
 	}
+	technologySeen := make(map[string]struct{}, len(primary.Technologies))
+	for _, technology := range primary.Technologies {
+		technologySeen[technology] = struct{}{}
+	}
+	for _, technology := range secondary.Technologies {
+		if _, duplicate := technologySeen[technology]; duplicate {
+			continue
+		}
+		technologySeen[technology] = struct{}{}
+		primary.Technologies = append(primary.Technologies, technology)
+	}
+	sort.Strings(primary.Technologies)
 	primary.Issues = append(primary.Issues, secondary.Issues...)
 	sort.Slice(primary.Resources, func(i, j int) bool {
 		return primary.Resources[i].URL < primary.Resources[j].URL

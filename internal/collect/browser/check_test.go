@@ -4,9 +4,24 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/go-rod/rod/lib/launcher"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
+
+func TestCheckInstalledBrowser(t *testing.T) {
+	bin, found := launcher.LookPath()
+	if !found {
+		t.Skip("local Chromium-compatible browser is not installed")
+	}
+	report := Check(context.Background(), model.BrowserConfig{
+		Path: bin, Headless: true, Timeout: 15 * time.Second,
+	})
+	if !report.Passed {
+		t.Fatalf("Check() report = %#v", report)
+	}
+}
 
 func TestCheckReportsMissingConfiguredBrowserWithoutDownloading(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "definitely-missing-browser.exe")

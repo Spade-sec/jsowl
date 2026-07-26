@@ -34,7 +34,7 @@ func TestFromHTMLFindsResourcesInlineScriptsAndSPAEvidence(t *testing.T) {
 	assertCandidate(t, got.Candidates, "https://example.test/logo.png", KindAsset)
 	assertCandidate(t, got.Candidates, "https://example.test/next", KindRoute)
 	assertCandidate(t, got.Candidates, "https://example.test/dashboard", KindRoute)
-	assertCandidate(t, got.Candidates, "https://example.test/login", KindEndpoint)
+	assertCandidate(t, got.Candidates, "https://example.test/login", KindRoute)
 	if len(got.InlineScripts) != 1 || got.InlineScripts[0] != `fetch("/api/inline")` {
 		t.Fatalf("InlineScripts = %#v", got.InlineScripts)
 	}

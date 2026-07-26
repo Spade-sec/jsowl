@@ -5,13 +5,28 @@ import (
 	"github.com/youmulijiang/jsowl/internal/report"
 )
 
+// Result is the deterministic output of one target scan.
 type Result = model.Result
+
+// Issue records a non-fatal diagnostic event.
 type Issue = model.Issue
+
+// Resource records one collected document, script, chunk, or API.
 type Resource = model.Resource
+
+// Endpoint records one extracted route or API and optional GET status.
 type Endpoint = model.Endpoint
+
+// Finding records one URL or sensitive-information rule match.
 type Finding = model.Finding
+
+// Statistics summarizes a scan result.
 type Statistics = model.Statistics
+
+// BrowserStatus describes browser usage or auto-mode degradation.
 type BrowserStatus = model.BrowserStatus
+
+// ResourceType classifies collected resources.
 type ResourceType = model.ResourceType
 
 const (

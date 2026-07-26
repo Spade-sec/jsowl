@@ -13,6 +13,12 @@ var (
 	webpackPublicPath = regexp.MustCompile(
 		`(?:__webpack_require__|[A-Za-z_$][\w$]*)\.p\s*=\s*["']([^"']*)["']`,
 	)
+	webpackEvidence = regexp.MustCompile(
+		`(?i)(?:(?:__webpack_require__|[A-Za-z_$][\w$]*)\.(?:p|u)\s*=|webpackchunk)`,
+	)
+	webpackUFunction = regexp.MustCompile(
+		`(?s)(?:__webpack_require__|[A-Za-z_$][\w$]*)\.u\s*=\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*([^;]{1,1000})`,
+	)
 	webpackObject = regexp.MustCompile(
 		`(?s)\{(?:\s*["']?[A-Za-z0-9_-]+["']?\s*:\s*["'][^"']+["']\s*,?)+\s*\}`,
 	)
@@ -25,6 +31,9 @@ var (
 // FromWebpack extracts bounded, resolved chunk URLs from common Webpack runtimes.
 func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 	if source == nil || limit <= 0 {
+		return nil
+	}
+	if !webpackEvidence.Match(body) {
 		return nil
 	}
 	publicBase := source
@@ -52,6 +61,7 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 	}
 
 	var filenames []string
+	idHashTemplate := usesIDHashTemplate(body)
 	consumed := make(map[int]bool)
 	for i := 0; i < len(maps); i++ {
 		for j := i + 1; j < len(maps); j++ {
@@ -78,6 +88,9 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 		}
 		for _, id := range sortedMapKeys(values) {
 			value := values[id]
+			if idHashTemplate && mapLooksHashed(values) {
+				value = id + "." + value
+			}
 			if !strings.HasSuffix(strings.ToLower(value), ".js") {
 				value += ".js"
 			}
@@ -105,6 +118,18 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 		})
 	}
 	return result
+}
+
+func usesIDHashTemplate(body []byte) bool {
+	match := webpackUFunction.FindSubmatch(body)
+	if len(match) != 3 {
+		return false
+	}
+	identifier := regexp.QuoteMeta(string(match[1]))
+	pattern := regexp.MustCompile(
+		identifier + `\s*\+\s*["']\.["']\s*\+\s*\{`,
+	)
+	return pattern.Match(match[2])
 }
 
 func sameMapKeys(left, right map[string]string) bool {

@@ -56,7 +56,7 @@ func Check(ctx context.Context, config model.BrowserConfig) CheckReport {
 	checkConfig := config
 	checkConfig.Headless = true
 	control, browserLauncher, err := launch(
-		checkContext, checkConfig, bin, userDataDir,
+		checkContext, checkConfig, "", bin, userDataDir,
 	)
 	if err != nil {
 		return appendFailure(report, "launch", err)

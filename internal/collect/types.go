@@ -35,6 +35,7 @@ type BrowserResult struct {
 	HTML    []byte
 	URLs    []string
 	Network []NetworkRecord
+	Cookies []*http.Cookie
 }
 
 // BrowserCollector renders one entry URL and observes its runtime resources.

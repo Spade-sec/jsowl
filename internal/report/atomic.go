@@ -34,10 +34,7 @@ func writeAtomic(path string, data []byte) error {
 		return fmt.Errorf("close report: %w", err)
 	}
 	if err := os.Rename(temporaryPath, path); err != nil {
-		_ = os.Remove(path)
-		if retryErr := os.Rename(temporaryPath, path); retryErr != nil {
-			return fmt.Errorf("publish report: %w", err)
-		}
+		return fmt.Errorf("publish report: %w", err)
 	}
 	cleanup = false
 	return nil

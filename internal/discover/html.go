@@ -77,7 +77,7 @@ func FromHTML(pageURL *url.URL, body []byte) HTMLResult {
 	})
 	document.Find("form[action]").Each(func(_ int, selection *goquery.Selection) {
 		action, _ := selection.Attr("action")
-		add(action, KindEndpoint, pageURL)
+		add(action, KindRoute, pageURL)
 	})
 	document.Find(`meta[http-equiv]`).Each(func(_ int, selection *goquery.Selection) {
 		equiv, _ := selection.Attr("http-equiv")
