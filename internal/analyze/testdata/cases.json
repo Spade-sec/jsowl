@@ -1,0 +1,23 @@
+[
+  {"rule":"url.api-call","positive":"fetch('/api/users')","negative":"fetch(variable)"},
+  {"rule":"url.vue-route","positive":"path: '/users', component: Users","negative":"path: routeVariable"},
+  {"rule":"url.assignment","positive":"src: baseURL + \"/assets/app.js\"","negative":"src: dynamicValue"},
+  {"rule":"url.attribute","positive":"href=\"/dashboard\"","negative":"href=dashboardVariable"},
+  {"rule":"url.quoted","positive":"const endpoint = 'https://api.example.test/v1';","negative":"const label = 'hello world';"},
+  {"rule":"url.api-prefix","positive":"const endpoint = '/graphql/query';","negative":"const endpoint = 'graphql-query';"},
+  {"rule":"url.path-variable","positive":"baseURL = 'https://api.example.test/v2'","negative":"baseURL = hostname"},
+  {"rule":"url.static-resource","positive":"const worker = '/assets/worker.js';","negative":"const worker = '/assets/worker.bin';"},
+  {"rule":"url.webpack-loader","positive":"function load(){return n.p+\"chunk.js\"}","negative":"function load(){return chunkName}"},
+  {"rule":"secret.account","positive":"account_key = \"storage-account\"","negative":"account label"},
+  {"rule":"secret.private-key-id","positive":"private_key_id: \"key-123\"","negative":"public_key_id: \"key-123\""},
+  {"rule":"secret.jwt","positive":"const token='eyJhbGciOiJIUzI1NiJ9.abcdefghijklmno.abcdefghijklmnop';","negative":"const token='not.a.jwt';"},
+  {"rule":"secret.credential","positive":"password: \"Summer-2026!\"","negative":"passwordEnabled: true"},
+  {"rule":"secret.huawei-oss","positive":"huawei.oss.ak = \"HWAK123456\"","negative":"huawei.oss.enabled = true"},
+  {"rule":"secret.aws-access-key","positive":"const key='AKIA1234567890ABCDEF';","negative":"const key='AKIA-short';"},
+  {"rule":"secret.alibaba-access-key","positive":"const key='LTAI1234567890abcdef';","negative":"const key='LTAI-short';"},
+  {"rule":"secret.github-token","positive":"const key='ghp_1234567890abcdefghijklmnopqrstuvwxyz';","negative":"const key='ghp_short';"},
+  {"rule":"secret.google-oauth","positive":"const token='ya29.a0AfH6SMB_example-token';","negative":"const token='ya28.invalid';"},
+  {"rule":"secret.private-key-block","positive":"-----BEGIN RSA PRIVATE KEY-----\nabc123\n-----END RSA PRIVATE KEY-----","negative":"-----BEGIN PUBLIC KEY-----\nabc\n-----END PUBLIC KEY-----"},
+  {"rule":"secret.jdbc","positive":"jdbc:mysql://db.example.test:3306/app","negative":"https://db.example.test/app"},
+  {"rule":"pii.cn-mobile","positive":"phone: 13812345678","negative":"phone: 12812345678"}
+]
