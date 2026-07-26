@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,26 @@ import (
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
+
+func TestTransientBrowserRetryIsLimitedToPreNavigationFailures(t *testing.T) {
+	transient := fmt.Errorf(
+		"%w: %w",
+		errPreNavigation,
+		errors.New("wsarecv: use of closed network connection"),
+	)
+	if !isTransientPreNavigation(transient) {
+		t.Fatal("pre-navigation closed connection should be retried")
+	}
+	if isTransientPreNavigation(errors.New("use of closed network connection")) {
+		t.Fatal("post-navigation closed connection must not be retried")
+	}
+	if isTransientPreNavigation(fmt.Errorf(
+		"%w: invalid user agent",
+		errPreNavigation,
+	)) {
+		t.Fatal("non-transient pre-navigation failure must not be retried")
+	}
+}
 
 func TestNewCombinesCustomAndEmbeddedCollectorScripts(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "collect_resource_urls.js")
@@ -45,6 +66,7 @@ func TestCollectorCapturesDynamicResourceURLs(t *testing.T) {
 	var mainCookie atomic.Value
 	var externalAuthorization atomic.Value
 	var fetchCompleted atomic.Bool
+	var fetchMethod atomic.Value
 	external := httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
 		request *http.Request,
@@ -63,7 +85,7 @@ func TestCollectorCapturesDynamicResourceURLs(t *testing.T) {
 		w.Header().Set("Content-Type", "text/html")
 		http.SetCookie(w, &http.Cookie{Name: "runtime", Value: "updated", Path: "/"})
 		fmt.Fprintf(w, `<!doctype html><html><body><main id="app"></main><script src=%q></script><script>
-fetch(%q);
+fetch(%q, {method: "POST", body: "page-native-request"});
 const xhr = new XMLHttpRequest();
 xhr.open("GET", %q);
 xhr.send();
@@ -74,7 +96,8 @@ setTimeout(() => {
 }, 75);
 </script></body></html>`, external.URL+"/external.js", server.URL+"/fetch", server.URL+"/xhr", server.URL+"/late.js")
 	})
-	mux.HandleFunc("/fetch", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/fetch", func(w http.ResponseWriter, request *http.Request) {
+		fetchMethod.Store(request.Method)
 		time.Sleep(400 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"api":"/from-fetch"}`)
@@ -90,11 +113,12 @@ setTimeout(() => {
 	})
 
 	collector, err := New(model.BrowserConfig{
-		Path:     bin,
-		Headless: true,
-		Idle:     50 * time.Millisecond,
-		Wait:     200 * time.Millisecond,
-		Timeout:  10 * time.Second,
+		Path:      bin,
+		Headless:  true,
+		NoSandbox: true,
+		Idle:      50 * time.Millisecond,
+		Wait:      200 * time.Millisecond,
+		Timeout:   10 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -140,6 +164,9 @@ setTimeout(() => {
 	}
 	if !fetchCompleted.Load() {
 		t.Fatal("Collect() returned before an in-flight fetch completed")
+	}
+	if got, _ := fetchMethod.Load().(string); got != http.MethodPost {
+		t.Fatalf("page-native fetch method = %q, want POST", got)
 	}
 	if !containsCookie(result.Cookies, "runtime", "updated") {
 		t.Fatalf("browser cookies = %#v", result.Cookies)

@@ -490,6 +490,41 @@ func TestScannerPropagatesNestedResourceDeadline(t *testing.T) {
 	}
 }
 
+type blockingBrowser struct{}
+
+func (blockingBrowser) Collect(
+	ctx context.Context,
+	_ *url.URL,
+	_ http.Header,
+) (collect.BrowserResult, error) {
+	<-ctx.Done()
+	return collect.BrowserResult{}, ctx.Err()
+}
+
+func TestAutoDoesNotDegradeTargetDeadline(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		_ *http.Request,
+	) {
+		_, _ = writer.Write([]byte(`<main id="app"></main>`))
+	}))
+	defer server.Close()
+	config := DefaultConfig()
+	config.Mode = ModeAuto
+	config.Request.TargetTimeout = 30 * time.Millisecond
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner.browserFactory = func(model.BrowserConfig) (collect.BrowserCollector, error) {
+		return blockingBrowser{}, nil
+	}
+	_, err = scanner.Scan(context.Background(), Target{URL: server.URL})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Scan() error = %v, want context deadline exceeded", err)
+	}
+}
+
 func TestScannerDeepCopiesConfiguration(t *testing.T) {
 	var authorization atomic.Value
 	server := httptest.NewServer(http.HandlerFunc(func(

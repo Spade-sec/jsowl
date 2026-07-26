@@ -58,6 +58,7 @@ type BrowserConfig struct {
 	Idle             time.Duration `yaml:"idle" json:"idle"`
 	Timeout          time.Duration `yaml:"timeout" json:"timeout"`
 	Headless         bool          `yaml:"headless" json:"headless"`
+	NoSandbox        bool          `yaml:"no_sandbox" json:"no_sandbox"`
 	CollectorScript  string        `yaml:"collector_script" json:"collector_script"`
 	DisableInjection bool          `yaml:"disable_injection" json:"disable_injection"`
 }

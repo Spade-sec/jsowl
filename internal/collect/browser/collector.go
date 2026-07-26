@@ -26,6 +26,8 @@ var embeddedCollectorScript string
 // ErrBrowserNotFound indicates that no explicitly usable local browser exists.
 var ErrBrowserNotFound = errors.New("Chromium-compatible browser not found")
 
+var errPreNavigation = errors.New("browser failed before navigation")
+
 // Collector renders entry pages with Rod and records runtime resource URLs.
 type Collector struct {
 	config  model.BrowserConfig
@@ -66,13 +68,32 @@ func (c *Collector) Collect(
 	if err != nil {
 		return collect.BrowserResult{}, err
 	}
-
 	timeout := c.config.Timeout
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
 	scanContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	result, err := c.collectOnce(scanContext, target, headers, bin)
+	if !isTransientPreNavigation(err) || scanContext.Err() != nil {
+		return result, err
+	}
+	return c.collectOnce(scanContext, target, headers, bin)
+}
+
+func (c *Collector) collectOnce(
+	ctx context.Context,
+	target *url.URL,
+	headers http.Header,
+	bin string,
+) (result collect.BrowserResult, err error) {
+	navigationStarted := false
+	defer func() {
+		if err != nil && !navigationStarted {
+			err = fmt.Errorf("%w: %w", errPreNavigation, err)
+		}
+	}()
 
 	userDataDir, err := os.MkdirTemp("", "jsowl-rod-*")
 	if err != nil {
@@ -81,7 +102,7 @@ func (c *Collector) Collect(
 	defer os.RemoveAll(userDataDir)
 
 	control, browserLauncher, err := launch(
-		scanContext, c.config, c.request.Proxy, bin, userDataDir,
+		ctx, c.config, c.request.Proxy, bin, userDataDir,
 	)
 	if err != nil {
 		return collect.BrowserResult{}, err
@@ -90,7 +111,7 @@ func (c *Collector) Collect(
 	defer browserLauncher.Kill()
 
 	rodBrowser := rod.New().
-		Context(scanContext).
+		Context(ctx).
 		ControlURL(control).
 		NoDefaultDevice()
 	if err := rodBrowser.Connect(); err != nil {
@@ -160,6 +181,7 @@ func (c *Collector) Collect(
 		idle = 800 * time.Millisecond
 	}
 	waitForIdle := page.WaitRequestIdle(idle, nil, nil, nil)
+	navigationStarted = true
 	if err := page.Navigate(target.String()); err != nil {
 		return collect.BrowserResult{}, fmt.Errorf("navigate browser page: %w", err)
 	}
@@ -167,7 +189,7 @@ func (c *Collector) Collect(
 		return collect.BrowserResult{}, fmt.Errorf("wait for page load: %w", err)
 	}
 	waitForIdle()
-	if err := waitDuration(scanContext, c.config.Wait); err != nil {
+	if err := waitDuration(ctx, c.config.Wait); err != nil {
 		return collect.BrowserResult{}, err
 	}
 
@@ -206,6 +228,25 @@ func (c *Collector) Collect(
 		HTML: []byte(html), URLs: urls, Network: records,
 		Cookies: convertCookies(browserCookies),
 	}, nil
+}
+
+func isTransientPreNavigation(err error) bool {
+	if err == nil || !errors.Is(err, errPreNavigation) {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{
+		"closed network connection",
+		"connection reset",
+		"connection refused",
+		"unexpected eof",
+		"websocket: close",
+	} {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func installHeaderIsolation(
@@ -253,7 +294,8 @@ func launch(
 		Bin(bin).
 		Leakless(false).
 		Headless(config.Headless).
-		UserDataDir(userDataDir)
+		UserDataDir(userDataDir).
+		NoSandbox(config.NoSandbox)
 	if proxy != "" {
 		browserLauncher = browserLauncher.Proxy(proxy)
 	}

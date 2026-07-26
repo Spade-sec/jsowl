@@ -16,10 +16,26 @@ func TestCheckInstalledBrowser(t *testing.T) {
 		t.Skip("local Chromium-compatible browser is not installed")
 	}
 	report := Check(context.Background(), model.BrowserConfig{
-		Path: bin, Headless: true, Timeout: 15 * time.Second,
+		Path: bin, Headless: true, NoSandbox: true, Timeout: 15 * time.Second,
 	})
 	if !report.Passed {
 		t.Fatalf("Check() report = %#v", report)
+	}
+}
+
+func TestCheckRecognizesTransientBrowserFailure(t *testing.T) {
+	report := CheckReport{Checks: []CheckItem{{
+		Name:    "cdp",
+		Message: "read tcp: use of closed network connection",
+	}}}
+	if !hasTransientFailure(report) {
+		t.Fatal("closed CDP connection should be treated as transient")
+	}
+	if hasTransientFailure(CheckReport{Checks: []CheckItem{{
+		Name:    "javascript",
+		Message: "unexpected JavaScript result",
+	}}}) {
+		t.Fatal("deterministic JavaScript failure must not be retried")
 	}
 }
 

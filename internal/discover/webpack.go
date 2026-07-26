@@ -1,6 +1,7 @@
 package discover
 
 import (
+	"bytes"
 	"net/url"
 	"regexp"
 	"sort"
@@ -21,6 +22,9 @@ var (
 	)
 	webpackObject = regexp.MustCompile(
 		`(?s)\{(?:\s*["']?[A-Za-z0-9_-]+["']?\s*:\s*["'][^"']+["']\s*,?)+\s*\}`,
+	)
+	webpackNamedObject = regexp.MustCompile(
+		`(?s)(?:var|let|const)\s+([A-Za-z_$][\w$]*)\s*=\s*(\{(?:\s*["']?[A-Za-z0-9_-]+["']?\s*:\s*["'][^"']+["']\s*,?)+\s*\})`,
 	)
 	webpackPair = regexp.MustCompile(
 		`["']?([A-Za-z0-9_-]+)["']?\s*:\s*["']([^"']+)["']`,
@@ -47,7 +51,7 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 
 	type chunkMap map[string]string
 	maps := make([]chunkMap, 0)
-	for _, object := range webpackObject.FindAll(body, -1) {
+	for _, object := range webpackChunkObjects(body) {
 		if len(object) > maxChunkMapBytes {
 			continue
 		}
@@ -118,6 +122,70 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 		})
 	}
 	return result
+}
+
+func webpackChunkObjects(body []byte) [][]byte {
+	if loader := webpackUFunction.FindSubmatch(body); len(loader) == 3 {
+		return webpackObject.FindAll(loader[2], -1)
+	}
+
+	objects := make([][]byte, 0)
+	for _, assignment := range webpackNamedObject.FindAllSubmatch(body, -1) {
+		if len(assignment) != 3 {
+			continue
+		}
+		if referencedByChunkExpression(body, assignment[1]) {
+			objects = append(objects, assignment[2])
+		}
+	}
+	return objects
+}
+
+func referencedByChunkExpression(body, name []byte) bool {
+	searchFrom := 0
+	for searchFrom < len(body) {
+		relative := bytes.Index(body[searchFrom:], name)
+		if relative < 0 {
+			return false
+		}
+		start := searchFrom + relative
+		afterName := start + len(name)
+		if start > 0 && isJSIdentifierByte(body[start-1]) {
+			searchFrom = afterName
+			continue
+		}
+		cursor := afterName
+		for cursor < len(body) && isJSSpace(body[cursor]) {
+			cursor++
+		}
+		if cursor >= len(body) || body[cursor] != '[' {
+			searchFrom = afterName
+			continue
+		}
+
+		statementStart := bytes.LastIndexByte(body[:start], ';') + 1
+		statementEnd := len(body)
+		if relativeEnd := bytes.IndexByte(body[cursor:], ';'); relativeEnd >= 0 {
+			statementEnd = cursor + relativeEnd
+		}
+		if statementEnd-statementStart <= 2000 &&
+			bytes.Contains(body[statementStart:statementEnd], []byte(".js")) {
+			return true
+		}
+		searchFrom = afterName
+	}
+	return false
+}
+
+func isJSIdentifierByte(value byte) bool {
+	return value == '_' || value == '$' ||
+		value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9'
+}
+
+func isJSSpace(value byte) bool {
+	return value == ' ' || value == '\t' || value == '\r' || value == '\n'
 }
 
 func usesIDHashTemplate(body []byte) bool {

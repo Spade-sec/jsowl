@@ -148,12 +148,16 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 				collectedURLs(result),
 			)
 			if err != nil {
-				result.BrowserStatus = model.BrowserStatus{
-					Attempted: true,
-					Degraded:  true,
-					Reason:    err.Error(),
+				if contextErr := targetContext.Err(); contextErr != nil {
+					err = contextErr
+				} else {
+					result.BrowserStatus = model.BrowserStatus{
+						Attempted: true,
+						Degraded:  true,
+						Reason:    err.Error(),
+					}
+					err = nil
 				}
-				err = nil
 			} else {
 				result = mergeResults(result, browserResult)
 				result.BrowserStatus = model.BrowserStatus{

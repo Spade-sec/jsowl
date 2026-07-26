@@ -17,6 +17,8 @@ browser:
   idle: 800ms
   timeout: 45s
   headless: true
+  # 仅在受限容器/靶场中 Chrome 沙箱无法启动时开启；默认保持 false。
+  no_sandbox: false
   # 可覆盖为 collect_resource_urls.js 的绝对路径。
   collector_script: ""
   disable_injection: false

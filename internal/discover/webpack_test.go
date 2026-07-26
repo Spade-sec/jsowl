@@ -64,6 +64,36 @@ func TestFromWebpackIgnoresOrdinaryObjectLiterals(t *testing.T) {
 	}
 }
 
+func TestFromWebpackIgnoresUnrelatedObjectInsideRuntime(t *testing.T) {
+	body := []byte(`
+__webpack_require__.p="/assets/";
+const theme={primary:"blue",secondary:"green"};
+__webpack_require__.u=id=>id+"."+{123:"a1b2c3"}[id]+".js";
+`)
+	source := mustParseURL(t, "https://example.test/runtime.js")
+	got := FromWebpack(source, body, 100)
+	if len(got) != 1 || got[0].Raw !=
+		"https://example.test/assets/123.a1b2c3.js" {
+		t.Fatalf("runtime candidates = %#v", got)
+	}
+}
+
+func TestFromWebpack3IgnoresBracketAccessOutsideChunkExpression(t *testing.T) {
+	body := []byte(`
+__webpack_require__.p="/assets/";
+const theme={primary:"blue"};
+const chunkMap={123:"users.a1b2"};
+function color(id) { return theme[id]; }
+function load(id) { return __webpack_require__.p+chunkMap[id]+".js"; }
+`)
+	source := mustParseURL(t, "https://example.test/runtime.js")
+	got := FromWebpack(source, body, 100)
+	if len(got) != 1 || got[0].Raw !=
+		"https://example.test/assets/users.a1b2.js" {
+		t.Fatalf("runtime candidates = %#v", got)
+	}
+}
+
 func readDiscoverFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))

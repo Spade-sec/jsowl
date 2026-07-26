@@ -76,6 +76,8 @@ browser:
   idle: 800ms
   timeout: 45s
   headless: true
+  # 仅在受限容器/靶场中 Chrome 沙箱无法启动时开启。
+  no_sandbox: false
   collector_script: ""
 concurrency:
   targets: 4
@@ -103,6 +105,10 @@ JsOwl 始终显式解析本地浏览器路径，并禁用了 Rod 的自动下载
 `request.proxy` 同时用于 Surf 与 Rod。目标初始 Cookie 会在导航前写入浏览器，Rod 运行时产生的 Cookie 会同步回 Surf，用于后续脚本、chunk 和 API GET。
 
 上述 GET 限制针对 JsOwl 主动发起的 API 探测。Rod 会按站点原生行为执行页面 JavaScript，不改写或阻断页面自身的请求方法，因此目标脚本本身可能发出 POST 等请求。
+
+浏览器沙箱默认开启。如果 `--check` 在受限容器或靶场中出现 Chrome
+启动后 CDP 连接立即关闭等沙箱兼容问题，可在确认环境隔离边界后设置
+`browser.no_sandbox: true`；扫描不可信站点时不建议关闭沙箱。
 
 若需要使用外部收集器：
 

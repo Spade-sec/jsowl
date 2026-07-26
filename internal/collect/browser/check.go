@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -28,7 +29,15 @@ type CheckReport struct {
 // Check verifies path resolution, launch, CDP connectivity, and JavaScript
 // execution without invoking Rod's browser downloader.
 func Check(ctx context.Context, config model.BrowserConfig) CheckReport {
-	report := CheckReport{Path: config.Path, Checks: make([]CheckItem, 0, 4)}
+	report := checkOnce(ctx, config)
+	if report.Passed || ctx.Err() != nil || !hasTransientFailure(report) {
+		return report
+	}
+	return checkOnce(ctx, config)
+}
+
+func checkOnce(ctx context.Context, config model.BrowserConfig) CheckReport {
+	report := CheckReport{Path: config.Path, Checks: make([]CheckItem, 0, 7)}
 	bin, err := resolveBrowserPath(config.Path)
 	if err != nil {
 		report.Checks = append(report.Checks, CheckItem{
@@ -39,6 +48,13 @@ func Check(ctx context.Context, config model.BrowserConfig) CheckReport {
 	report.Path = bin
 	report.Checks = append(report.Checks, CheckItem{
 		Name: "browser_path", Passed: true, Message: bin,
+	})
+	sandboxMessage := "browser sandbox enabled"
+	if config.NoSandbox {
+		sandboxMessage = "browser sandbox disabled by configuration"
+	}
+	report.Checks = append(report.Checks, CheckItem{
+		Name: "sandbox", Passed: true, Message: sandboxMessage,
 	})
 
 	timeout := config.Timeout
@@ -121,6 +137,24 @@ func Check(ctx context.Context, config model.BrowserConfig) CheckReport {
 	})
 	report.Passed = true
 	return report
+}
+
+func hasTransientFailure(report CheckReport) bool {
+	for _, check := range report.Checks {
+		message := strings.ToLower(check.Message)
+		for _, fragment := range []string{
+			"closed network connection",
+			"connection reset",
+			"connection refused",
+			"unexpected eof",
+			"websocket: close",
+		} {
+			if strings.Contains(message, fragment) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func appendFailure(report CheckReport, name string, err error) CheckReport {
