@@ -1,0 +1,44 @@
+mode: auto
+
+request:
+  timeout: 15s
+  target_timeout: 5m
+  retry: 1
+  proxy: ""
+  user_agent: ""
+  headers: {}
+  cookies: {}
+
+browser:
+  path: ""
+  wait: 3s
+  idle: 800ms
+  timeout: 45s
+  headless: true
+  collector_script: ""
+  disable_injection: false
+
+concurrency:
+  targets: 4
+  resources_per_target: 16
+
+limits:
+  max_depth: 5
+  max_resources: 2000
+  max_body_size: 10MiB
+
+scope:
+  allow_domains: []
+  fetch_external_scripts: true
+  probe_external_endpoints: false
+
+output:
+  directory: ./jsowl-report
+  json: true
+  html: true
+  download_js: false
+  js_directory: js
+
+rules:
+  disabled: []
+  custom: []
