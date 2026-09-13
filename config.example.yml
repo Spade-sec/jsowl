@@ -85,6 +85,5 @@ output:
   download_js: false
   js_directory: js
 
-rules:
-  disabled: []
-  custom: []
+# 相对路径以本配置文件所在目录为基准。
+rules_file: ./rules.yml

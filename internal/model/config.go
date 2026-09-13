@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -86,10 +87,36 @@ func LoadConfig(path string) (Config, error) {
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
+	if cfg.RulesFile != "" {
+		rulesPath := cfg.RulesFile
+		if !filepath.IsAbs(rulesPath) {
+			rulesPath = filepath.Join(filepath.Dir(path), rulesPath)
+		}
+		rules, err := loadRulesFile(rulesPath)
+		if err != nil {
+			return Config{}, err
+		}
+		cfg.Rules = rules
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// loadRulesFile strictly decodes the rule-specific YAML document.
+func loadRulesFile(path string) (RulesConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return RulesConfig{}, fmt.Errorf("read rules file %q: %w", path, err)
+	}
+	var rules RulesConfig
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&rules); err != nil {
+		return RulesConfig{}, fmt.Errorf("decode rules file %q: %w", path, err)
+	}
+	return rules, nil
 }
 
 // Validate rejects configuration values that could disable scan safety bounds.

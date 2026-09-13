@@ -87,6 +87,73 @@ func TestLoadConfigParsesBodySize(t *testing.T) {
 	}
 }
 
+func TestLoadConfigLoadsRulesFromRelativeFile(t *testing.T) {
+	directory := t.TempDir()
+	rulesPath := filepath.Join(directory, "rules.yml")
+	rules := []byte(`disabled:
+  - url.generic
+custom:
+  - id: custom.fixture
+    name: Fixture secret
+    category: sensitive
+    severity: high
+    pattern: 'fixture_([a-z]+)'
+    group: 1
+    description: test fixture
+    enabled: true
+`)
+	if err := os.WriteFile(rulesPath, rules, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "config.yml")
+	if err := os.WriteFile(configPath, []byte("rules_file: rules.yml\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RulesFile != "rules.yml" {
+		t.Fatalf("RulesFile = %q, want rules.yml", cfg.RulesFile)
+	}
+	if !slices.Equal(cfg.Rules.Disabled, []string{"url.generic"}) {
+		t.Fatalf("Rules.Disabled = %#v", cfg.Rules.Disabled)
+	}
+	if len(cfg.Rules.Custom) != 1 || cfg.Rules.Custom[0].ID != "custom.fixture" {
+		t.Fatalf("Rules.Custom = %#v", cfg.Rules.Custom)
+	}
+}
+
+func TestLoadConfigRejectsInlineRules(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(path, []byte("rules:\n  disabled: []\n  custom: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "field rules not found") {
+		t.Fatalf("LoadConfig inline rules error = %v", err)
+	}
+}
+
+func TestExampleConfigurationLoadsAndCompilesExternalRules(t *testing.T) {
+	for _, path := range []string{"config.yml", "config.example.yml"} {
+		t.Run(path, func(t *testing.T) {
+			cfg, err := LoadConfig(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Rules.Custom) < 20 {
+				t.Fatalf("loaded custom rules = %d, want at least 20", len(cfg.Rules.Custom))
+			}
+			if _, err := New(cfg); err != nil {
+				t.Fatalf("compile external rules: %v", err)
+			}
+		})
+	}
+}
+
 func TestConfigValidateRejectsUnsafeBounds(t *testing.T) {
 	tests := []struct {
 		name   string

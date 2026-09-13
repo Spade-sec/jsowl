@@ -63,7 +63,7 @@ jsowl -h
 | `-v, --version` | 显示版本 |
 | `--check` | 检查配置、规则、输出目录、本地浏览器、CDP、JS 与注入快照 |
 
-CLI 显式值优先于 YAML，YAML 优先于内置默认值。若未传 `-c`，当前目录存在 `config.yml` 时会自动加载；不存在则直接使用默认配置。
+CLI 显式值优先于 YAML，YAML 优先于内置默认值。若未传 `-c`，当前目录存在 `config.yml` 时会自动加载；项目自带的 `config.yml` 默认引用 `rules.yml`。不存在主配置时则直接使用内置默认配置和内置规则。
 
 ## 配置
 
@@ -184,20 +184,29 @@ for item := range scanner.ScanBatch(ctx, targets) {
 
 ## 自定义规则
 
-自定义规则使用 Go RE2 语法：
+规则独立保存在规则配置文件中。主配置通过 `rules_file` 引用它，相对路径以
+主配置文件所在目录为基准：
 
 ```yaml
-rules:
-  disabled: [secret.account]
-  custom:
-    - id: secret.internal-token
-      name: Internal token
-      category: sensitive
-      severity: high
-      pattern: '(?i)internal[_-]?token\s*[:=]\s*["'']([^"'']+)'
-      group: 1
-      description: Internal test token
-      enabled: true
+rules_file: ./rules.yml
 ```
 
-无效正则、捕获组、模式、时间、并发和资源边界会在扫描前拒绝。
+`rules.yml` 使用 Go RE2 语法，可以禁用内置规则并添加或覆盖同 ID 规则：
+
+```yaml
+disabled: [secret.account]
+custom:
+  - id: secret.internal-token
+    name: Internal token
+    category: sensitive
+    severity: high
+    pattern: '(?i)internal[_-]?token\s*[:=]\s*["'']([^"'']+)'
+    group: 1
+    description: Internal test token
+    enabled: true
+```
+
+项目根目录的 [rules.yml](rules.yml) 已加载并适配
+`正则表达式总结报告.md` 中适合 Web/JavaScript 信息收集的规则。原报告中
+Go RE2 不支持的前后向断言和反向引用已改写。无效正则、捕获组、模式、时间、
+并发和资源边界会在扫描前拒绝。
