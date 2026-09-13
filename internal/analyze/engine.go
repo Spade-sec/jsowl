@@ -11,7 +11,12 @@ import (
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
-const contextRadius = 160
+const contextLines = 3
+
+// Minified bundles keep megabytes on a single physical line; report contexts
+// are trimmed around the match so reports stay openable.
+const maxContextLineRunes = 400
+const maxValueRunes = 2000
 
 // ResourceRef identifies the source being analyzed without retaining its body.
 type ResourceRef struct {
@@ -114,15 +119,15 @@ func (e *Engine) Analyze(source ResourceRef, body []byte) ([]model.Finding, []Ca
 
 			line, column := location(body, start)
 			finding := model.Finding{
-				RuleID:    rule.rule.ID,
-				RuleName:  rule.rule.Name,
-				Category:  rule.rule.Category,
-				Severity:  rule.rule.Severity,
-				Value:     value,
-				SourceURL: source.URL,
-				Line:      line,
-				Column:    column,
-				Context:   matchContext(body, start, end),
+				RuleID:       rule.rule.ID,
+				RuleName:     rule.rule.Name,
+				Category:     rule.rule.Category,
+				Severity:     rule.rule.Severity,
+				Value:        truncateRunes(value, maxValueRunes),
+				SourceURL:    source.URL,
+				Line:         line,
+				Column:       column,
+				ContextLines: matchContext(body, start, end),
 			}
 			located = append(located, locatedFinding{finding: finding, offset: start})
 
@@ -166,14 +171,98 @@ func location(body []byte, offset int) (int, int) {
 	return line, column
 }
 
-func matchContext(body []byte, start, end int) string {
-	contextStart := max(0, start-contextRadius)
-	for contextStart < start && !utf8.RuneStart(body[contextStart]) {
-		contextStart++
+func matchContext(body []byte, start, end int) []model.ContextLine {
+	startLine := bytes.Count(body[:start], []byte{'\n'})
+	endLine := startLine
+	if end > start {
+		endLine += bytes.Count(body[start:end], []byte{'\n'})
 	}
-	contextEnd := min(len(body), end+contextRadius)
-	for contextEnd < len(body) && !utf8.RuneStart(body[contextEnd]) {
-		contextEnd++
+	lines := strings.Split(string(body), "\n")
+	firstLine := max(0, startLine-contextLines)
+	lastLine := min(len(lines)-1, endLine+contextLines)
+
+	lineOffsets := make([]int, len(lines))
+	for i := 1; i < len(lines); i++ {
+		lineOffsets[i] = lineOffsets[i-1] + len(lines[i-1]) + 1
 	}
-	return strings.TrimSpace(string(body[contextStart:contextEnd]))
+
+	result := make([]model.ContextLine, 0, lastLine-firstLine+1)
+	for index := firstLine; index <= lastLine; index++ {
+		content := strings.TrimSuffix(lines[index], "\r")
+		lineStart := lineOffsets[index]
+
+		matchStart, matchEnd := -1, -1
+		if index >= startLine && index <= endLine {
+			if index == startLine {
+				matchStart = start - lineStart
+			} else {
+				matchStart = 0
+			}
+			if index == endLine {
+				matchEnd = end - lineStart
+			} else {
+				matchEnd = len(content)
+			}
+			if matchStart < 0 {
+				matchStart = 0
+			}
+			if matchEnd > len(content) {
+				matchEnd = len(content)
+			}
+			if matchEnd < matchStart {
+				matchEnd = matchStart
+			}
+			matchStart = utf8.RuneCountInString(content[:matchStart])
+			matchEnd = utf8.RuneCountInString(content[:matchEnd])
+		}
+
+		content, matchStart, matchEnd = trimContextLine(content, matchStart, matchEnd)
+
+		result = append(result, model.ContextLine{
+			LineNumber: index + 1,
+			Content:    content,
+			MatchStart: matchStart,
+			MatchEnd:   matchEnd,
+		})
+	}
+	return result
+}
+
+// trimContextLine shortens one context line to maxContextLineRunes runes,
+// keeping the highlighted match visible and its coordinates adjusted.
+func trimContextLine(content string, matchStart, matchEnd int) (string, int, int) {
+	if utf8.RuneCountInString(content) <= maxContextLineRunes {
+		return content, matchStart, matchEnd
+	}
+	const ellipsis = "…"
+	if matchStart < 0 || matchEnd <= matchStart {
+		trimmed := []rune(content)[:maxContextLineRunes]
+		return string(trimmed) + ellipsis, matchStart, matchEnd
+	}
+	half := (maxContextLineRunes - utf8.RuneCountInString(ellipsis)) / 2
+	runes := []rune(content)
+	windowStart := max(0, matchStart-half)
+	windowEnd := min(len(runes), matchEnd+half)
+	trimmed := runes[windowStart:windowEnd]
+	prefix, suffix := "", ""
+	if windowStart > 0 {
+		prefix = ellipsis
+	}
+	if windowEnd < len(runes) {
+		suffix = ellipsis
+	}
+	newStart := matchStart - windowStart
+	newEnd := matchEnd - windowStart
+	if prefix != "" {
+		newStart += utf8.RuneCountInString(prefix)
+		newEnd += utf8.RuneCountInString(prefix)
+	}
+	return prefix + string(trimmed) + suffix, newStart, newEnd
+}
+
+func truncateRunes(value string, limit int) string {
+	if utf8.RuneCountInString(value) <= limit {
+		return value
+	}
+	return string([]rune(value)[:limit]) + "…"
 }

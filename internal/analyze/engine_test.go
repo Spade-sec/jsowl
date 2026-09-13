@@ -65,6 +65,72 @@ func TestAnalyzeDeduplicatesSameRuleSourceAndValue(t *testing.T) {
 	}
 }
 
+func TestAnalyzeContextContainsExactlyThreeSurroundingLines(t *testing.T) {
+	engine, err := New([]model.Rule{{
+		ID:       "test.context",
+		Name:     "Context",
+		Category: model.RuleCategorySensitive,
+		Severity: model.SeverityHigh,
+		Pattern:  `TOKEN`,
+		Enabled:  true,
+	}}, builtinIDs())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := []byte(strings.Join([]string{
+		"line one",
+		"line two",
+		"line three",
+		"line four",
+		"const secret = TOKEN",
+		"line six",
+		"line seven",
+		"line eight",
+		"line nine",
+	}, "\r\n"))
+	findings, _ := engine.Analyze(ResourceRef{URL: "context.js"}, body)
+	if len(findings) != 1 {
+		t.Fatalf("len(findings) = %d, want 1", len(findings))
+	}
+
+	context := findings[0].ContextLines
+	wantLines := []struct {
+		num   int
+		match bool
+	}{
+		{2, false},
+		{3, false},
+		{4, false},
+		{5, true},
+		{6, false},
+		{7, false},
+		{8, false},
+	}
+	if len(context) != len(wantLines) {
+		t.Fatalf("len(ContextLines) = %d, want %d", len(context), len(wantLines))
+	}
+	for i, want := range wantLines {
+		if context[i].LineNumber != want.num {
+			t.Errorf("ContextLines[%d].LineNumber = %d, want %d", i, context[i].LineNumber, want.num)
+		}
+		gotMatch := context[i].MatchStart >= 0 && context[i].MatchEnd > context[i].MatchStart
+		if gotMatch != want.match {
+			t.Errorf("ContextLines[%d] match = %v, want %v", i, gotMatch, want.match)
+		}
+		if want.match && !strings.Contains(context[i].Content, "TOKEN") {
+			t.Errorf("ContextLines[%d].Content does not contain TOKEN: %q", i, context[i].Content)
+		}
+	}
+	for _, excluded := range []string{"line one", "line nine"} {
+		for _, line := range context {
+			if strings.Contains(line.Content, excluded) {
+				t.Errorf("Context unexpectedly contains %q in line %d", excluded, line.LineNumber)
+			}
+		}
+	}
+}
+
 func TestNewRejectsInvalidPatternAndCaptureGroup(t *testing.T) {
 	tests := []model.Rule{
 		{ID: "bad.regex", Pattern: `(?=lookahead)`, Enabled: true},
