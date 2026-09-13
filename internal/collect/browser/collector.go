@@ -159,21 +159,58 @@ func (c *Collector) collectOnce(
 
 	var networkMu sync.Mutex
 	network := make(map[string]collect.NetworkRecord)
+	requests := make(map[string]collect.NetworkRecord)
 	eventPage, stopEvents := page.WithCancel()
 	waitEvents := eventPage.EachEvent(func(event *proto.NetworkResponseReceived) {
 		if event.Response == nil || event.Response.URL == "" {
 			return
 		}
 		networkMu.Lock()
-		network[event.Response.URL] = collect.NetworkRecord{
+		record := collect.NetworkRecord{
 			URL:          event.Response.URL,
 			StatusCode:   int(event.Response.Status),
 			ContentType:  event.Response.MIMEType,
 			ResourceType: string(event.Type),
 		}
+		if observed, ok := requests[event.Response.URL]; ok {
+			record.Method = observed.Method
+			record.InitiatorURL = observed.InitiatorURL
+			record.Line = observed.Line
+			record.Column = observed.Column
+		}
+		network[event.Response.URL] = record
 		networkMu.Unlock()
 	})
 	go waitEvents()
+	waitRequests := eventPage.EachEvent(func(event *proto.NetworkRequestWillBeSent) {
+		if event.Request == nil || event.Request.URL == "" {
+			return
+		}
+		observed := collect.NetworkRecord{
+			Method: event.Request.Method,
+		}
+		if event.Initiator != nil && event.Initiator.Stack != nil {
+			for _, frame := range event.Initiator.Stack.CallFrames {
+				if frame.URL != "" {
+					observed.InitiatorURL = frame.URL
+					observed.Line = int(frame.LineNumber) + 1
+					observed.Column = int(frame.ColumnNumber) + 1
+					break
+				}
+			}
+		}
+		networkMu.Lock()
+		requests[event.Request.URL] = observed
+		if record, ok := network[event.Request.URL]; ok && record.Method == "" {
+			record.Method = observed.Method
+			record.InitiatorURL = observed.InitiatorURL
+			record.Line = observed.Line
+			record.Column = observed.Column
+			network[event.Request.URL] = record
+		}
+		networkMu.Unlock()
+	})
+	go waitRequests()
 	defer stopEvents()
 
 	idle := c.config.Idle

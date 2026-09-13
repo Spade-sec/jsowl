@@ -28,6 +28,14 @@ type NetworkRecord struct {
 	StatusCode   int
 	ContentType  string
 	ResourceType string
+	// Method is the observed HTTP verb; POST/PUT/PATCH matter most because
+	// JsOwl itself never sends them.
+	Method string
+	// InitiatorURL, Line and Column locate the script that issued the
+	// request, when the browser reported a stack.
+	InitiatorURL string
+	Line         int
+	Column       int
 }
 
 // BrowserResult contains the rendered document and resources observed at runtime.

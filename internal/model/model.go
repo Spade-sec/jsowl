@@ -30,6 +30,13 @@ const (
 	SeverityCritical Severity = "critical"
 )
 
+// Endpoint evidence ranks how strongly an API path is confirmed.
+const (
+	EvidenceRuntime = "runtime"  // observed as a live browser request via CDP
+	EvidenceFullURL = "full-url" // absolute URL recovered by AST analysis
+	EvidenceStatic  = "static"   // relative path from AST or regex matching
+)
+
 type ResourceType string
 
 const (
@@ -103,7 +110,8 @@ type Config struct {
 	Limits      LimitsConfig      `yaml:"limits" json:"limits"`
 	Scope       ScopeConfig       `yaml:"scope" json:"scope"`
 	Output      OutputConfig      `yaml:"output" json:"output"`
-	Rules       RulesConfig       `yaml:"rules" json:"rules"`
+	RulesFile   string            `yaml:"rules_file" json:"rules_file,omitempty"`
+	Rules       RulesConfig       `yaml:"-" json:"rules"`
 }
 
 // Target describes one isolated scan target and its request state.
@@ -150,19 +158,31 @@ type Endpoint struct {
 	SourceURL  string `json:"source_url"`
 	Authorized bool   `json:"authorized"`
 	StatusCode int    `json:"status_code,omitempty"`
+	Method     string `json:"method,omitempty"`
+	Evidence   string `json:"evidence,omitempty"`
+	Line       int    `json:"line,omitempty"`
+	Column     int    `json:"column,omitempty"`
+}
+
+// ContextLine is one line of surrounding source code for a finding.
+type ContextLine struct {
+	LineNumber int    `json:"line_number"`
+	Content    string `json:"content"`
+	MatchStart int    `json:"match_start"`
+	MatchEnd   int    `json:"match_end"`
 }
 
 // Finding records one rule match and its source location.
 type Finding struct {
-	RuleID    string       `json:"rule_id"`
-	RuleName  string       `json:"rule_name"`
-	Category  RuleCategory `json:"category"`
-	Severity  Severity     `json:"severity"`
-	Value     string       `json:"value"`
-	SourceURL string       `json:"source_url"`
-	Line      int          `json:"line"`
-	Column    int          `json:"column"`
-	Context   string       `json:"context"`
+	RuleID       string        `json:"rule_id"`
+	RuleName     string        `json:"rule_name"`
+	Category     RuleCategory  `json:"category"`
+	Severity     Severity      `json:"severity"`
+	Value        string        `json:"value"`
+	SourceURL    string        `json:"source_url"`
+	Line         int           `json:"line"`
+	Column       int           `json:"column"`
+	ContextLines []ContextLine `json:"context_lines"`
 }
 
 // Issue records a non-fatal resource error or diagnostic event.

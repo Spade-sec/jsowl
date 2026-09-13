@@ -284,7 +284,19 @@ func needsBrowser(evidence discover.SPAEvidence, result *model.Result) bool {
 }
 
 func browserSeeds(rendered collect.BrowserResult) []pipeline.Seed {
-	seen := make(map[string]model.ResourceType)
+	seen := make(map[string]pipeline.Seed)
+	addSeed := func(raw string, kind model.ResourceType, record collect.NetworkRecord) {
+		if _, exists := seen[raw]; !exists {
+			seen[raw] = pipeline.Seed{
+				URL: raw, Kind: kind,
+				Evidence:     model.EvidenceRuntime,
+				Method:       record.Method,
+				InitiatorURL: record.InitiatorURL,
+				Line:         record.Line,
+				Column:       record.Column,
+			}
+		}
+	}
 	for _, record := range rendered.Network {
 		kind := model.ResourceType("")
 		switch strings.ToLower(record.ResourceType) {
@@ -299,18 +311,18 @@ func browserSeeds(rendered collect.BrowserResult) []pipeline.Seed {
 			kind = model.ResourceTypeScript
 		}
 		if kind != "" {
-			seen[record.URL] = kind
+			addSeed(record.URL, kind, record)
 		}
 	}
 	for _, raw := range rendered.URLs {
 		parsed, err := url.Parse(raw)
 		if err == nil && isJavaScriptExtension(parsed.Path) {
-			seen[raw] = model.ResourceTypeScript
+			addSeed(raw, model.ResourceTypeScript, collect.NetworkRecord{})
 		}
 	}
 	seeds := make([]pipeline.Seed, 0, len(seen))
-	for raw, kind := range seen {
-		seeds = append(seeds, pipeline.Seed{URL: raw, Kind: kind})
+	for _, seed := range seen {
+		seeds = append(seeds, seed)
 	}
 	sort.Slice(seeds, func(i, j int) bool { return seeds[i].URL < seeds[j].URL })
 	return seeds
@@ -346,6 +358,15 @@ func mergeResults(primary, secondary *model.Result) *model.Result {
 		if index, duplicate := endpointIndex[endpoint.URL]; duplicate {
 			if endpoint.StatusCode != 0 {
 				primary.Endpoints[index].StatusCode = endpoint.StatusCode
+			}
+			// Runtime observation outranks static extraction.
+			if endpoint.Evidence == model.EvidenceRuntime &&
+				primary.Endpoints[index].Evidence != model.EvidenceRuntime {
+				primary.Endpoints[index].Evidence = endpoint.Evidence
+				primary.Endpoints[index].Method = endpoint.Method
+				primary.Endpoints[index].SourceURL = endpoint.SourceURL
+				primary.Endpoints[index].Line = endpoint.Line
+				primary.Endpoints[index].Column = endpoint.Column
 			}
 			continue
 		}

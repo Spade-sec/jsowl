@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/PuerkitoBio/goquery v1.10.3
 	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/dop251/goja v0.0.0-20260911104922-fabc3b8078ad
 	github.com/enetx/g v1.0.202
 	github.com/enetx/surf v1.0.173
 	github.com/go-rod/rod v0.116.2
@@ -20,6 +21,7 @@ require (
 	github.com/enetx/http3 v1.0.6 // indirect
 	github.com/enetx/iter v0.0.0-20250912135656-f1583323588f // indirect
 	github.com/enetx/utls v0.0.0-20260115181616-c525a7d559c8 // indirect
+	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/kr/text v0.2.0 // indirect

@@ -35,6 +35,13 @@ type Pipeline struct {
 type Seed struct {
 	URL  string
 	Kind model.ResourceType
+	// Evidence, Method and initiator position come from runtime observation
+	// (CDP) and mark the resulting endpoint as confirmed.
+	Evidence     string
+	Method       string
+	InitiatorURL string
+	Line         int
+	Column       int
 }
 
 type outcome struct {
@@ -123,6 +130,23 @@ func (p *Pipeline) RunDetailed(
 		if seed.Kind == model.ResourceTypeAPI {
 			allowed = targetScope.CanProbe(seedURL)
 		}
+		if seed.Kind == model.ResourceTypeAPI {
+			// Runtime-observed endpoints are reported regardless of probe
+			// authorization; only the active GET probe is gated.
+			canonical := scope.Canonical(seedURL)
+			if _, exists := endpointIndex[canonical]; !exists {
+				endpointIndex[canonical] = len(result.Endpoints)
+				result.Endpoints = append(result.Endpoints, model.Endpoint{
+					Raw: canonical, URL: canonical,
+					SourceURL:  seed.InitiatorURL,
+					Authorized: targetScope.CanProbe(seedURL),
+					Method:     seed.Method,
+					Evidence:   seed.Evidence,
+					Line:       seed.Line,
+					Column:     seed.Column,
+				})
+			}
+		}
 		if !allowed {
 			continue
 		}
@@ -134,11 +158,14 @@ func (p *Pipeline) RunDetailed(
 		})
 		if seed.Kind == model.ResourceTypeAPI {
 			canonical := scope.Canonical(seedURL)
-			if _, exists := endpointIndex[canonical]; !exists {
+			if index, exists := endpointIndex[canonical]; exists {
+				result.Endpoints[index].Authorized = true
+			} else {
 				endpointIndex[canonical] = len(result.Endpoints)
 				result.Endpoints = append(result.Endpoints, model.Endpoint{
 					Raw: canonical, URL: canonical,
 					SourceURL: scope.Canonical(root), Authorized: true,
+					Evidence: seed.Evidence,
 				})
 			}
 		}
@@ -272,6 +299,10 @@ func (p *Pipeline) RunDetailed(
 						result.Endpoints = append(result.Endpoints, model.Endpoint{
 							Raw: candidate.Raw, URL: canonical,
 							SourceURL: collected.response.URL, Authorized: authorized,
+							Method:   candidate.Method,
+							Evidence: candidateEvidence(candidate, resolved),
+							Line:     candidate.Line,
+							Column:   candidate.Column,
 						})
 					}
 					if authorized {
@@ -376,6 +407,7 @@ func (p *Pipeline) collectOne(
 		htmlResult := discover.FromHTML(discoveryBase, response.Body)
 		mergeSPAEvidence(&result.spa, htmlResult.SPA)
 		result.candidates = append(result.candidates, htmlResult.Candidates...)
+		result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, textResult.SPA)
 		result.findings = append(result.findings, textResult.Findings...)
@@ -385,9 +417,14 @@ func (p *Pipeline) collectOne(
 			mergeSPAEvidence(&result.spa, inlineResult.SPA)
 			result.findings = append(result.findings, inlineResult.Findings...)
 			result.candidates = append(result.candidates, inlineResult.Candidates...)
+			result.candidates = append(
+				result.candidates,
+				discover.APIFromAST(source, []byte(inline))...,
+			)
 		}
 	case item.Kind == model.ResourceTypeScript || item.Kind == model.ResourceTypeChunk ||
 		strings.Contains(contentType, "javascript"):
+		result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
 		jsResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, jsResult.SPA)
 		result.findings = append(result.findings, jsResult.Findings...)
@@ -420,6 +457,19 @@ func (p *Pipeline) collectOne(
 func isRelativeReference(raw string) bool {
 	reference, err := url.Parse(strings.TrimSpace(raw))
 	return err == nil && reference.Scheme == "" && reference.Host == ""
+}
+
+// candidateEvidence grades a candidate once resolved against its base.
+func candidateEvidence(candidate discover.Candidate, resolved *url.URL) string {
+	if candidate.Evidence != "" {
+		return candidate.Evidence
+	}
+	if resolved.Scheme == "http" || resolved.Scheme == "https" {
+		if !isRelativeReference(candidate.Raw) {
+			return model.EvidenceFullURL
+		}
+	}
+	return model.EvidenceStatic
 }
 
 func isTextualContentType(contentType string) bool {

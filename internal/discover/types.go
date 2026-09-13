@@ -19,6 +19,13 @@ type Candidate struct {
 	Kind      Kind
 	SourceURL string
 	Depth     int
+	// Method is the HTTP method bound to an endpoint candidate, if known.
+	Method string
+	// Evidence marks extraction strength: full-url, static, or runtime.
+	Evidence string
+	// Line and Column locate the match inside the source (1-based).
+	Line   int
+	Column int
 }
 
 // SPAEvidence records static signals that indicate browser rendering may add resources.

@@ -10,6 +10,8 @@ github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6N
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/dop251/goja v0.0.0-20260911104922-fabc3b8078ad h1:5gT9hQ9h8CplLZfAGgFMcoLqQS6I9T2sZwQOCXy8/3s=
+github.com/dop251/goja v0.0.0-20260911104922-fabc3b8078ad/go.mod h1:u8yZRUavu+N4EnFFy6J5fVtjE7lEcZ2YyV2GcBXY9c8=
 github.com/enetx/g v1.0.202 h1:E32/PWp542wHh7c5VYPGohK0Nu6CpiRm34vr0P1F6dU=
 github.com/enetx/g v1.0.202/go.mod h1:6/HQeRy+tIJVGY+oRPQVJ/vOSruAi0aldFggurT6jBY=
 github.com/enetx/http v1.0.24 h1:sMeJ0rN00HlUYLIhUTHx36KumAlkaZu7vsQe5+GMTNM=
@@ -26,6 +28,8 @@ github.com/enetx/utls v0.0.0-20260115181616-c525a7d559c8 h1:jN2LdG4CG7cXOMAkQVDe
 github.com/enetx/utls v0.0.0-20260115181616-c525a7d559c8/go.mod h1:jsHaW4RX6DteSbAHT/pW7iJxv7YXLf2NTr3k9PsmXoc=
 github.com/go-rod/rod v0.116.2 h1:A5t2Ky2A+5eD/ZJQr1EfsQSe5rms5Xof/qj296e+ZqA=
 github.com/go-rod/rod v0.116.2/go.mod h1:H+CMO9SCNc2TJ2WfrG+pKhITz57uGNYU43qYHh438Mg=
+github.com/go-sourcemap/sourcemap v2.1.3+incompatible h1:W1iEw64niKVGogNgBN3ePyLFfuisuzeidWPMPWmECqU=
+github.com/go-sourcemap/sourcemap v2.1.3+incompatible/go.mod h1:F8jJfvm2KbVjc5NqelyYJmf/v5J0dwNLS2mL4sNA1Jg=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
