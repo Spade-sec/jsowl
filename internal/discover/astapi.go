@@ -351,6 +351,7 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 	switch expressed := unwrap(callee).(type) {
 	case *ast.DotExpression:
 		property := string(expressed.Identifier.Name)
+		receiver := outermostIdentifierString(expressed.Left)
 		switch property {
 		case "open":
 			// XMLHttpRequest.open(method, url, ...)
@@ -360,10 +361,18 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 				}
 				urlArgument = 1
 			}
-		case "get", "post", "put", "patch", "delete", "head", "options":
-			method = strings.ToUpper(property)
+		case "get", "post", "put", "patch", "delete", "head", "options",
+			"getJSON":
+			method = strings.ToUpper(strings.TrimSuffix(property, "JSON"))
 			urlArgument = 0
-			if method == "POST" || method == "PUT" || method == "PATCH" {
+			writeVerb := method == "POST" || method == "PUT" ||
+				method == "PATCH" || method == "DELETE"
+			if receiver == "ky" {
+				// ky.post(url, {json: ...}) keeps the body in the options.
+				if arg(args, 1) != nil {
+					bodyArgument = -4
+				}
+			} else if writeVerb {
 				bodyArgument = 1
 			}
 		case "request", "ajax", "api":
@@ -377,6 +386,16 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 			}
 			if arg(args, 1) != nil {
 				bodyArgument = -3 // body may live in the options object
+			}
+		}
+		if receiver == "wx" || receiver == "uni" || receiver == "taro" ||
+			receiver == "Taro" || receiver == "my" || receiver == "tt" {
+			if property == "request" {
+				method, urlArgument = objectCallArgs(args)
+				if method == "" {
+					method = "GET" // mini-program requests default to GET
+				}
+				bodyArgument = -2 // mini-program bodies ride in {data: ...}
 			}
 		}
 	case *ast.Identifier:
@@ -393,9 +412,19 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 		case "ajax", "api":
 			method, urlArgument = objectCallArgs(args)
 			bodyArgument = -2 // body rides inside the options object
+		case "$fetch", "ofetch", "$ofetch", "ky":
+			// ofetch/ky callables: url first, options object second.
+			method = "GET"
+			urlArgument = 0
+			if fromOptions := optionsMethod(arg(args, 1)); fromOptions != "" {
+				method = fromOptions
+			}
+			if arg(args, 1) != nil {
+				bodyArgument = -5 // {body} for ofetch, {json} for ky
+			}
 		}
 	}
-	if urlArgument < 0 || urlArgument >= len(args) {
+if urlArgument < 0 || urlArgument >= len(args) {
 		return
 	}
 	raw, evidence := w.resolveURLExpression(args[urlArgument])
@@ -500,7 +529,7 @@ func (w *astWalker) bodyParameterNames(args []ast.Expression, method string, url
 				body = keyed.Value
 			}
 		}
-	case -3: // fetch(url, {body: ...})
+	case -3: // fetch/ofetch(url, {body: ...})
 		if options, ok := unwrap(arg(args, 1)).(*ast.ObjectLiteral); ok {
 			for _, property := range options.Value {
 				keyed, ok := property.(*ast.PropertyKeyed)
@@ -508,6 +537,29 @@ func (w *astWalker) bodyParameterNames(args []ast.Expression, method string, url
 					continue
 				}
 				body = keyed.Value
+			}
+		}
+	case -4: // ky.post(url, {json: ...})
+		if options, ok := unwrap(arg(args, 1)).(*ast.ObjectLiteral); ok {
+			for _, property := range options.Value {
+				keyed, ok := property.(*ast.PropertyKeyed)
+				if !ok || propertyName(keyed.Key) != "json" {
+					continue
+				}
+				body = keyed.Value
+			}
+		}
+	case -5: // ofetch/$fetch/ky(url, {body|json: ...})
+		if options, ok := unwrap(arg(args, 1)).(*ast.ObjectLiteral); ok {
+			for _, property := range options.Value {
+				keyed, ok := property.(*ast.PropertyKeyed)
+				if !ok {
+					continue
+				}
+				switch propertyName(keyed.Key) {
+				case "body", "json":
+					body = keyed.Value
+				}
 			}
 		}
 	default:
