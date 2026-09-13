@@ -27,6 +27,7 @@ func WriteSplitReports(directory string, result *model.Result) error {
 		{"API报告.html", "API 端点报告", renderAPIReport},
 		{"敏感信息报告.html", "敏感信息报告", renderSensitiveReport},
 		{"参数报告.html", "请求参数报告", renderParameterReport},
+		{"路由报告.html", "路由探测报告", renderRouteReport},
 		{"资源报告.html", "资源报告", renderResourceReport},
 	}
 	links := []linkItem{
@@ -48,6 +49,7 @@ func WriteSplitReports(directory string, result *model.Result) error {
 	}
 	links = append(links,
 		linkItem{File: "api路径.txt", Name: "API 路径", Desc: "纯文本端点列表"},
+		linkItem{File: "路由.txt", Name: "路由", Desc: "纯文本路由列表"},
 		linkItem{File: "参数.txt", Name: "请求参数", Desc: "参数名=值 与来源"},
 		linkItem{File: "敏感信息.txt", Name: "敏感信息", Desc: "纯文本命中列表"},
 	)
@@ -171,14 +173,7 @@ func renderAPIReport(result *model.Result) (int, string, error) {
 		if len(endpoint.BodyParams) > 0 {
 			bodyNote = `<div class="muted">body: ` + htmlEscape(strings.Join(endpoint.BodyParams, ", ")) + `</div>`
 		}
-		rawNote := ""
-		if endpoint.Raw != "" && endpoint.Raw != endpoint.URL {
-			kind := "绝对"
-			if isRelativeRaw(endpoint.Raw) {
-				kind = "相对"
-			}
-			rawNote = `<div class="muted">原始(` + kind + `): ` + htmlEscape(endpoint.Raw) + `</div>`
-		}
+		rawNote := rawPathNote(endpoint)
 		fmt.Fprintf(&b,
 			"<tr><td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code>%s</td><td><code>%s</code>%s%s</td><td>%t</td><td>%d</td></tr>",
 			htmlEscape(method), evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
@@ -456,6 +451,68 @@ func renderParameterReport(result *model.Result) (int, string, error) {
 })();
 </script>`)
 	return len(rows), b.String(), nil
+}
+
+// renderRouteReport renders framework routes with source and probe outcome.
+func renderRouteReport(result *model.Result) (int, string, error) {
+	routes := make([]model.Endpoint, 0, len(result.Endpoints))
+	for _, endpoint := range result.Endpoints {
+		if endpoint.Type == "route" {
+			routes = append(routes, endpoint)
+		}
+	}
+	sort.SliceStable(routes, func(i, j int) bool { return routes[i].URL < routes[j].URL })
+	var b strings.Builder
+	b.WriteString(`<table><thead><tr><th>路由路径</th><th style="width:140px">提取方式</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:110px">探测结果</th></tr></thead><tbody>`)
+	for _, route := range routes {
+		probe := route.Probe
+		probeLabel, probeClass := "未探测", "info"
+		switch probe {
+		case "server":
+			probeLabel, probeClass = "服务端真实页面", "runtime"
+		case "static":
+			probeLabel, probeClass = "纯前端路由", "info"
+		case "error":
+			probeLabel, probeClass = "探测失败", "medium"
+		case "unknown":
+			probeLabel, probeClass = "无基准", "info"
+		}
+		fmt.Fprintf(&b,
+			"<tr><td><code>%s</code>%s</td><td>%s</td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code></td><td><span class=\"sev %s\">%s</span></td></tr>",
+			htmlEscape(route.URL), rawPathNote(route), htmlEscape(extractorLabel(route.Source)),
+			evidenceClass(route.Evidence), htmlEscape(evidenceLabel(route.Evidence)),
+			htmlEscape(route.SourceURL),
+			probeClass, htmlEscape(probeLabel))
+	}
+	b.WriteString("</tbody></table>")
+	return len(routes), b.String(), nil
+}
+
+// rawPathNote renders the pre-resolution path annotation.
+func rawPathNote(endpoint model.Endpoint) string {
+	if endpoint.Raw == "" || endpoint.Raw == endpoint.URL {
+		return ""
+	}
+	kind := "绝对"
+	if isRelativeRaw(endpoint.Raw) {
+		kind = "相对"
+	}
+	return `<div class="muted">原始(` + kind + `): ` + htmlEscape(endpoint.Raw) + `</div>`
+}
+
+func extractorLabel(source string) string {
+	switch source {
+	case "cdp", "cdp-runtime":
+		return "CDP 运行时"
+	case "ast":
+		return "AST"
+	case "regex":
+		return "正则"
+	}
+	if source == "" {
+		return "—"
+	}
+	return source
 }
 
 func renderResourceReport(result *model.Result) (int, string, error) {

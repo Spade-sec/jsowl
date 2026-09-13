@@ -32,6 +32,18 @@ func APIRules() []model.Rule {
 			1,
 		),
 		urlRule(
+			"url.react-route-element",
+			"React router path (element config)",
+			`\{\s*path\s*:\s*["']([^"'\s]{1,200})["']\s*,\s*(?:element|children|Component|loader|index)\s*[,:]`,
+			1,
+		),
+		urlRule(
+			"url.react-route-jsx",
+			"React router path (compiled JSX)",
+			`(?i)(?:createElement|jsx|jsxs)\s*\(\s*"?[A-Za-z$_][\w$]*"?\s*,\s*\{[^{}]{0,200}?path\s*:\s*["']([^"']{1,200})["']`,
+			1,
+		),
+		urlRule(
 			"url.assignment",
 			"URL assignment",
 			`(?i)(?:url|href|src)\s*[:=]\s*(?:[\w$.]+\s*\+\s*)?["']([^"']+)["']`,

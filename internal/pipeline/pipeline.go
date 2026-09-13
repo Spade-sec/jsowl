@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"mime"
 	"net/http"
@@ -132,6 +133,22 @@ func (p *Pipeline) RunDetailed(
 		if seed.Kind == model.ResourceTypeAPI {
 			allowed = targetScope.CanProbe(seedURL)
 		}
+		if seed.Kind == model.ResourceTypeRoute {
+			// Runtime-observed framework routes are recorded but never probed.
+			canonical := scope.Canonical(seedURL)
+			if _, exists := endpointIndex[canonical]; !exists {
+				endpointIndex[canonical] = len(result.Endpoints)
+				result.Endpoints = append(result.Endpoints, model.Endpoint{
+					Raw: seed.URL, URL: canonical,
+					SourceURL:  seed.InitiatorURL,
+					Authorized: false,
+					Type:       "route",
+					Evidence:   model.EvidenceRuntime,
+					Source:     seed.Source,
+				})
+			}
+			continue
+		}
 		if seed.Kind == model.ResourceTypeAPI {
 			// Runtime-observed endpoints are reported regardless of probe
 			// authorization; only the active GET probe is gated.
@@ -147,6 +164,7 @@ func (p *Pipeline) RunDetailed(
 					Line:       seed.Line,
 					Column:     seed.Column,
 					Source:     seed.Source,
+					Type:       "api",
 				})
 			}
 		}
@@ -169,6 +187,7 @@ func (p *Pipeline) RunDetailed(
 					Raw: canonical, URL: canonical,
 					SourceURL: scope.Canonical(root), Authorized: true,
 					Evidence: seed.Evidence,
+					Type:     "api",
 				})
 			}
 		}
@@ -309,6 +328,7 @@ func (p *Pipeline) RunDetailed(
 							ContextLines: candidate.ContextLines,
 							BodyParams:   candidate.BodyParams,
 							Source:       candidate.Source,
+							Type:         "api",
 						})
 					}
 					if authorized {
@@ -324,6 +344,8 @@ func (p *Pipeline) RunDetailed(
 							Raw: candidate.Raw, URL: canonical,
 							SourceURL:  collected.response.URL,
 							Authorized: targetScope.CanProbe(resolved),
+							Type:       routeType(candidate),
+							Source:     candidate.Source,
 						})
 					}
 				}
@@ -331,6 +353,9 @@ func (p *Pipeline) RunDetailed(
 		}
 	}
 
+	if p.options.Config.Scope.ProbeRoutes {
+		p.probeRoutes(ctx, result, headers, root)
+	}
 	if spa.RootNode || spa.DynamicImport || spa.HistoryRouting || spa.DynamicScript {
 		result.Technologies = append(result.Technologies, "spa")
 	}
@@ -460,9 +485,76 @@ func (p *Pipeline) collectOne(
 	return result
 }
 
+// probeRoutes GETs framework routes on the target origin and compares each
+// body against the index page, separating server-backed routes from pure
+// SPA fallbacks.
+func (p *Pipeline) probeRoutes(
+	ctx context.Context,
+	result *model.Result,
+	headers http.Header,
+	root *url.URL,
+) {
+	const maxRouteProbes = 100
+	rootHash, rootOK := p.routeBodyHash(ctx, root, headers)
+	probed := 0
+	for index := range result.Endpoints {
+		endpoint := &result.Endpoints[index]
+		if endpoint.Type != "route" {
+			continue
+		}
+		target, err := url.Parse(endpoint.URL)
+		if err != nil || target.Host != root.Host || probed >= maxRouteProbes {
+			continue
+		}
+		probed++
+		response, err := p.options.Getter.Get(ctx, target,
+			collect.HeadersForURL(headers, root, target))
+		if err != nil {
+			endpoint.Probe = "error"
+			continue
+		}
+		endpoint.StatusCode = response.StatusCode
+		if !rootOK {
+			endpoint.Probe = "unknown"
+			continue
+		}
+		if sha256.Sum256(response.Body) == rootHash {
+			endpoint.Probe = "static"
+		} else {
+			endpoint.Probe = "server"
+		}
+	}
+}
+
+func (p *Pipeline) routeBodyHash(
+	ctx context.Context,
+	location *url.URL,
+	headers http.Header,
+) ([32]byte, bool) {
+	var empty [32]byte
+	response, err := p.options.Getter.Get(ctx, location,
+		collect.HeadersForURL(headers, location, location))
+	if err != nil {
+		return empty, false
+	}
+	return sha256.Sum256(response.Body), true
+}
+
 func isRelativeReference(raw string) bool {
 	reference, err := url.Parse(strings.TrimSpace(raw))
 	return err == nil && reference.Scheme == "" && reference.Host == ""
+}
+
+// routeType distinguishes true framework routes (dedicated router rules or
+// runtime observation) from generic quoted URLs that only default to the
+// route classification.
+func routeType(candidate discover.Candidate) string {
+	if candidate.Source == "cdp-runtime" ||
+		strings.HasPrefix(candidate.RuleID, "url.vue-route") ||
+		strings.HasPrefix(candidate.RuleID, "url.react-route") {
+		return "route"
+	}
+	return "link"
 }
 
 // candidateEvidence grades a candidate once resolved against its base.

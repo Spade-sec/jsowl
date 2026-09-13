@@ -32,6 +32,8 @@ type Candidate struct {
 	BodyParams []string
 	// Source records the extractor that produced this candidate: ast or regex.
 	Source string
+	// RuleID is the regex rule that matched, when extraction came from rules.
+	RuleID string
 }
 
 // SPAEvidence records static signals that indicate browser rendering may add resources.

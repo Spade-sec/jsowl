@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/youmulijiang/jsowl/internal/analyze"
+
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
@@ -213,5 +215,24 @@ func TestAPIFromASTExtractsBodyParameters(t *testing.T) {
 	}
 	if get := findCandidate(candidates, "/users/list"); len(get.BodyParams) != 0 {
 		t.Fatalf("GET should have no body params: %v", get.BodyParams)
+	}
+}
+
+func TestReactRouterRulesClassifyRoutes(t *testing.T) {
+	source, _ := url.Parse("https://example.test/routes.js")
+	engine, err := analyze.New(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`createBrowserRouter([{path:"/react/dashboard",element:1},{path:"/react/settings",element:2}]);`)
+	result := FromJavaScript(source, body, engine)
+	routes := []string{}
+	for _, candidate := range result.Candidates {
+		if candidate.Kind == KindRoute {
+			routes = append(routes, candidate.Raw)
+		}
+	}
+	if len(routes) != 2 {
+		t.Fatalf("react routes = %v", routes)
 	}
 }

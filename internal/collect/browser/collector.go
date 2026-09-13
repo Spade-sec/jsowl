@@ -234,7 +234,7 @@ func (c *Collector) collectOnce(
 	if err != nil {
 		return collect.BrowserResult{}, fmt.Errorf("read rendered HTML: %w", err)
 	}
-	injectedURLs, err := snapshotURLs(page, c.config.DisableInjection)
+	injectedURLs, injectedRoutes, err := snapshotURLs(page, c.config.DisableInjection)
 	if err != nil {
 		return collect.BrowserResult{}, err
 	}
@@ -261,9 +261,12 @@ func (c *Collector) collectOnce(
 	sort.Strings(urls)
 	sort.Slice(records, func(i, j int) bool { return records[i].URL < records[j].URL })
 
+	sort.Slice(injectedRoutes, func(i, j int) bool {
+		return injectedRoutes[i].Path < injectedRoutes[j].Path
+	})
 	return collect.BrowserResult{
-		HTML: []byte(html), URLs: urls, Network: records,
-		Cookies: convertCookies(browserCookies),
+		HTML: []byte(html), URLs: urls, Routes: injectedRoutes,
+		Network: records, Cookies: convertCookies(browserCookies),
 	}, nil
 }
 
@@ -448,17 +451,23 @@ func waitDuration(ctx context.Context, duration time.Duration) error {
 	}
 }
 
-func snapshotURLs(page *rod.Page, disabled bool) ([]string, error) {
+func snapshotURLs(
+	page *rod.Page,
+	disabled bool,
+) ([]string, []collect.BrowserRoute, error) {
 	if disabled {
-		return nil, nil
+		return nil, nil, nil
 	}
-	value, err := page.Eval(`() => window.__jsowlCollector ? window.__jsowlCollector.snapshot() : []`)
+	value, err := page.Eval(`() => window.__jsowlCollector ? window.__jsowlCollector.snapshot() : {urls: [], routes: []}`)
 	if err != nil {
-		return nil, fmt.Errorf("read injected collector results: %w", err)
+		return nil, nil, fmt.Errorf("read injected collector results: %w", err)
 	}
-	var urls []string
-	if err := value.Value.Unmarshal(&urls); err != nil {
-		return nil, fmt.Errorf("decode injected collector results: %w", err)
+	var snapshot struct {
+		URLs   []string               `json:"urls"`
+		Routes []collect.BrowserRoute `json:"routes"`
 	}
-	return urls, nil
+	if err := value.Value.Unmarshal(&snapshot); err != nil {
+		return nil, nil, fmt.Errorf("decode injected collector results: %w", err)
+	}
+	return snapshot.URLs, snapshot.Routes, nil
 }

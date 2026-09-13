@@ -38,10 +38,18 @@ type NetworkRecord struct {
 	Column       int
 }
 
+// BrowserRoute is one framework route observed at runtime.
+type BrowserRoute struct {
+	Path   string
+	Name   string
+	Source string // vue, history-hook, or dom
+}
+
 // BrowserResult contains the rendered document and resources observed at runtime.
 type BrowserResult struct {
 	HTML    []byte
 	URLs    []string
+	Routes  []BrowserRoute
 	Network []NetworkRecord
 	Cookies []*http.Cookie
 }

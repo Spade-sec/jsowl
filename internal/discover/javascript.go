@@ -34,6 +34,7 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 			SourceURL: source.String(),
 			Source:    "regex",
 			Method:    extractedCandidate.Method,
+			RuleID:    extractedCandidate.RuleID,
 		}
 		if kind == KindEndpoint && extractedCandidate.Offset > 0 {
 			candidate.Line, candidate.Column = lineColumn(body, extractedCandidate.Offset)
@@ -62,7 +63,7 @@ func classifyCandidate(candidate analyze.Candidate) Kind {
 	switch candidate.RuleID {
 	case "url.api-call", "url.api-prefix", "url.path-variable":
 		return KindEndpoint
-	case "url.vue-route":
+	case "url.vue-route", "url.react-route-element", "url.react-route-jsx":
 		return KindRoute
 	case "url.webpack-loader":
 		return KindChunk

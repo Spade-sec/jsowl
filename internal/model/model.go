@@ -86,6 +86,9 @@ type ScopeConfig struct {
 	SuffixBlacklist        []string `yaml:"suffix_blacklist" json:"suffix_blacklist"`
 	FetchExternalScripts   bool     `yaml:"fetch_external_scripts" json:"fetch_external_scripts"`
 	ProbeExternalEndpoints bool     `yaml:"probe_external_endpoints" json:"probe_external_endpoints"`
+	// ProbeRoutes optionally GETs framework routes and compares their body
+	// against the index page to tell server-backed routes from SPA fallbacks.
+	ProbeRoutes bool `yaml:"probe_routes" json:"probe_routes"`
 }
 
 type OutputConfig struct {
@@ -164,6 +167,11 @@ type Endpoint struct {
 	Evidence   string `json:"evidence,omitempty"`
 	// Source records how the endpoint was found: cdp, ast, or regex.
 	Source string `json:"source,omitempty"`
+	// Type separates backend APIs from framework routes: api or route.
+	Type string `json:"type,omitempty"`
+	// Probe records the optional route probe outcome: server (distinct body
+	// from the index), static (identical), or error.
+	Probe string `json:"probe,omitempty"`
 	Line       int    `json:"line,omitempty"`
 	Column     int    `json:"column,omitempty"`
 	// ContextLines carries up to three surrounding source lines so reports

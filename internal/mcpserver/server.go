@@ -85,6 +85,7 @@ type scanOutput struct {
 	ReportDir       string   `json:"report_dir"`
 	Resources       int      `json:"resources"`
 	Endpoints       int      `json:"endpoints"`
+	Routes          int      `json:"routes"`
 	Sensitive       int      `json:"sensitive_findings"`
 	RuntimeEvidence int      `json:"runtime_endpoints"`
 	FullURLEvidence int      `json:"full_url_endpoints"`
@@ -135,6 +136,7 @@ func (s *Store) scanTool(ctx context.Context, req *mcp.CallToolRequest, input sc
 		ScanID: id, Target: result.Target, Mode: string(result.Mode),
 		ReportDir: reportDir,
 		Resources: len(result.Resources), Endpoints: len(result.Endpoints),
+		Routes:   countRoutes(result),
 		Sensitive: countSensitive(result),
 		RuntimeEvidence: countEvidence(result, model.EvidenceRuntime),
 		FullURLEvidence: countEvidence(result, model.EvidenceFullURL),
@@ -158,6 +160,7 @@ type endpointsInput struct {
 	ScanID   string `json:"scan_id" jsonschema:"scan id returned by jsowl_scan"`
 	Evidence string `json:"evidence,omitempty" jsonschema:"filter: runtime, full-url, or static"`
 	Method   string `json:"method,omitempty" jsonschema:"filter by HTTP method, e.g. POST"`
+	Type     string `json:"type,omitempty" jsonschema:"filter: api (backend endpoints) or route (framework routes)"`
 	Search   string `json:"search,omitempty" jsonschema:"substring match against URL"`
 	WithCtx  bool   `json:"with_context,omitempty" jsonschema:"include surrounding source code lines"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"max rows to return (default 50)"`
@@ -167,6 +170,8 @@ type endpointRow struct {
 	URL        string   `json:"url"`
 	Method     string   `json:"method,omitempty"`
 	Evidence   string   `json:"evidence,omitempty"`
+	Type       string   `json:"type,omitempty"`
+	Probe      string   `json:"probe,omitempty"`
 	Source     string   `json:"source,omitempty"`
 	Line       int      `json:"line,omitempty"`
 	Status     int      `json:"status_code,omitempty"`
@@ -191,13 +196,17 @@ func (s *Store) endpointsTool(ctx context.Context, req *mcp.CallToolRequest, inp
 		if input.Method != "" && !strings.EqualFold(endpoint.Method, input.Method) {
 			continue
 		}
+		if input.Type != "" && endpoint.Type != input.Type {
+			continue
+		}
 		if input.Search != "" && !strings.Contains(strings.ToLower(endpoint.URL), strings.ToLower(input.Search)) {
 			continue
 		}
 		row := endpointRow{
 			URL: endpoint.URL, Method: endpoint.Method,
 			Evidence: evidenceOr(endpoint.Evidence),
-			Source:   endpoint.SourceURL, Line: endpoint.Line,
+			Type:     endpoint.Type, Probe: endpoint.Probe,
+			Source: endpoint.SourceURL, Line: endpoint.Line,
 			Status: endpoint.StatusCode, BodyParams: endpoint.BodyParams,
 		}
 		if input.WithCtx {
@@ -369,6 +378,16 @@ func (s *Store) writeReports(id string, result *model.Result) (string, error) {
 		return directory, err
 	}
 	return directory, nil
+}
+
+func countRoutes(result *model.Result) int {
+	count := 0
+	for _, endpoint := range result.Endpoints {
+		if endpoint.Type == "route" {
+			count++
+		}
+	}
+	return count
 }
 
 func countSensitive(result *model.Result) int {

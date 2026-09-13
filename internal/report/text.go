@@ -20,6 +20,7 @@ func WriteTextReports(directory string, result *model.Result) error {
 		{"api路径.txt", func() []byte { return renderAPIPaths(result) }},
 		{"参数.txt", func() []byte { return renderParameters(result) }},
 		{"敏感信息.txt", func() []byte { return renderSensitive(result) }},
+		{"路由.txt", func() []byte { return renderRoutes(result) }},
 	}
 	for _, file := range files {
 		path := filepath.Join(directory, file.name)
@@ -77,6 +78,27 @@ func lookupEndpoint(result *model.Result, rawURL string) *model.Endpoint {
 		}
 	}
 	return nil
+}
+
+// renderRoutes lists every framework route path, one per line.
+func renderRoutes(result *model.Result) []byte {
+	out := textHeader("框架路由", result.Target)
+	count := 0
+	for _, endpoint := range result.Endpoints {
+		if endpoint.Type != "route" {
+			continue
+		}
+		count++
+		line := endpoint.URL
+		if endpoint.Probe != "" {
+			line += "\t[" + endpoint.Probe + "]"
+		}
+		out = append(out, []byte(sanitizeText(line+"\n"))...)
+	}
+	if count == 0 {
+		return append(out, []byte("（未发现路由）\n")...)
+	}
+	return out
 }
 
 // renderParameters lists every unique query parameter name=value pair with the

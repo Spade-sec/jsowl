@@ -217,6 +217,12 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 		Raw: "/search", URL: "https://example.test/search?q=hello",
 		SourceURL: "https://example.test/app.js", Authorized: true,
 	})
+	result.Endpoints = append(result.Endpoints, model.Endpoint{
+		Raw: "/admin", URL: "https://example.test/admin",
+		SourceURL: "https://example.test/app.js", Authorized: false,
+		Type: "route", Source: "cdp-runtime", Evidence: model.EvidenceRuntime,
+		Probe: "server",
+	})
 	result.Findings[0].SourceURL = "https://example.test/app.js"
 	result.Endpoints[len(result.Endpoints)-1].Line = 42
 	result.Endpoints[len(result.Endpoints)-1].Column = 9
@@ -227,6 +233,9 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 	if err := WriteSplitReports(directory, result); err != nil {
 		t.Fatal(err)
 	}
+	if err := WriteTextReports(directory, result); err != nil {
+		t.Fatal(err)
+	}
 	api, _ := os.ReadFile(filepath.Join(directory, "API报告.html"))
 	for _, want := range []string{
 		"POST", "runtime", "https://example.test/api/users?id=1",
@@ -235,6 +244,24 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 		if !strings.Contains(string(api), want) {
 			t.Fatalf("API report missing %q", want)
 		}
+	}
+	routes, err := os.ReadFile(filepath.Join(directory, "路由报告.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"https://example.test/admin", "CDP 运行时", "服务端真实页面", "路由路径",
+	} {
+		if !strings.Contains(string(routes), want) {
+			t.Fatalf("route report missing %q", want)
+		}
+	}
+	routeTxt, err := os.ReadFile(filepath.Join(directory, "路由.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(routeTxt), "https://example.test/admin	[server]") {
+		t.Fatalf("route txt = %q", routeTxt)
 	}
 	params, _ := os.ReadFile(filepath.Join(directory, "参数报告.html"))
 	for _, want := range []string{

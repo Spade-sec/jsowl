@@ -40,6 +40,15 @@ wretch("/wretch/cart?uid=3").post({ sku: "B2" });
 wretch(API + "/wretch/checkout").put({ address: "sh" });
 useSWR("/swr/session?fields=all");
 
+// ---- framework routes (vue already via url.vue-route elsewhere) ----
+const reactRoutes = createBrowserRouter([
+  { path: "/react/dashboard", element: h(Dashboard) },
+  { path: "/react/settings", element: h(Settings) },
+]);
+oldStyleRouter(
+  { path: "/v5/orders", component: Orders },
+);
+
 // ---- fetch & XHR (built-ins, regression) ----
 fetch(API + "/v1/notes", {
   method: "POST",

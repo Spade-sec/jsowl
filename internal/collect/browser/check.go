@@ -129,7 +129,7 @@ func checkOnce(ctx context.Context, config model.BrowserConfig) CheckReport {
 	if err := page.WaitLoad(); err != nil {
 		return appendFailure(report, "collector", err)
 	}
-	if _, err := snapshotURLs(page, false); err != nil {
+	if _, _, err := snapshotURLs(page, false); err != nil {
 		return appendFailure(report, "collector", err)
 	}
 	report.Checks = append(report.Checks, CheckItem{

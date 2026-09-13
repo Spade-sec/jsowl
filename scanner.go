@@ -248,7 +248,7 @@ func (s *Scanner) scanWithBrowser(
 		Header: http.Header{"Content-Type": {"text/html; charset=utf-8"}},
 		Body:   rendered.HTML,
 	}
-	seeds := browserSeeds(rendered)
+	seeds := browserSeeds(root, rendered)
 	result, _, err := resourcePipeline.RunDetailed(
 		ctx, target, headers, &entry, seeds, previouslySeen,
 	)
@@ -283,7 +283,7 @@ func needsBrowser(evidence discover.SPAEvidence, result *model.Result) bool {
 		(evidence.LargeBundle && len(result.Endpoints) == 0)
 }
 
-func browserSeeds(rendered collect.BrowserResult) []pipeline.Seed {
+func browserSeeds(root *url.URL, rendered collect.BrowserResult) []pipeline.Seed {
 	seen := make(map[string]pipeline.Seed)
 	addSeed := func(raw string, kind model.ResourceType, record collect.NetworkRecord) {
 		if _, exists := seen[raw]; !exists {
@@ -319,6 +319,27 @@ func browserSeeds(rendered collect.BrowserResult) []pipeline.Seed {
 		parsed, err := url.Parse(raw)
 		if err == nil && isJavaScriptExtension(parsed.Path) {
 			addSeed(raw, model.ResourceTypeScript, collect.NetworkRecord{})
+		}
+	}
+	for _, route := range rendered.Routes {
+		if route.Path == "" {
+			continue
+		}
+		resolved, err := url.Parse(route.Path)
+		if err != nil {
+			continue
+		}
+		if !resolved.IsAbs() {
+			resolved = root.JoinPath(route.Path)
+		}
+		path := resolved.String()
+		if _, exists := seen[path]; exists {
+			continue
+		}
+		seen[path] = pipeline.Seed{
+			URL: path, Kind: model.ResourceTypeRoute,
+			Evidence: model.EvidenceRuntime, Source: "cdp-runtime",
+			InitiatorURL: "vue:" + route.Name + ":" + route.Source,
 		}
 	}
 	seeds := make([]pipeline.Seed, 0, len(seen))
