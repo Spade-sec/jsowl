@@ -28,6 +28,8 @@ type Candidate struct {
 	Column int
 	// ContextLines carries the surrounding source lines of the match.
 	ContextLines []model.ContextLine
+	// BodyParams lists request-body field names for write methods.
+	BodyParams []string
 }
 
 // SPAEvidence records static signals that indicate browser rendering may add resources.

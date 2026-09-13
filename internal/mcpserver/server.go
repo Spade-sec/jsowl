@@ -164,13 +164,14 @@ type endpointsInput struct {
 }
 
 type endpointRow struct {
-	URL      string   `json:"url"`
-	Method   string   `json:"method,omitempty"`
-	Evidence string   `json:"evidence,omitempty"`
-	Source   string   `json:"source,omitempty"`
-	Line     int      `json:"line,omitempty"`
-	Status   int      `json:"status_code,omitempty"`
-	Context  []string `json:"context,omitempty"`
+	URL        string   `json:"url"`
+	Method     string   `json:"method,omitempty"`
+	Evidence   string   `json:"evidence,omitempty"`
+	Source     string   `json:"source,omitempty"`
+	Line       int      `json:"line,omitempty"`
+	Status     int      `json:"status_code,omitempty"`
+	BodyParams []string `json:"body_params,omitempty"`
+	Context    []string `json:"context,omitempty"`
 }
 
 func (s *Store) endpointsTool(ctx context.Context, req *mcp.CallToolRequest, input endpointsInput) (*mcp.CallToolResult, []endpointRow, error) {
@@ -197,7 +198,7 @@ func (s *Store) endpointsTool(ctx context.Context, req *mcp.CallToolRequest, inp
 			URL: endpoint.URL, Method: endpoint.Method,
 			Evidence: evidenceOr(endpoint.Evidence),
 			Source:   endpoint.SourceURL, Line: endpoint.Line,
-			Status: endpoint.StatusCode,
+			Status: endpoint.StatusCode, BodyParams: endpoint.BodyParams,
 		}
 		if input.WithCtx {
 			for _, line := range endpoint.ContextLines {

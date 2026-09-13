@@ -165,6 +165,8 @@ type Endpoint struct {
 	// ContextLines carries up to three surrounding source lines so reports
 	// can show the call without re-downloading the bundle.
 	ContextLines []ContextLine `json:"context_lines,omitempty"`
+	// BodyParams lists request-body field names for write methods.
+	BodyParams []string `json:"body_params,omitempty"`
 }
 
 // ContextLine is one line of surrounding source code for a finding.

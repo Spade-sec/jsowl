@@ -164,10 +164,14 @@ func renderAPIReport(result *model.Result) (int, string, error) {
 			location = fmt.Sprintf("%s:%d:%d", source, endpoint.Line, endpoint.Column)
 		}
 		context := renderContextBlock(endpoint.ContextLines)
+		bodyNote := ""
+		if len(endpoint.BodyParams) > 0 {
+			bodyNote = `<div class="muted">body: ` + htmlEscape(strings.Join(endpoint.BodyParams, ", ")) + `</div>`
+		}
 		fmt.Fprintf(&b,
-			"<tr><td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code></td><td><code>%s</code>%s</td><td>%t</td><td>%d</td></tr>",
+			"<tr><td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code></td><td><code>%s</code>%s%s</td><td>%t</td><td>%d</td></tr>",
 			htmlEscape(method), evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
-			htmlEscape(endpoint.URL), htmlEscape(location), context, endpoint.Authorized, endpoint.StatusCode)
+			htmlEscape(endpoint.URL), htmlEscape(location), bodyNote, context, endpoint.Authorized, endpoint.StatusCode)
 	}
 	b.WriteString("</tbody></table>")
 	return len(endpoints), b.String(), nil
@@ -243,6 +247,11 @@ func collectParameterRows(result *model.Result) []parameterRow {
 	}
 	for _, endpoint := range result.Endpoints {
 		collect(endpoint.URL)
+		for _, name := range endpoint.BodyParams {
+			if _, exists := params[name]; !exists {
+				params[name] = entry{value: "(body)", source: endpoint.URL}
+			}
+		}
 	}
 	for _, resource := range result.Resources {
 		collect(resource.URL)

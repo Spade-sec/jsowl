@@ -177,3 +177,41 @@ func TestAPIFromASTCapturesContextLines(t *testing.T) {
 		t.Fatalf("unexpected context content: %+v", got.ContextLines)
 	}
 }
+
+func TestAPIFromASTExtractsBodyParameters(t *testing.T) {
+	candidates := astCandidates(t, `
+		axios.post("/login", {username, password});
+		axios.put("/users/" + id, {nickname: name, avatar: url});
+		axios.request({url: "/orders", method: "POST", data: {sku: sku, count: n}});
+		fetch("/api/notes", {method: "POST", body: JSON.stringify({title, content})});
+		axios.get("/users/list");
+	`)
+	login := findCandidate(candidates, "/login")
+	if login == nil {
+		t.Fatalf("missing /login in %v", candidates)
+	}
+	if strings.Join(login.BodyParams, ",") != "username,password" {
+		t.Fatalf("login body params = %v", login.BodyParams)
+	}
+	update := findCandidate(candidates, "/users/{}")
+	if update == nil {
+		t.Fatalf("missing put concat URL in %v", candidates)
+	}
+	if strings.Join(update.BodyParams, ",") != "nickname,avatar" {
+		t.Fatalf("put body params = %v", update.BodyParams)
+	}
+	orders := findCandidate(candidates, "/orders")
+	if orders == nil || strings.Join(orders.BodyParams, ",") != "sku,count" {
+		t.Fatalf("request data params = %+v", orders)
+	}
+	notes := findCandidate(candidates, "/api/notes")
+	if notes == nil {
+		t.Fatalf("missing fetch notes in %v", candidates)
+	}
+	if strings.Join(notes.BodyParams, ",") != "title,content" {
+		t.Fatalf("fetch body params = %v", notes.BodyParams)
+	}
+	if get := findCandidate(candidates, "/users/list"); len(get.BodyParams) != 0 {
+		t.Fatalf("GET should have no body params: %v", get.BodyParams)
+	}
+}

@@ -304,6 +304,7 @@ func (p *Pipeline) RunDetailed(
 							Line:     candidate.Line,
 							Column:   candidate.Column,
 							ContextLines: candidate.ContextLines,
+							BodyParams:   candidate.BodyParams,
 						})
 					}
 					if authorized {

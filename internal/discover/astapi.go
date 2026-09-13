@@ -15,12 +15,13 @@ import (
 
 // apiCall is one HTTP call site recovered from the syntax tree.
 type apiCall struct {
-	Raw      string
-	Method   string
-	Evidence string
-	Line     int
-	Column   int
-	Context  []model.ContextLine
+	Raw        string
+	Method     string
+	Evidence   string
+	Line       int
+	Column     int
+	Context    []model.ContextLine
+	BodyParams []string
 }
 
 // APIFromAST parses JavaScript with a real grammar and recovers HTTP call
@@ -62,7 +63,7 @@ func APIFromAST(source *url.URL, body []byte) []Candidate {
 			Raw: call.Raw, Kind: KindEndpoint,
 			Method: call.Method, Evidence: call.Evidence,
 			Line: call.Line, Column: call.Column,
-			ContextLines: call.Context,
+			ContextLines: call.Context, BodyParams: call.BodyParams,
 		})
 	}
 	return candidates
@@ -345,6 +346,7 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 
 	method := ""
 	urlArgument := -1
+	bodyArgument := -1
 	switch expressed := unwrap(callee).(type) {
 	case *ast.DotExpression:
 		property := string(expressed.Identifier.Name)
@@ -360,13 +362,20 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 		case "get", "post", "put", "patch", "delete", "head", "options":
 			method = strings.ToUpper(property)
 			urlArgument = 0
+			if method == "POST" || method == "PUT" || method == "PATCH" {
+				bodyArgument = 1
+			}
 		case "request", "ajax", "api":
 			method, urlArgument = objectCallArgs(args)
+			bodyArgument = -2 // body rides inside the options object
 		case "fetch":
 			method = "GET"
 			urlArgument = 0
 			if fromOptions := optionsMethod(arg(args, 1)); fromOptions != "" {
 				method = fromOptions
+			}
+			if arg(args, 1) != nil {
+				bodyArgument = -3 // body may live in the options object
 			}
 		}
 	case *ast.Identifier:
@@ -377,8 +386,12 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 			if fromOptions := optionsMethod(arg(args, 1)); fromOptions != "" {
 				method = fromOptions
 			}
+			if arg(args, 1) != nil {
+				bodyArgument = -3 // body may live in the options object
+			}
 		case "ajax", "api":
 			method, urlArgument = objectCallArgs(args)
+			bodyArgument = -2 // body rides inside the options object
 		}
 	}
 	if urlArgument < 0 || urlArgument >= len(args) {
@@ -390,9 +403,10 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 	}
 	line, column := w.position(callee.Idx0())
 	context := extractContext(w.source, int(callee.Idx0())-1, contextSpanLines)
+	bodyParams := w.bodyParameterNames(args, method, urlArgument, bodyArgument)
 	w.calls = append(w.calls, apiCall{
 		Raw: raw, Method: method, Evidence: evidence,
-		Line: line, Column: column, Context: context,
+		Line: line, Column: column, Context: context, BodyParams: bodyParams,
 	})
 	// Keep the static relative endpoint and additionally emit the client's
 	// bound baseURL folded in, upgraded to full-url evidence.
@@ -401,7 +415,7 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 			if joined := joinBaseURL(base, raw); joined != "" {
 				w.calls = append(w.calls, apiCall{
 					Raw: joined, Method: method, Evidence: model.EvidenceFullURL,
-					Line: line, Column: column, Context: context,
+					Line: line, Column: column, Context: context, BodyParams: bodyParams,
 				})
 			}
 		}
@@ -467,6 +481,82 @@ func (w *astWalker) resolveURLExpression(expression ast.Expression) (string, str
 		}
 	}
 	return "", ""
+}
+
+// bodyParameterNames collects body field names for write-method calls:
+// the second positional argument, the options object's data/body property,
+// or FormData.append keys seen inside the call arguments.
+func (w *astWalker) bodyParameterNames(args []ast.Expression, method string, urlArgument, bodyArgument int) []string {
+	var body ast.Expression
+	switch bodyArgument {
+	case -2: // request({url, method, data: {...}})
+		if options, ok := unwrap(arg(args, 0)).(*ast.ObjectLiteral); ok {
+			for _, property := range options.Value {
+				keyed, ok := property.(*ast.PropertyKeyed)
+				if !ok || propertyName(keyed.Key) != "data" {
+					continue
+				}
+				body = keyed.Value
+			}
+		}
+	case -3: // fetch(url, {body: ...})
+		if options, ok := unwrap(arg(args, 1)).(*ast.ObjectLiteral); ok {
+			for _, property := range options.Value {
+				keyed, ok := property.(*ast.PropertyKeyed)
+				if !ok || propertyName(keyed.Key) != "body" {
+					continue
+				}
+				body = keyed.Value
+			}
+		}
+	default:
+		if bodyArgument >= 0 && bodyArgument < len(args) {
+			body = args[bodyArgument]
+		}
+	}
+	if body == nil {
+		return nil
+	}
+	// JSON.stringify({...}) is the most common fetch body wrapper.
+	if call, ok := unwrap(body).(*ast.CallExpression); ok {
+		if isStringifyCall(call.Callee) {
+			body = arg(call.ArgumentList, 0)
+		}
+	}
+	if object, ok := unwrap(body).(*ast.ObjectLiteral); ok {
+		return objectPropertyNames(object)
+	}
+	return nil
+}
+
+// isStringifyCall reports whether the callee is JSON.stringify.
+func isStringifyCall(callee ast.Expression) bool {
+	dot, ok := unwrap(callee).(*ast.DotExpression)
+	return ok && string(dot.Identifier.Name) == "stringify"
+}
+
+// objectPropertyNames lists the top-level keys of an object literal,
+// including shorthand properties like {username, password}.
+func objectPropertyNames(object *ast.ObjectLiteral) []string {
+	const maxBodyParams = 32
+	names := make([]string, 0, len(object.Value))
+	for _, property := range object.Value {
+		name := ""
+		switch p := property.(type) {
+		case *ast.PropertyKeyed:
+			name = propertyName(p.Key)
+		case *ast.PropertyShort:
+			name = string(p.Name.Name)
+		}
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+		if len(names) >= maxBodyParams {
+			break
+		}
+	}
+	return names
 }
 
 // optionsMethod reads {method: "..."} / {type: "..."} option objects.

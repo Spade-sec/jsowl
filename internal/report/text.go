@@ -104,6 +104,11 @@ func renderParameters(result *model.Result) []byte {
 	}
 	for _, endpoint := range result.Endpoints {
 		collect(endpoint.URL)
+		for _, name := range endpoint.BodyParams {
+			if _, exists := params[name]; !exists {
+				params[name] = entry{value: "(body)", source: endpoint.URL}
+			}
+		}
 	}
 	for _, resource := range result.Resources {
 		collect(resource.URL)
