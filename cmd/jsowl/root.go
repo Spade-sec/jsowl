@@ -17,7 +17,8 @@ import (
 	"github.com/youmulijiang/jsowl"
 )
 
-const version = "dev"
+// version is overridden at build time via -ldflags "-X ...version=v1.2.3".
+var version = "dev"
 
 type scanService interface {
 	ScanBatch(context.Context, []jsowl.Target) <-chan jsowl.BatchItem
