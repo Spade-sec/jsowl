@@ -2,6 +2,7 @@ package discover
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/youmulijiang/jsowl/internal/model"
@@ -153,5 +154,26 @@ func TestAPIFromASTKeepsStaticAndAddsBaseURLFold(t *testing.T) {
 	gateway := findCandidate(candidates, "https://gw.example.test/v2/order/detail")
 	if gateway == nil || gateway.Evidence != model.EvidenceFullURL {
 		t.Fatalf("defaults.baseURL fold missing: %v", candidates)
+	}
+}
+
+func TestAPIFromASTCapturesContextLines(t *testing.T) {
+	candidates := astCandidates(t, "// lead line 1\n// lead line 2\n// lead line 3\nfetch(\"/api/context\");\n// tail line 1\n// tail line 2\n// tail line 3\n// tail line 4\n")
+	got := findCandidate(candidates, "/api/context")
+	if got == nil {
+		t.Fatalf("candidate missing in %v", candidates)
+	}
+	if len(got.ContextLines) != 7 {
+		t.Fatalf("context lines = %d, want 7", len(got.ContextLines))
+	}
+	if got.ContextLines[0].LineNumber != 1 ||
+		got.ContextLines[6].LineNumber != 7 {
+		t.Fatalf("context range = %d..%d", got.ContextLines[0].LineNumber, got.ContextLines[6].LineNumber)
+	}
+	if got.ContextLines[3].MatchStart < 0 {
+		t.Fatalf("matched line not marked: %+v", got.ContextLines[3])
+	}
+	if !strings.Contains(got.ContextLines[2].Content, "lead line 3") {
+		t.Fatalf("unexpected context content: %+v", got.ContextLines)
 	}
 }

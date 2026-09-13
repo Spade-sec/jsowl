@@ -213,8 +213,21 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 			t.Fatalf("%s missing target", name)
 		}
 	}
+	result.Findings[0].SourceURL = "https://example.test/app.js"
+	result.Endpoints[len(result.Endpoints)-1].Line = 42
+	result.Endpoints[len(result.Endpoints)-1].Column = 9
+	result.Endpoints[len(result.Endpoints)-1].ContextLines = []model.ContextLine{
+		{LineNumber: 41, Content: "const api = client;", MatchStart: -1, MatchEnd: -1},
+		{LineNumber: 42, Content: "client.post(\"/api/users\", body)", MatchStart: 0, MatchEnd: 31},
+	}
+	if err := WriteSplitReports(directory, result); err != nil {
+		t.Fatal(err)
+	}
 	api, _ := os.ReadFile(filepath.Join(directory, "API报告.html"))
-	for _, want := range []string{"POST", "runtime", "https://example.test/api/users?id=1"} {
+	for _, want := range []string{
+		"POST", "runtime", "https://example.test/api/users?id=1",
+		"app.js:42:9", "上下文", "client.post(", "const api = client;",
+	} {
 		if !strings.Contains(string(api), want) {
 			t.Fatalf("API report missing %q", want)
 		}

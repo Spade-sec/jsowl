@@ -303,6 +303,7 @@ func (p *Pipeline) RunDetailed(
 							Evidence: candidateEvidence(candidate, resolved),
 							Line:     candidate.Line,
 							Column:   candidate.Column,
+							ContextLines: candidate.ContextLines,
 						})
 					}
 					if authorized {

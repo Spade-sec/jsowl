@@ -28,11 +28,18 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 			continue
 		}
 		seen[key] = struct{}{}
-		result.Candidates = append(result.Candidates, Candidate{
+		candidate := Candidate{
 			Raw:       extractedCandidate.Raw,
 			Kind:      kind,
 			SourceURL: source.String(),
-		})
+		}
+		if kind == KindEndpoint && extractedCandidate.Offset > 0 {
+			candidate.Line, candidate.Column = lineColumn(body, extractedCandidate.Offset)
+			candidate.ContextLines = extractContext(
+				body, extractedCandidate.Offset, contextSpanLines,
+			)
+		}
+		result.Candidates = append(result.Candidates, candidate)
 	}
 
 	lower := bytes.ToLower(body)
@@ -80,4 +87,15 @@ func isJavaScriptPath(raw string) bool {
 	default:
 		return false
 	}
+}
+
+// lineColumn converts a byte offset into 1-based line and rune column.
+func lineColumn(body []byte, offset int) (int, int) {
+	if offset < 0 || offset > len(body) {
+		return 0, 0
+	}
+	line := countLine(lineStarts(body), offset) + 1
+	lineStart := lineStarts(body)[line-1]
+	column := len([]rune(string(body[lineStart:offset]))) + 1
+	return line, column
 }

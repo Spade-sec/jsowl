@@ -26,6 +26,8 @@ type Candidate struct {
 	// Line and Column locate the match inside the source (1-based).
 	Line   int
 	Column int
+	// ContextLines carries the surrounding source lines of the match.
+	ContextLines []model.ContextLine
 }
 
 // SPAEvidence records static signals that indicate browser rendering may add resources.

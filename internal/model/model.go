@@ -162,6 +162,9 @@ type Endpoint struct {
 	Evidence   string `json:"evidence,omitempty"`
 	Line       int    `json:"line,omitempty"`
 	Column     int    `json:"column,omitempty"`
+	// ContextLines carries up to three surrounding source lines so reports
+	// can show the call without re-downloading the bundle.
+	ContextLines []ContextLine `json:"context_lines,omitempty"`
 }
 
 // ContextLine is one line of surrounding source code for a finding.

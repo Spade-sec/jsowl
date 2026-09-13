@@ -20,6 +20,7 @@ type apiCall struct {
 	Evidence string
 	Line     int
 	Column   int
+	Context  []model.ContextLine
 }
 
 // APIFromAST parses JavaScript with a real grammar and recovers HTTP call
@@ -35,6 +36,7 @@ func APIFromAST(source *url.URL, body []byte) []Candidate {
 		constants:   make(map[string]string),
 		instanceBSE: make(map[string]string),
 		file:        program.File,
+		source:      body,
 	}
 	w.walkProgram(program)
 
@@ -60,6 +62,7 @@ func APIFromAST(source *url.URL, body []byte) []Candidate {
 			Raw: call.Raw, Kind: KindEndpoint,
 			Method: call.Method, Evidence: call.Evidence,
 			Line: call.Line, Column: call.Column,
+			ContextLines: call.Context,
 		})
 	}
 	return candidates
@@ -70,6 +73,7 @@ type astWalker struct {
 	constants   map[string]string // identifier -> folded string constant
 	instanceBSE map[string]string // client instance identifier -> baseURL
 	file        *file.File
+	source      []byte
 }
 
 func (w *astWalker) position(index file.Idx) (int, int) {
@@ -385,9 +389,10 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 		return
 	}
 	line, column := w.position(callee.Idx0())
+	context := extractContext(w.source, int(callee.Idx0())-1, contextSpanLines)
 	w.calls = append(w.calls, apiCall{
 		Raw: raw, Method: method, Evidence: evidence,
-		Line: line, Column: column,
+		Line: line, Column: column, Context: context,
 	})
 	// Keep the static relative endpoint and additionally emit the client's
 	// bound baseURL folded in, upgraded to full-url evidence.
@@ -396,7 +401,7 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 			if joined := joinBaseURL(base, raw); joined != "" {
 				w.calls = append(w.calls, apiCall{
 					Raw: joined, Method: method, Evidence: model.EvidenceFullURL,
-					Line: line, Column: column,
+					Line: line, Column: column, Context: context,
 				})
 			}
 		}

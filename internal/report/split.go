@@ -109,6 +109,9 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
 .sev.runtime{background:rgba(126,231,135,.16);color:#7ee787}
 .sev.full-url{background:rgba(255,203,107,.15);color:var(--warn)}
 .muted{color:var(--muted);font-size:12px}
+details.ctx{margin-top:6px}
+details.ctx summary{cursor:pointer;color:var(--accent);font-size:12px;user-select:none}
+details.ctx pre{margin:6px 0 0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto}
 td{word-break:break-all}
 footer{padding:12px 24px;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}
 </style>
@@ -156,13 +159,37 @@ func renderAPIReport(result *model.Result) (int, string, error) {
 		if source == "" {
 			source = result.Target
 		}
+		location := source
+		if endpoint.Line > 0 {
+			location = fmt.Sprintf("%s:%d:%d", source, endpoint.Line, endpoint.Column)
+		}
+		context := renderContextBlock(endpoint.ContextLines)
 		fmt.Fprintf(&b,
-			"<tr><td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code></td><td><code>%s</code></td><td>%t</td><td>%d</td></tr>",
+			"<tr><td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code></td><td><code>%s</code>%s</td><td>%t</td><td>%d</td></tr>",
 			htmlEscape(method), evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
-			htmlEscape(endpoint.URL), htmlEscape(source), endpoint.Authorized, endpoint.StatusCode)
+			htmlEscape(endpoint.URL), htmlEscape(location), context, endpoint.Authorized, endpoint.StatusCode)
 	}
 	b.WriteString("</tbody></table>")
 	return len(endpoints), b.String(), nil
+}
+
+// renderContextBlock formats endpoint context lines as an expandable pre
+// block suitable for copying straight into an LLM prompt.
+func renderContextBlock(lines []model.ContextLine) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(`<details class="ctx"><summary>上下文</summary><pre>`)
+	for _, line := range lines {
+		marker := " "
+		if line.MatchStart >= 0 && line.MatchEnd > line.MatchStart {
+			marker = ">"
+		}
+		fmt.Fprintf(&b, "%s %4d | %s\n", marker, line.LineNumber, htmlEscape(line.Content))
+	}
+	b.WriteString("</pre></details>")
+	return b.String()
 }
 
 func renderSensitiveReport(result *model.Result) (int, string, error) {
