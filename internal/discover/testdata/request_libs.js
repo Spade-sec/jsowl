@@ -31,6 +31,15 @@ uni.request({
   data: { uid: 5 },
 });
 
+// ---- second tier: umi-request, alova, wretch, swr ----
+request("/umix/list?state=open", { method: "GET" });
+request(API + "/umix/submit", { method: "POST", data: { formId: 77 } });
+alova.Get("/alova/config?section=mail");
+alova.Post("https://api.example.test/alova/upload", { fileKey: "a.zip" });
+wretch("/wretch/cart?uid=3").post({ sku: "B2" });
+wretch(API + "/wretch/checkout").put({ address: "sh" });
+useSWR("/swr/session?fields=all");
+
 // ---- fetch & XHR (built-ins, regression) ----
 fetch(API + "/v1/notes", {
   method: "POST",

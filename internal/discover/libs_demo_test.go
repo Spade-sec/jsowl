@@ -38,6 +38,13 @@ func TestExtractRequestLibrariesFixture(t *testing.T) {
 		{"/uni/user/info", "GET", "uid"},
 		{"https://api.example.test/v1/notes", "POST", "title,content"},
 		{"/v1/cache?key=static", "DELETE", ""},
+		{"/umix/list?state=open", "GET", ""},
+		{"https://api.example.test/umix/submit", "POST", "formId"},
+		{"/alova/config?section=mail", "GET", ""},
+		{"https://api.example.test/alova/upload", "POST", "fileKey"},
+		{"/wretch/cart?uid=3", "POST", "sku"},
+		{"https://api.example.test/wretch/checkout", "PUT", "address"},
+		{"/swr/session?fields=all", "GET", ""},
 	}
 	for _, want := range cases {
 		got := byURL[want.url]

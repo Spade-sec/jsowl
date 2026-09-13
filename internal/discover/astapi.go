@@ -348,6 +348,7 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 	method := ""
 	urlArgument := -1
 	bodyArgument := -1
+	var urlOverride ast.Expression
 	switch expressed := unwrap(callee).(type) {
 	case *ast.DotExpression:
 		property := string(expressed.Identifier.Name)
@@ -362,17 +363,33 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 				urlArgument = 1
 			}
 		case "get", "post", "put", "patch", "delete", "head", "options",
-			"getJSON":
+			"getJSON", "Get", "Post", "Put", "Patch", "Delete", "Head":
 			method = strings.ToUpper(strings.TrimSuffix(property, "JSON"))
 			urlArgument = 0
 			writeVerb := method == "POST" || method == "PUT" ||
 				method == "PATCH" || method == "DELETE"
-			if receiver == "ky" {
+			if head, ok := unwrap(expressed.Left).(*ast.CallExpression); ok {
+				if calleeID, ok := unwrap(head.Callee).(*ast.Identifier); ok &&
+					string(calleeID.Name) == "wretch" {
+					// wretch(url).post(body): the URL lives in the head call.
+					if headURL := arg(head.ArgumentList, 0); headURL != nil {
+						urlOverride = headURL
+						urlArgument = -1
+					}
+					if writeVerb {
+						bodyArgument = 0
+					} else {
+						bodyArgument = -1
+					}
+				}
+			}
+			switch {
+			case receiver == "ky":
 				// ky.post(url, {json: ...}) keeps the body in the options.
 				if arg(args, 1) != nil {
 					bodyArgument = -4
 				}
-			} else if writeVerb {
+			case writeVerb && bodyArgument == -1:
 				bodyArgument = 1
 			}
 		case "request", "ajax", "api":
@@ -412,6 +429,20 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 		case "ajax", "api":
 			method, urlArgument = objectCallArgs(args)
 			bodyArgument = -2 // body rides inside the options object
+		case "request":
+			// umi-request(url, {method, data})
+			method = "GET"
+			urlArgument = 0
+			if fromOptions := optionsMethod(arg(args, 1)); fromOptions != "" {
+				method = fromOptions
+			}
+			if arg(args, 1) != nil {
+				bodyArgument = -6
+			}
+		case "useSWR":
+			// React data-fetching hook; the first argument is a GET URL.
+			method = "GET"
+			urlArgument = 0
 		case "$fetch", "ofetch", "$ofetch", "ky":
 			// ofetch/ky callables: url first, options object second.
 			method = "GET"
@@ -424,10 +455,16 @@ func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
 			}
 		}
 	}
-if urlArgument < 0 || urlArgument >= len(args) {
+	var urlExpression ast.Expression
+	switch {
+	case urlOverride != nil:
+		urlExpression = urlOverride
+	case urlArgument >= 0 && urlArgument < len(args):
+		urlExpression = args[urlArgument]
+	default:
 		return
 	}
-	raw, evidence := w.resolveURLExpression(args[urlArgument])
+	raw, evidence := w.resolveURLExpression(urlExpression)
 	if raw == "" {
 		return
 	}
@@ -544,6 +581,16 @@ func (w *astWalker) bodyParameterNames(args []ast.Expression, method string, url
 			for _, property := range options.Value {
 				keyed, ok := property.(*ast.PropertyKeyed)
 				if !ok || propertyName(keyed.Key) != "json" {
+					continue
+				}
+				body = keyed.Value
+			}
+		}
+	case -6: // umi-request(url, {data: ...})
+		if options, ok := unwrap(arg(args, 1)).(*ast.ObjectLiteral); ok {
+			for _, property := range options.Value {
+				keyed, ok := property.(*ast.PropertyKeyed)
+				if !ok || propertyName(keyed.Key) != "data" {
 					continue
 				}
 				body = keyed.Value
