@@ -213,6 +213,10 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 			t.Fatalf("%s missing target", name)
 		}
 	}
+	result.Endpoints = append(result.Endpoints, model.Endpoint{
+		Raw: "/search", URL: "https://example.test/search?q=hello",
+		SourceURL: "https://example.test/app.js", Authorized: true,
+	})
 	result.Findings[0].SourceURL = "https://example.test/app.js"
 	result.Endpoints[len(result.Endpoints)-1].Line = 42
 	result.Endpoints[len(result.Endpoints)-1].Column = 9
@@ -230,6 +234,14 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 	} {
 		if !strings.Contains(string(api), want) {
 			t.Fatalf("API report missing %q", want)
+		}
+	}
+	params, _ := os.ReadFile(filepath.Join(directory, "参数报告.html"))
+	for _, want := range []string{
+		"提取方式", "域名", "次数", "host-filter", "data-hosts", "ast", "regex",
+	} {
+		if !strings.Contains(string(params), want) {
+			t.Fatalf("parameter report missing %q", want)
 		}
 	}
 	nav, _ := os.ReadFile(filepath.Join(directory, "报告导航.html"))

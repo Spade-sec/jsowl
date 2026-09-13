@@ -30,6 +30,8 @@ type Candidate struct {
 	ContextLines []model.ContextLine
 	// BodyParams lists request-body field names for write methods.
 	BodyParams []string
+	// Source records the extractor that produced this candidate: ast or regex.
+	Source string
 }
 
 // SPAEvidence records static signals that indicate browser rendering may add resources.

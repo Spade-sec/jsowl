@@ -42,6 +42,8 @@ type Seed struct {
 	InitiatorURL string
 	Line         int
 	Column       int
+	// Source records the extractor: cdp for runtime seeds.
+	Source string
 }
 
 type outcome struct {
@@ -144,6 +146,7 @@ func (p *Pipeline) RunDetailed(
 					Evidence:   seed.Evidence,
 					Line:       seed.Line,
 					Column:     seed.Column,
+					Source:     seed.Source,
 				})
 			}
 		}
@@ -305,6 +308,7 @@ func (p *Pipeline) RunDetailed(
 							Column:   candidate.Column,
 							ContextLines: candidate.ContextLines,
 							BodyParams:   candidate.BodyParams,
+							Source:       candidate.Source,
 						})
 					}
 					if authorized {

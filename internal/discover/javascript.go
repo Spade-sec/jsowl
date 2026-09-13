@@ -32,6 +32,7 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 			Raw:       extractedCandidate.Raw,
 			Kind:      kind,
 			SourceURL: source.String(),
+			Source:    "regex",
 		}
 		if kind == KindEndpoint && extractedCandidate.Offset > 0 {
 			candidate.Line, candidate.Column = lineColumn(body, extractedCandidate.Offset)

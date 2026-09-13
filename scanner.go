@@ -294,6 +294,7 @@ func browserSeeds(rendered collect.BrowserResult) []pipeline.Seed {
 				InitiatorURL: record.InitiatorURL,
 				Line:         record.Line,
 				Column:       record.Column,
+				Source:       "cdp",
 			}
 		}
 	}

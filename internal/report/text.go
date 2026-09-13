@@ -30,6 +30,11 @@ func WriteTextReports(directory string, result *model.Result) error {
 	return nil
 }
 
+// sanitizeText drops invalid UTF-8 bytes from legacy-charset page bodies.
+func sanitizeText(value string) string {
+	return strings.ToValidUTF8(value, "�")
+}
+
 func textHeader(title, target string) []byte {
 	var b strings.Builder
 	b.WriteString("# JsOwl " + title + "\n")

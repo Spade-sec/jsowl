@@ -160,6 +160,8 @@ type Endpoint struct {
 	StatusCode int    `json:"status_code,omitempty"`
 	Method     string `json:"method,omitempty"`
 	Evidence   string `json:"evidence,omitempty"`
+	// Source records how the endpoint was found: cdp, ast, or regex.
+	Source string `json:"source,omitempty"`
 	Line       int    `json:"line,omitempty"`
 	Column     int    `json:"column,omitempty"`
 	// ContextLines carries up to three surrounding source lines so reports

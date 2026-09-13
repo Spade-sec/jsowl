@@ -109,6 +109,9 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
 .sev.runtime{background:rgba(126,231,135,.16);color:#7ee787}
 .sev.full-url{background:rgba(255,203,107,.15);color:var(--warn)}
 .muted{color:var(--muted);font-size:12px}
+.filterbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px}
+.filterbar label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.filterbar select,.filterbar input[type="search"]{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:5px 10px;font-size:13px}
 details.ctx{margin-top:6px}
 details.ctx summary{cursor:pointer;color:var(--accent);font-size:12px;user-select:none}
 details.ctx pre{margin:6px 0 0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto}
@@ -264,15 +267,186 @@ func collectParameterRows(result *model.Result) []parameterRow {
 	return rows
 }
 
-func renderParameterReport(result *model.Result) (int, string, error) {
-	rows := collectParameterRows(result)
-	var b strings.Builder
-	b.WriteString(`<table><thead><tr><th style="width:200px">参数名</th><th style="width:320px">示例值</th><th>首次出现</th></tr></thead><tbody>`)
-	for _, row := range rows {
-		fmt.Fprintf(&b, "<tr><td><code>%s</code></td><td><code>%s</code></td><td><code>%s</code></td></tr>",
-			htmlEscape(row.Name), htmlEscape(row.Value), htmlEscape(row.Source))
+// parameterStat aggregates one parameter name across every URL that
+// carries it: which hosts, how often, and which extractor surfaced it.
+type parameterStat struct {
+	Name      string
+	Count     int
+	Hosts     []string
+	Sources   []string
+	Example   string
+	FirstSeen string
+	Body      bool
+}
+
+// collectParameterStats merges URL query parameters and AST body parameters
+// into per-name statistics.
+func collectParameterStats(result *model.Result) []parameterStat {
+	type entry struct {
+		count     int
+		hosts     map[string]bool
+		sources   map[string]bool
+		example   string
+		firstSeen string
+		body      bool
 	}
-	b.WriteString("</tbody></table>")
+	stats := map[string]*entry{}
+	add := func(name, value, sourceURL, extractor string, isBody bool) {
+		stat, exists := stats[name]
+		if !exists {
+			stat = &entry{
+				hosts: map[string]bool{}, sources: map[string]bool{},
+				example: value, firstSeen: sourceURL,
+			}
+			stats[name] = stat
+		}
+		stat.count++
+		if isBody {
+			stat.body = true
+		}
+		if sourceURL != "" {
+			if parsed, err := url.Parse(sourceURL); err == nil && parsed.Host != "" {
+				stat.hosts[parsed.Host] = true
+			}
+		}
+		if extractor != "" {
+			stat.sources[extractor] = true
+		}
+	}
+	endpointExtractor := func(endpoint model.Endpoint) string {
+		if endpoint.Source != "" {
+			return endpoint.Source
+		}
+		switch endpoint.Evidence {
+		case model.EvidenceRuntime:
+			return "cdp"
+		case model.EvidenceFullURL:
+			return "ast"
+		default:
+			return "regex"
+		}
+	}
+	for _, endpoint := range result.Endpoints {
+		extractor := endpointExtractor(endpoint)
+		if parsed, err := url.Parse(endpoint.URL); err == nil {
+			for key, values := range parsed.Query() {
+				value := ""
+				if len(values) > 0 {
+					value = values[0]
+				}
+				add(key, value, endpoint.URL, extractor, false)
+			}
+		}
+		for _, name := range endpoint.BodyParams {
+			add(name, "(body)", endpoint.URL, extractor, true)
+		}
+	}
+	for _, resource := range result.Resources {
+		parsed, err := url.Parse(resource.URL)
+		if err != nil {
+			continue
+		}
+		for key, values := range parsed.Query() {
+			value := ""
+			if len(values) > 0 {
+				value = values[0]
+			}
+			add(key, value, resource.URL, "url", false)
+		}
+	}
+
+	names := make([]string, 0, len(stats))
+	for name := range stats {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	rows := make([]parameterStat, 0, len(names))
+	for _, name := range names {
+		stat := stats[name]
+		row := parameterStat{
+			Name: name, Count: stat.count,
+			Example: stat.example, FirstSeen: stat.firstSeen, Body: stat.body,
+		}
+		for host := range stat.hosts {
+			row.Hosts = append(row.Hosts, host)
+		}
+		sort.Strings(row.Hosts)
+		for source := range stat.sources {
+			row.Sources = append(row.Sources, source)
+		}
+		sort.Strings(row.Sources)
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func renderParameterReport(result *model.Result) (int, string, error) {
+	rows := collectParameterStats(result)
+
+	hosts := map[string]bool{}
+	for _, row := range rows {
+		for _, host := range row.Hosts {
+			hosts[host] = true
+		}
+	}
+	hostList := make([]string, 0, len(hosts))
+	for host := range hosts {
+		hostList = append(hostList, host)
+	}
+	sort.Strings(hostList)
+
+	var b strings.Builder
+	b.WriteString(`<div class="filterbar">
+<label>域名 <select id="host-filter"><option value="">全部</option>`)
+	for _, host := range hostList {
+		b.WriteString(`<option value="` + htmlEscape(host) + `">` + htmlEscape(host) + `</option>`)
+	}
+	b.WriteString(`</select></label>
+<label>搜索 <input type="search" id="param-search" placeholder="参数名或值..."></label>
+<span class="muted" id="param-count"></span>
+</div>
+<table id="param-table"><thead><tr><th style="width:180px">参数名</th><th style="width:70px">次数</th><th style="width:220px">域名</th><th style="width:150px">提取方式</th><th style="width:240px">示例值</th><th>首次出现</th></tr></thead><tbody>`)
+	for _, row := range rows {
+		markers := ""
+		if row.Body {
+			markers = ` <span class="sev full-url">body</span>`
+		}
+		fmt.Fprintf(&b,
+			"<tr data-hosts=%q><td><code>%s</code>%s</td><td>%d</td><td class=\"muted\">%s</td><td>%s</td><td><code>%s</code></td><td><code>%s</code></td></tr>",
+			strings.Join(row.Hosts, " "), htmlEscape(row.Name), markers,
+			row.Count, htmlEscape(strings.Join(row.Hosts, ", ")),
+			htmlEscape(strings.Join(row.Sources, ", ")),
+			htmlEscape(row.Example), htmlEscape(row.FirstSeen))
+	}
+	b.WriteString(`</tbody></table>
+<script>
+(function(){
+  var rows = Array.prototype.slice.call(document.querySelectorAll('#param-table tbody tr'));
+  var host = document.getElementById('host-filter');
+  var search = document.getElementById('search-fallback') || null;
+  var query = document.getElementById('param-search');
+  var counter = document.getElementById('param-count');
+  function apply(){
+    var hostValue = host.value.toLowerCase();
+    var text = query.value.toLowerCase();
+    var visible = 0;
+    rows.forEach(function(row){
+      var ok = (!hostValue || (row.dataset.hosts || '').toLowerCase().indexOf(hostValue) !== -1) &&
+               (!text || row.textContent.toLowerCase().indexOf(text) !== -1);
+      row.style.display = ok ? '' : 'none';
+      if (ok) visible++;
+    });
+    counter.textContent = '显示 ' + visible + ' / ' + rows.length + ' 个参数';
+  }
+  host.addEventListener('change', apply);
+  var timer = null;
+  query.addEventListener('input', function(){
+    clearTimeout(timer);
+    timer = setTimeout(apply, 150);
+  });
+  apply();
+})();
+</script>`)
 	return len(rows), b.String(), nil
 }
 
@@ -319,6 +493,9 @@ func evidenceLabel(evidence string) string {
 }
 
 func htmlEscape(value string) string {
+	// Pages served in legacy charsets (e.g. GBK) leak invalid UTF-8 bytes;
+	// drop them so every generated report stays valid UTF-8.
+	value = strings.ToValidUTF8(value, "�")
 	return strings.NewReplacer(
 		"&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;",
 	).Replace(value)

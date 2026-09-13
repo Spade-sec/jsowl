@@ -64,6 +64,7 @@ func APIFromAST(source *url.URL, body []byte) []Candidate {
 			Method: call.Method, Evidence: call.Evidence,
 			Line: call.Line, Column: call.Column,
 			ContextLines: call.Context, BodyParams: call.BodyParams,
+			Source: "ast",
 		})
 	}
 	return candidates
