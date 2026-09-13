@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 
@@ -12,9 +13,19 @@ import (
 //go:embed assets/report.html
 var htmlTemplate string
 
+var reportFuncs = template.FuncMap{
+	"json": func(v any) template.JS {
+		b, err := json.Marshal(v)
+		if err != nil {
+			b = []byte("null")
+		}
+		return template.JS(b)
+	},
+}
+
 // WriteHTML atomically writes a self-contained, escaped interactive report.
 func WriteHTML(path string, result *model.Result) error {
-	reportTemplate, err := template.New("jsowl-report").Parse(htmlTemplate)
+	reportTemplate, err := template.New("jsowl-report").Funcs(reportFuncs).Parse(htmlTemplate)
 	if err != nil {
 		return fmt.Errorf("parse HTML report template: %w", err)
 	}

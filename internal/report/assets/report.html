@@ -5,58 +5,685 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>JsOwl 安全信息收集报告</title>
   <style>
-    :root{color-scheme:dark;--bg:#0b1020;--panel:#151c31;--line:#29334f;--text:#e8edf8;--muted:#9aa8c7;--accent:#79d7ff;--warn:#ffcb6b}
-    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif}
-    main{max-width:1400px;margin:auto;padding:28px}.warning{padding:14px;border:1px solid #806c32;background:#332d18;color:var(--warn);border-radius:10px}
-    .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0}.card,section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
-    .number{font-size:28px;color:var(--accent)}section{margin:16px 0;overflow:auto}table{width:100%;border-collapse:collapse;min-width:800px}
-    th,td{padding:9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}code{white-space:pre-wrap;word-break:break-all;color:#d8f3ff}
-    .muted{color:var(--muted)}select{background:var(--bg);color:var(--text);border:1px solid var(--line);padding:7px;border-radius:6px}
+    :root{
+      color-scheme:dark;
+      --bg:#0b1020;
+      --panel:#151c31;
+      --line:#29334f;
+      --text:#e8edf8;
+      --muted:#9aa8c7;
+      --accent:#79d7ff;
+      --warn:#ffcb6b;
+      --danger:#ff6b6b;
+      --success:#7ee787;
+      --info:#79d7ff;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif;height:100vh;display:flex;overflow:hidden}
+    button{font:inherit;cursor:pointer}
+    a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+    code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+
+    .app{display:flex;width:100%;height:100%}
+    .sidebar{order:2;flex:0 0 340px;max-width:45vw;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;transition:flex-basis .2s,opacity .2s}
+    .sidebar.collapsed{flex:0 0 0;opacity:0;overflow:hidden;border-left:none}
+    .sidebar-header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
+    .sidebar-header h3{margin:0;font-size:16px}
+    .tree-toggle,.icon-button{width:28px;height:28px;background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--text);display:flex;align-items:center;justify-content:center}
+    .tree-toggle:hover,.icon-button:hover{border-color:var(--accent)}
+    .tree-panel{flex:1;overflow:auto;padding:12px}
+
+    .tree-node{user-select:none}
+    .tree-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer}
+    .tree-row:hover{background:rgba(121,215,255,.08)}
+    .tree-row.active{background:rgba(121,215,255,.18)}
+    .tree-caret{width:14px;height:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);transition:transform .15s;flex-shrink:0}
+    .tree-caret.collapsed{transform:rotate(-90deg)}
+    .tree-caret.leaf{visibility:hidden}
+    .tree-icon{font-size:13px;flex-shrink:0}
+    .tree-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
+    .tree-label.muted{color:var(--muted)}
+    .tree-children{padding-left:18px;display:none}
+    .tree-children.open{display:block}
+    .tree-count{font-size:11px;color:var(--muted);background:var(--bg);padding:1px 6px;border-radius:10px;margin-left:auto;flex-shrink:0}
+
+    .main{order:1;flex:1;display:flex;flex-direction:column;min-width:0}
+    .topbar{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:12px;justify-content:space-between}
+    .topbar-left{display:flex;align-items:center;gap:12px}
+    .topbar-right{display:flex;align-items:center;gap:12px;min-width:0}
+    .report-title{margin:0;font-size:18px}
+    .warning{font-size:12px;padding:8px 12px;border:1px solid #806c32;background:#332d18;color:var(--warn);border-radius:8px}
+    .content{flex:1;overflow:auto;padding:20px}
+
+    .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
+    .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
+    .card .number{font-size:26px;color:var(--accent);font-weight:600}
+    .card .label{font-size:12px;color:var(--muted);margin-top:4px}
+    .meta{color:var(--muted);font-size:12px;margin-bottom:12px}
+    .topbar .meta{margin-bottom:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+    .toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+    .toolbar label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+    .toolbar select{background:var(--bg);color:var(--text);border:1px solid var(--line);padding:6px 8px;border-radius:6px;min-width:110px}
+    .toolbar input[type="search"]{background:var(--bg);color:var(--text);border:1px solid var(--line);padding:6px 10px;border-radius:6px;min-width:180px}
+    .toolbar .count{margin-left:auto;color:var(--muted);font-size:12px}
+
+    .table-wrap{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:auto}
+    table{width:100%;border-collapse:collapse;min-width:900px}
+    th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+    th{background:rgba(11,16,32,.6);font-size:12px;color:var(--muted);font-weight:500;position:sticky;top:0;z-index:5}
+    tbody tr{cursor:pointer;transition:background .1s}
+    tbody tr:hover{background:rgba(121,215,255,.06)}
+    tbody tr.expanded{background:rgba(121,215,255,.1)}
+    tbody tr.hidden-row{display:none}
+    td{font-size:13px}
+    .severity{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;text-transform:uppercase}
+    .severity.critical{background:rgba(255,107,107,.18);color:var(--danger)}
+    .severity.high{background:rgba(255,107,107,.12);color:#ff8787}
+    .severity.medium{background:rgba(255,203,107,.15);color:var(--warn)}
+    .severity.low{background:rgba(121,215,255,.15);color:var(--accent)}
+    .severity.info{background:rgba(158,168,199,.15);color:var(--muted)}
+    .rule-name{font-weight:500}
+    .rule-id{font-size:11px;color:var(--muted)}
+    .value-cell{max-width:300px;word-break:break-all}
+    .value-cell code{background:var(--bg);padding:2px 6px;border-radius:4px;font-size:12px}
+    .source-cell{max-width:260px;word-break:break-all;color:var(--muted);font-size:12px}
+    .source-cell a{font-size:12px}
+    .loc{font-size:11px;color:var(--muted);margin-top:4px}
+
+    .context-row{background:var(--bg)}
+    .context-row td{padding:0}
+    .context-cell{padding:14px 16px;border-left:3px solid var(--accent)}
+    .context-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+    .context-title{font-size:13px;font-weight:500;color:var(--accent)}
+    .context-close{background:var(--panel);border:1px solid var(--line);color:var(--muted);padding:4px 10px;border-radius:6px;font-size:12px}
+    .context-close:hover{color:var(--text);border-color:var(--accent)}
+    .context-code{margin:0;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;overflow:auto;white-space:pre}
+    .context-code .line{display:block;padding:0 4px}
+    .context-code .line-num{display:inline-block;width:36px;color:var(--muted);text-align:right;user-select:none;margin-right:12px;flex-shrink:0}
+    .context-code .line-content{word-break:break-all;white-space:pre-wrap}
+    .context-code mark{background:rgba(255,203,107,.25);color:var(--warn);border-radius:3px;padding:0 2px}
+    .context-code .line.match{background:rgba(255,203,107,.06);border-radius:4px}
+
+    .pagination{display:flex;align-items:center;justify-content:center;gap:8px;padding:14px}
+    .pagination button{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:6px 12px;border-radius:6px;font-size:12px}
+    .pagination button:hover:not(:disabled){border-color:var(--accent)}
+    .pagination button:disabled{opacity:.4;cursor:not-allowed}
+    .pagination .page-info{font-size:12px;color:var(--muted);min-width:120px;text-align:center}
+    .page-size{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+    .page-size select{padding:4px 6px;border-radius:6px;background:var(--bg);color:var(--text);border:1px solid var(--line)}
+
+    .empty{padding:40px;text-align:center;color:var(--muted)}
+    .section{margin-bottom:24px}
+    .section h2{margin:0 0 12px;font-size:16px}
+    .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:12px;background:var(--panel);border:1px solid var(--line);font-size:12px;color:var(--muted);margin:0 6px 6px 0}
+    .pill button{background:none;border:none;color:var(--muted);padding:0;font-size:14px;line-height:1}
+    .pill button:hover{color:var(--danger)}
+
+    .tabbar{display:flex;gap:8px;margin-bottom:12px;border-bottom:1px solid var(--line)}
+    .tab{padding:8px 14px;background:none;border:none;color:var(--muted);font-size:13px;border-bottom:2px solid transparent}
+    .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+
+    .resource-table td,.resource-table th{font-size:12px}
+    .target-filter{display:none;margin-bottom:12px}
+    .target-filter.active{display:block}
+
+    @media(max-width:900px){
+      .sidebar{position:absolute;right:0;top:0;bottom:0;z-index:20;flex:0 0 280px;max-width:85vw;box-shadow:-12px 0 30px rgba(0,0,0,.3)}
+      .cards{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+    }
   </style>
 </head>
 <body>
-<main>
-  <h1>JsOwl 安全信息收集报告</h1>
-  <p class="warning">警告：本报告包含完整敏感信息，请限制访问并安全保存。</p>
-  <p><strong>目标：</strong><code>{{.Target}}</code></p>
-  <p class="muted">模式：{{.Mode}} · User-Agent：{{.UserAgent}}</p>
-  {{if .BrowserStatus.Attempted}}<p>浏览器：{{if .BrowserStatus.Used}}已使用{{else}}未使用{{end}}{{if .BrowserStatus.Degraded}} · 已降级：{{.BrowserStatus.Reason}}{{end}}</p>{{end}}
-  <div class="cards">
-    <div class="card"><div class="number">{{.Statistics.Resources}}</div>资源</div>
-    <div class="card"><div class="number">{{.Statistics.Scripts}}</div>脚本</div>
-    <div class="card"><div class="number">{{.Statistics.Chunks}}</div>Chunk</div>
-    <div class="card"><div class="number">{{.Statistics.Endpoints}}</div>端点</div>
-    <div class="card"><div class="number">{{.Statistics.Findings}}</div>发现</div>
+<div class="app">
+  <div class="main">
+    <div class="topbar">
+      <div class="topbar-left">
+        <h1 class="report-title">JsOwl 安全信息收集报告</h1>
+        <span class="warning">敏感数据，请妥善保管</span>
+      </div>
+      <div class="topbar-right">
+        <div class="meta">
+          <code>{{.Target}}</code> · {{.Mode}} · {{.UserAgent}}
+        </div>
+        <button class="icon-button" id="open-sidebar" title="展开目标面板">☰</button>
+      </div>
+    </div>
+
+    <main class="content">
+      <div class="cards">
+        <div class="card"><div class="number">{{.Statistics.Resources}}</div><div class="label">资源</div></div>
+        <div class="card"><div class="number">{{.Statistics.Scripts}}</div><div class="label">脚本</div></div>
+        <div class="card"><div class="number">{{.Statistics.Chunks}}</div><div class="label">Chunk</div></div>
+        <div class="card"><div class="number">{{.Statistics.Endpoints}}</div><div class="label">端点</div></div>
+        <div class="card"><div class="number">{{.Statistics.Findings}}</div><div class="label">发现</div></div>
+      </div>
+
+      <div class="tabbar">
+        <button class="tab active" data-tab="findings">发现 ({{.Statistics.Findings}})</button>
+        <button class="tab" data-tab="endpoints">端点 ({{len .Endpoints}})</button>
+        <button class="tab" data-tab="resources">资源 ({{len .Resources}})</button>
+        <button class="tab" data-tab="issues">诊断 ({{len .Issues}})</button>
+      </div>
+
+      <div class="tab-panel active" id="panel-findings">
+        <div class="target-filter" id="target-filter"></div>
+        <div class="toolbar">
+          <label>严重性
+            <select id="severity"><option value="">全部</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>info</option></select>
+          </label>
+          <label>分类
+            <select id="category"><option value="">全部</option><option>sensitive</option><option>url</option></select>
+          </label>
+          <input type="search" id="search" placeholder="搜索规则、值或 URL...">
+          <div class="page-size">
+            <label>每页
+              <select id="page-size"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option></select>
+            </label>
+          </div>
+          <div class="count" id="findings-count"></div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:90px">严重性</th>
+                <th style="width:160px">规则</th>
+                <th>完整值</th>
+                <th style="width:260px">来源 URL</th>
+                <th style="width:60px">行</th>
+              </tr>
+            </thead>
+            <tbody id="findings-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="findings-pagination"></div>
+      </div>
+
+      <div class="tab-panel" id="panel-endpoints" style="display:none">
+        <div class="table-wrap">
+          <table class="resource-table">
+            <thead><tr><th>方法</th><th>证据</th><th>URL</th><th>来源</th><th>授权</th><th>GET 状态</th></tr></thead>
+            <tbody id="endpoints-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="endpoints-pagination"></div>
+      </div>
+
+      <div class="tab-panel" id="panel-resources" style="display:none">
+        <div class="table-wrap">
+          <table class="resource-table">
+            <thead><tr><th>类型</th><th>URL</th><th>状态</th><th>大小</th><th>本地路径</th></tr></thead>
+            <tbody id="resources-body"></tbody>
+          </table>
+        </div>
+        <div class="pagination" id="resources-pagination"></div>
+      </div>
+
+      <div class="tab-panel" id="panel-issues" style="display:none">
+        <div class="table-wrap">
+          <table class="resource-table">
+            <thead><tr><th>代码</th><th>阶段</th><th>URL</th><th>消息</th></tr></thead>
+            <tbody id="issues-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </main>
   </div>
-  <section>
-    <h2>敏感信息与 URL 发现</h2>
-    <label>严重性 <select id="severity"><option value="">全部</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>info</option></select></label>
-    <label>分类 <select id="category"><option value="">全部</option><option>sensitive</option><option>url</option></select></label>
-    <table id="findings"><thead><tr><th>规则</th><th>严重性</th><th>完整值</th><th>来源</th><th>位置</th></tr></thead><tbody>
-    {{range .Findings}}<tr data-severity="{{.Severity}}" data-category="{{.Category}}"><td>{{.RuleName}}<br><span class="muted">{{.RuleID}}</span></td><td>{{.Severity}}</td><td><code>{{.Value}}</code></td><td><code>{{.SourceURL}}</code></td><td>{{.Line}}:{{.Column}}</td></tr>{{end}}
-    </tbody></table>
-  </section>
-  <section><h2>API 与路由</h2><table><thead><tr><th>URL</th><th>来源</th><th>授权</th><th>GET 状态</th></tr></thead><tbody>
-    {{range .Endpoints}}<tr><td><code>{{.URL}}</code></td><td><code>{{.SourceURL}}</code></td><td>{{.Authorized}}</td><td>{{.StatusCode}}</td></tr>{{end}}
-  </tbody></table></section>
-  <section><h2>资源</h2><table><thead><tr><th>类型</th><th>URL</th><th>状态</th><th>大小</th><th>本地路径</th></tr></thead><tbody>
-    {{range .Resources}}<tr><td>{{.Type}}</td><td><code>{{.URL}}</code></td><td>{{.StatusCode}}</td><td>{{.Size}}</td><td><code>{{.LocalPath}}</code></td></tr>{{end}}
-  </tbody></table></section>
-  <section><h2>诊断</h2><table><thead><tr><th>代码</th><th>阶段</th><th>URL</th><th>消息</th></tr></thead><tbody>
-    {{range .Issues}}<tr><td>{{.Code}}</td><td>{{.Stage}}</td><td><code>{{.URL}}</code></td><td>{{.Message}}</td></tr>{{end}}
-  </tbody></table></section>
-</main>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <button class="tree-toggle" id="toggle-tree" title="关闭目标面板">×</button>
+      <h3>目标面板</h3>
+    </div>
+    <div class="tree-panel" id="file-tree"></div>
+  </aside>
+</div>
+
 <script>
-function filterFindings(){
-  const severity=document.getElementById("severity").value;
-  const category=document.getElementById("category").value;
-  document.querySelectorAll("#findings tbody tr").forEach(row=>{
-    row.hidden=(severity!==""&&row.dataset.severity!==severity)||
-      (category!==""&&row.dataset.category!==category);
+window.__DATA__ = {
+  target: {{.Target | json}},
+  mode: {{.Mode | json}},
+  userAgent: {{.UserAgent | json}},
+  browserStatus: {{.BrowserStatus | json}},
+  statistics: {{.Statistics | json}},
+  findings: {{.Findings | json}},
+  resources: {{.Resources | json}},
+  endpoints: {{.Endpoints | json}},
+  issues: {{.Issues | json}}
+};
+
+(function(){
+  const data = window.__DATA__;
+  const pick = (obj, ...keys) => {
+    for (const key of keys) {
+      if (obj && Object.prototype.hasOwnProperty.call(obj, key) && obj[key] !== undefined && obj[key] !== null) return obj[key];
+    }
+    return '';
+  };
+  const normalizeFinding = f => ({
+    ruleID: pick(f, 'rule_id', 'RuleID'),
+    ruleName: pick(f, 'rule_name', 'RuleName'),
+    category: pick(f, 'category', 'Category'),
+    severity: pick(f, 'severity', 'Severity'),
+    value: pick(f, 'value', 'Value'),
+    sourceURL: pick(f, 'source_url', 'SourceURL'),
+    line: pick(f, 'line', 'Line') || 0,
+    column: pick(f, 'column', 'Column') || 0,
+    contextLines: pick(f, 'context_lines', 'ContextLines') || []
   });
-}
-document.getElementById("severity").addEventListener("change",filterFindings);
-document.getElementById("category").addEventListener("change",filterFindings);
+  const normalizeResource = r => ({
+    url: pick(r, 'url', 'URL'),
+    type: pick(r, 'type', 'Type'),
+    sourceURL: pick(r, 'source_url', 'SourceURL'),
+    localPath: pick(r, 'local_path', 'LocalPath'),
+    statusCode: pick(r, 'status_code', 'StatusCode') || 0,
+    size: pick(r, 'size', 'Size') || 0
+  });
+  const normalizeEndpoint = e => ({
+    url: pick(e, 'url', 'URL'),
+    sourceURL: pick(e, 'source_url', 'SourceURL'),
+    authorized: pick(e, 'authorized', 'Authorized'),
+    statusCode: pick(e, 'status_code', 'StatusCode') || 0,
+    method: pick(e, 'method', 'Method'),
+    evidence: pick(e, 'evidence', 'Evidence')
+  });
+  const normalizeIssue = i => ({
+    code: pick(i, 'code', 'Code'),
+    stage: pick(i, 'stage', 'Stage'),
+    url: pick(i, 'url', 'URL'),
+    message: pick(i, 'message', 'Message')
+  });
+  const findings = (data.findings || []).map(normalizeFinding);
+  const resources = (data.resources || []).map(normalizeResource);
+  const endpoints = (data.endpoints || []).map(normalizeEndpoint);
+  const issues = (data.issues || []).map(normalizeIssue);
+
+  let state = {
+    severity: '',
+    category: '',
+    search: '',
+    sourceFilter: '',
+    sourceLabel: '',
+    page: 1,
+    pageSize: 50,
+    expanded: null,
+    openNodes: new Set(),
+    closedNodes: new Set()
+  };
+
+  function buildTree() {
+    const root = { name: '站点', children: {}, urls: new Set(), findings: 0, expanded: true, filter: '' };
+    const urlMap = new Map();
+
+    findings.forEach(f => {
+      if (f.sourceURL) urlMap.set(f.sourceURL, (urlMap.get(f.sourceURL) || 0) + 1);
+    });
+
+    const addUrl = (url, findingCount) => {
+      if (!url) return;
+      try {
+        const u = new URL(url);
+        const origin = u.protocol + '//' + u.host;
+        let hostNode = root.children[origin];
+        if (!hostNode) {
+          hostNode = { name: u.host, host: true, children: {}, urls: new Set(), findings: 0, expanded: !state.closedNodes.has(origin), filter: origin };
+          root.children[origin] = hostNode;
+        }
+        hostNode.urls.add(url);
+        hostNode.findings += findingCount;
+
+        const parts = u.pathname.split('/').filter(Boolean);
+        let current = hostNode;
+        let pathPrefix = '';
+        parts.forEach((part, idx) => {
+          pathPrefix += '/' + part;
+          const key = origin + pathPrefix;
+          let node = current.children[key];
+          if (!node) {
+            node = { name: part, children: {}, urls: new Set(), findings: 0, expanded: state.openNodes.has(key) || (idx < 1 && !state.closedNodes.has(key)), filter: key };
+            current.children[key] = node;
+          }
+          node.urls.add(url);
+          node.findings += findingCount;
+          current = node;
+        });
+        if (parts.length === 0) {
+          hostNode.findings += 0;
+        }
+      } catch {
+        let node = root.children[url];
+        if (!node) {
+          node = { name: url, children: {}, urls: new Set(), findings: 0, expanded: false, filter: url };
+          root.children[url] = node;
+        }
+        node.urls.add(url);
+        node.findings += findingCount;
+      }
+    };
+
+    const allUrls = new Set();
+    resources.forEach(r => allUrls.add(r.url));
+    endpoints.forEach(e => { allUrls.add(e.url); allUrls.add(e.sourceURL); });
+    findings.forEach(f => allUrls.add(f.sourceURL));
+    [...allUrls].sort().forEach(url => addUrl(url, urlMap.get(url) || 0));
+
+    return root;
+  }
+
+  function renderTree(node, container, path) {
+    const el = document.createElement('div');
+    el.className = 'tree-node';
+    const hasChildren = Object.keys(node.children).length > 0;
+    const row = document.createElement('div');
+    row.className = 'tree-row';
+    row.dataset.path = node.filter || '';
+    if (state.sourceFilter && row.dataset.path === state.sourceFilter) {
+      row.classList.add('active');
+    }
+
+    const caret = document.createElement('span');
+    caret.className = 'tree-caret' + (hasChildren ? '' : ' leaf') + (node.expanded ? '' : ' collapsed');
+    caret.textContent = '▼';
+    if (hasChildren) {
+      caret.addEventListener('click', e => {
+        e.stopPropagation();
+        const nodeKey = node.filter || path || node.name;
+        if (node.expanded) {
+          state.closedNodes.add(nodeKey);
+          state.openNodes.delete(nodeKey);
+        } else {
+          state.openNodes.add(nodeKey);
+          state.closedNodes.delete(nodeKey);
+        }
+        node.expanded = !node.expanded;
+        refreshTree();
+      });
+    }
+
+    const icon = document.createElement('span');
+    icon.className = 'tree-icon';
+    icon.textContent = node.host ? '◎' : hasChildren ? '▣' : '□';
+
+    const label = document.createElement('span');
+    label.className = 'tree-label';
+    label.textContent = node.name;
+    label.title = node.name;
+
+    row.appendChild(caret);
+    row.appendChild(icon);
+    row.appendChild(label);
+    if (node.findings > 0) {
+      const count = document.createElement('span');
+      count.className = 'tree-count';
+      count.textContent = node.findings;
+      row.appendChild(count);
+    }
+    row.addEventListener('click', () => {
+      const filter = node.filter || '';
+      state.sourceFilter = state.sourceFilter === filter ? '' : filter;
+      state.sourceLabel = state.sourceFilter ? node.name : '';
+      state.page = 1;
+      activateTab('findings');
+      renderFindings();
+      document.getElementById('panel-findings').scrollIntoView({ block: 'start' });
+    });
+    el.appendChild(row);
+
+    if (hasChildren) {
+      const children = document.createElement('div');
+      children.className = 'tree-children' + (node.expanded ? ' open' : '');
+      Object.keys(node.children).sort().forEach(key => {
+        renderTree(node.children[key], children, key);
+      });
+      el.appendChild(children);
+    }
+    container.appendChild(el);
+  }
+
+  function refreshTree() {
+    const container = document.getElementById('file-tree');
+    container.innerHTML = '';
+    const tree = buildTree();
+    Object.keys(tree.children).sort().forEach(key => {
+      renderTree(tree.children[key], container, key);
+    });
+    if (container.children.length === 0) {
+      container.innerHTML = '<div class="empty">暂无可展示目标</div>';
+    }
+  }
+
+  function escapeHtml(text) {
+    return String(text == null ? '' : text)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function highlightLine(content, start, end) {
+    if (start < 0 || end <= start) return escapeHtml(content);
+    const chars = Array.from(content);
+    const before = chars.slice(0, start).join('');
+    const matched = chars.slice(start, end).join('');
+    const after = chars.slice(end).join('');
+    return escapeHtml(before) + '<mark>' + escapeHtml(matched) + '</mark>' + escapeHtml(after);
+  }
+
+  function renderContext(finding) {
+    const lines = finding.contextLines || [];
+    let html = '';
+    lines.forEach(line => {
+      const lineNumber = pick(line, 'line_number', 'LineNumber') || '';
+      const content = pick(line, 'content', 'Content');
+      const matchStart = pick(line, 'match_start', 'MatchStart');
+      const matchEnd = pick(line, 'match_end', 'MatchEnd');
+      const isMatch = matchStart >= 0 && matchEnd > matchStart;
+      html += '<span class="line' + (isMatch ? ' match' : '') + '">';
+      html += '<span class="line-num">' + lineNumber + '</span>';
+      html += '<span class="line-content">' + highlightLine(content, matchStart, matchEnd) + '</span>';
+      html += '</span>\n';
+    });
+    return html;
+  }
+
+  function matchesFilter(f) {
+    if (state.severity && f.severity !== state.severity) return false;
+    if (state.category && f.category !== state.category) return false;
+    if (state.sourceFilter) {
+      if (f.sourceURL !== state.sourceFilter && !f.sourceURL.startsWith(state.sourceFilter + '/') && !f.sourceURL.startsWith(state.sourceFilter + '?')) return false;
+    }
+    if (state.search) {
+      const q = state.search.toLowerCase();
+      const hay = (f.ruleName + ' ' + f.ruleID + ' ' + f.value + ' ' + f.sourceURL + ' ' + f.severity + ' ' + f.category).toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  }
+
+  function filteredFindings() {
+    return findings.filter(matchesFilter);
+  }
+
+  function renderFindingsTable() {
+    const tbody = document.getElementById('findings-body');
+    const filtered = filteredFindings();
+    const total = filtered.length;
+    const pageSize = state.pageSize;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    state.page = Math.min(state.page, totalPages);
+    const start = (state.page - 1) * pageSize;
+    const pageItems = filtered.slice(start, start + pageSize);
+
+    document.getElementById('findings-count').textContent = total + ' 条 / ' + totalPages + ' 页';
+    const filterBox = document.getElementById('target-filter');
+    if (state.sourceFilter) {
+      filterBox.className = 'target-filter active';
+      filterBox.innerHTML = '<span class="pill">当前节点：<code>' + escapeHtml(state.sourceFilter) + '</code><button id="clear-source" title="清除节点过滤">×</button></span>';
+      filterBox.querySelector('#clear-source').addEventListener('click', () => {
+        state.sourceFilter = '';
+        state.sourceLabel = '';
+        state.page = 1;
+        refreshFindings();
+      });
+    } else {
+      filterBox.className = 'target-filter';
+      filterBox.innerHTML = '';
+    }
+
+    tbody.innerHTML = '';
+    if (pageItems.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">无匹配发现</td></tr>';
+      renderPagination(totalPages, 0);
+      return;
+    }
+
+    pageItems.forEach(f => {
+      const row = document.createElement('tr');
+      row.dataset.id = f.ruleID + '::' + f.sourceURL + '::' + f.line + '::' + f.column;
+      if (state.expanded === row.dataset.id) row.classList.add('expanded');
+
+      row.innerHTML = '<td><span class="severity ' + f.severity + '">' + f.severity + '</span></td>' +
+        '<td><div class="rule-name">' + escapeHtml(f.ruleName) + '</div><div class="rule-id">' + escapeHtml(f.ruleID) + '</div></td>' +
+        '<td class="value-cell"><code>' + escapeHtml(f.value) + '</code></td>' +
+        '<td class="source-cell"><a href="' + encodeURI(f.sourceURL) + '" target="_blank" rel="noopener noreferrer"><code>' + escapeHtml(f.sourceURL) + '</code></a><div class="loc">' + f.line + ':' + f.column + '</div></td>' +
+        '<td>' + f.line + '</td>';
+
+      row.addEventListener('click', () => {
+        state.expanded = state.expanded === row.dataset.id ? null : row.dataset.id;
+        renderFindings();
+      });
+      tbody.appendChild(row);
+
+      if (state.expanded === row.dataset.id) {
+        const ctxRow = document.createElement('tr');
+        ctxRow.className = 'context-row';
+        ctxRow.innerHTML = '<td colspan="5"><div class="context-cell"><div class="context-header"><span class="context-title">匹配上下文 · ' + escapeHtml(f.ruleName) + '</span><button class="context-close">关闭</button></div><pre class="context-code">' + renderContext(f) + '</pre></div></td>';
+        ctxRow.querySelector('.context-close').addEventListener('click', e => {
+          e.stopPropagation();
+          state.expanded = null;
+          renderFindings();
+        });
+        tbody.appendChild(ctxRow);
+      }
+    });
+
+    renderPagination(totalPages, total);
+  }
+
+  function renderPagination(totalPages, total) {
+    const pag = document.getElementById('findings-pagination');
+    if (total === 0) {
+      pag.innerHTML = '';
+      return;
+    }
+    const start = (state.page - 1) * state.pageSize + 1;
+    const end = Math.min(start + state.pageSize - 1, total);
+    pag.innerHTML = '<button id="prev-page" ' + (state.page <= 1 ? 'disabled' : '') + '>上一页</button>' +
+      '<span class="page-info">' + start + '-' + end + ' / ' + total + '</span>' +
+      '<button id="next-page" ' + (state.page >= totalPages ? 'disabled' : '') + '>下一页</button>';
+    document.getElementById('prev-page').addEventListener('click', () => { state.page--; renderFindings(); });
+    document.getElementById('next-page').addEventListener('click', () => { state.page++; renderFindings(); });
+  }
+
+  function renderSimplePage(items, page, pageSize) {
+    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+    const current = Math.min(page, totalPages);
+    const start = (current - 1) * pageSize;
+    return { rows: items.slice(start, start + pageSize), page: current, totalPages, total: items.length };
+  }
+
+  function renderSimplePagination(container, pageState, onGo) {
+    if (pageState.totalPages <= 1) { container.innerHTML = ''; return; }
+    const start = (pageState.page - 1) * 100 + 1;
+    const end = Math.min(start + 99, pageState.total);
+    container.innerHTML = '<button data-go="prev" ' + (pageState.page <= 1 ? 'disabled' : '') + '>上一页</button>' +
+      '<span class="page-info">' + start + '-' + end + ' / ' + pageState.total + '</span>' +
+      '<button data-go="next" ' + (pageState.page >= pageState.totalPages ? 'disabled' : '') + '>下一页</button>';
+    container.querySelector('[data-go="prev"]').addEventListener('click', () => onGo(pageState.page - 1));
+    container.querySelector('[data-go="next"]').addEventListener('click', () => onGo(pageState.page + 1));
+  }
+
+  const tabRendered = { findings: false, endpoints: false, resources: false, issues: false };
+  const simplePage = { endpoints: 1, resources: 1 };
+
+  function renderEndpoints() {
+    const tbody = document.getElementById('endpoints-body');
+    const pageState = renderSimplePage(endpoints, simplePage.endpoints, 100);
+    simplePage.endpoints = pageState.page;
+    tbody.innerHTML = pageState.rows.length === 0
+      ? '<tr><td colspan="6" class="empty">无端点</td></tr>'
+      : pageState.rows.map(e => '<tr><td>' + (e.method ? '<b>' + escapeHtml(e.method) + '</b>' : 'GET') + '</td>' +
+          '<td><span class="severity ' + (e.evidence === 'runtime' ? 'critical' : e.evidence === 'full-url' ? 'medium' : 'info') + '">' + escapeHtml(e.evidence || 'static') + '</span></td>' +
+          '<td><code>' + escapeHtml(e.url) + '</code></td><td><code>' + escapeHtml(e.sourceURL) + '</code></td><td>' + e.authorized + '</td><td>' + e.statusCode + '</td></tr>').join('');
+    renderSimplePagination(
+      document.getElementById('endpoints-pagination'),
+      pageState,
+      page => { simplePage.endpoints = page; renderEndpoints(); }
+    );
+  }
+
+  function renderResources() {
+    const tbody = document.getElementById('resources-body');
+    const pageState = renderSimplePage(resources, simplePage.resources, 100);
+    simplePage.resources = pageState.page;
+    tbody.innerHTML = pageState.rows.length === 0
+      ? '<tr><td colspan="5" class="empty">无资源</td></tr>'
+      : pageState.rows.map(r => '<tr><td>' + r.type + '</td><td><code>' + escapeHtml(r.url) + '</code></td><td>' + r.statusCode + '</td><td>' + r.size + '</td><td><code>' + escapeHtml(r.localPath) + '</code></td></tr>').join('');
+    renderSimplePagination(
+      document.getElementById('resources-pagination'),
+      pageState,
+      page => { simplePage.resources = page; renderResources(); }
+    );
+  }
+
+  function renderIssues() {
+    const tbody = document.getElementById('issues-body');
+    tbody.innerHTML = issues.length === 0
+      ? '<tr><td colspan="4" class="empty">无诊断信息</td></tr>'
+      : issues.map(i => '<tr><td>' + escapeHtml(i.code) + '</td><td>' + escapeHtml(i.stage) + '</td><td><code>' + escapeHtml(i.url) + '</code></td><td>' + escapeHtml(i.message) + '</td></tr>').join('');
+  }
+
+  function renderFindings() {
+    tabRendered.findings = true;
+    renderFindingsTable();
+  }
+
+  document.getElementById('severity').addEventListener('change', e => { state.severity = e.target.value; state.page = 1; renderFindings(); });
+  document.getElementById('category').addEventListener('change', e => { state.category = e.target.value; state.page = 1; renderFindings(); });
+  let searchTimer = null;
+  document.getElementById('search').addEventListener('input', e => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => { state.search = e.target.value; state.page = 1; renderFindings(); }, 200);
+  });
+  document.getElementById('page-size').addEventListener('change', e => { state.pageSize = parseInt(e.target.value, 10); state.page = 1; renderFindings(); });
+
+  function setSidebar(open) {
+    document.getElementById('sidebar').classList.toggle('collapsed', !open);
+    document.getElementById('open-sidebar').style.display = open ? 'none' : 'flex';
+  }
+
+  document.getElementById('toggle-tree').addEventListener('click', () => setSidebar(false));
+  document.getElementById('open-sidebar').addEventListener('click', () => setSidebar(true));
+
+  function activateTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
+    document.getElementById('panel-' + name).style.display = 'block';
+    if (!tabRendered[name]) {
+      tabRendered[name] = true;
+      if (name === 'endpoints') renderEndpoints();
+      else if (name === 'resources') renderResources();
+      else if (name === 'issues') renderIssues();
+    }
+  }
+
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => activateTab(tab.dataset.tab));
+  });
+
+  refreshTree();
+  renderFindings();
+  setSidebar(true);
+})();
 </script>
 </body>
 </html>
