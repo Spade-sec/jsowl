@@ -2,3 +2,17 @@
 .worktrees/
 .cache/
 jsowl-report/
+
+# Build artifacts
+bin/
+/jsowl
+/jsowl.exe
+/jsowl-mcp
+/jsowl-mcp.exe
+
+# Scan outputs and reports
+report/
+report-test/
+
+# Runtime logs
+*.log
