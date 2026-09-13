@@ -48,3 +48,15 @@ func WriteJSONReport(path string, result *Result) error {
 func WriteHTMLReport(path string, result *Result) error {
 	return report.WriteHTML(path, result)
 }
+
+// WriteTextReports atomically writes api路径.txt, 参数.txt and 敏感信息.txt
+// into the target's report directory.
+func WriteTextReports(directory string, result *Result) error {
+	return report.WriteTextReports(directory, result)
+}
+
+// WriteSplitReports writes the split topic HTML reports (API/敏感信息/参数/
+// 资源) plus a navigation index into the target's report directory.
+func WriteSplitReports(directory string, result *Result) error {
+	return report.WriteSplitReports(directory, result)
+}

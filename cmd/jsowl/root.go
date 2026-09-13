@@ -31,6 +31,7 @@ type dependencies struct {
 	newScanner    func(jsowl.Config) (scanService, error)
 	writeJSON     func(string, *jsowl.Result) error
 	writeHTML     func(string, *jsowl.Result) error
+	writeText     func(string, *jsowl.Result) error
 	check         func(context.Context, jsowl.BrowserConfig) jsowl.BrowserCheckReport
 	ensureOutput  func(string) error
 }
@@ -134,6 +135,9 @@ func completeDependencies(deps dependencies) dependencies {
 	}
 	if deps.writeHTML == nil {
 		deps.writeHTML = jsowl.WriteHTMLReport
+	}
+	if deps.writeText == nil {
+		deps.writeText = jsowl.WriteTextReports
 	}
 	if deps.check == nil {
 		deps.check = jsowl.CheckBrowser
@@ -400,6 +404,16 @@ func writeReports(
 	}
 	if config.Output.HTML {
 		if err := deps.writeHTML(filepath.Join(directory, "report.html"), result); err != nil {
+			return err
+		}
+	}
+	if deps.writeText != nil {
+		if err := deps.writeText(directory, result); err != nil {
+			return err
+		}
+	}
+	if config.Output.HTML {
+		if err := jsowl.WriteSplitReports(directory, result); err != nil {
 			return err
 		}
 	}
