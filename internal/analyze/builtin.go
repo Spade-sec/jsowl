@@ -2,13 +2,27 @@ package analyze
 
 import "github.com/youmulijiang/jsowl/internal/model"
 
-// BuiltinRules returns the RE2-compatible rules shipped with JsOwl.
-func BuiltinRules() []model.Rule {
+// APIRules returns the URL-extraction rules hard-wired into JsOwl. They are
+// compiled unconditionally and cannot be disabled or replaced through rule
+// files, so API discovery never depends on configuration.
+func APIRules() []model.Rule {
 	return []model.Rule{
-		urlRule(
+		urlMethodRule(
 			"url.api-call",
 			"API request URL",
-			`(?i)(?:fetch|axios\.(?:get|post|put|delete|patch|request)|ajax)\s*\(\s*["']([^"']+)["']`,
+			`(?i)((?:\$fetch)|(?:ofetch)|(?:\$ofetch)|(?:ky)|(?:fetch)|(?:axios\.(?:get|post|put|delete|patch|request))|(?:\$\s*\.\s*(?:get|post|put|delete|patch|getJSON|ajax))|(?:ajax))\s*\(\s*["']([^"']+)["']`,
+			2, 1,
+		),
+		urlMethodRule(
+			"url.xhr-open",
+			"XMLHttpRequest URL",
+			`(?i)\.open\s*\(\s*["'](get|post|put|delete|patch|head|options)["']\s*,\s*["']([^"']+)["']`,
+			2, 1,
+		),
+		urlRule(
+			"url.api-prefix",
+			"API path prefix",
+			`(?:^|[\s"'`+"`"+`])(/(?:api|v[0-9]+|rest|graphql|ws)/[^\s"'<>{}|\\`+"`"+`\[\]]+)`,
 			1,
 		),
 		urlRule(
@@ -30,21 +44,15 @@ func BuiltinRules() []model.Rule {
 			1,
 		),
 		urlRule(
-			"url.quoted",
-			"Quoted URL",
-			`["'](https?://[^"'\s]+|(?:\.\./|\./|/)[^"'\s<>{}|\\`+"`"+`\[\]]+)["']`,
-			1,
-		),
-		urlRule(
-			"url.api-prefix",
-			"API path prefix",
-			`(?:^|[\s"'`+"`"+`])(/(?:api|v[0-9]+|rest|graphql|ws)/[^\s"'<>{}|\\`+"`"+`\[\]]+)`,
-			1,
-		),
-		urlRule(
 			"url.path-variable",
 			"Path variable",
 			`(?i)(?:path|route|uri|url|endpoint|baseURL|base_url|prefix|api_?path|api_?url|redirect|next|callback_?url|return_?url)\s*[:=]\s*["']([^"']*/[^"']*)["']`,
+			1,
+		),
+		urlRule(
+			"url.quoted",
+			"Quoted URL",
+			`["'](https?://[^"'\s]+|(?:\.\./|\./|/)[^"'\s<>{}|\\`+"`"+`\[\]]+)["']`,
 			1,
 		),
 		urlRule(
@@ -59,6 +67,13 @@ func BuiltinRules() []model.Rule {
 			`function\s+\w+\([^)]*\)\s*\{\s*return\s+\w+\.p\s*\+\s*["']([^"']{2,})["']`,
 			1,
 		),
+	}
+}
+
+// BuiltinRules returns the sensitive-information rules shipped with JsOwl.
+// URL extraction lives in APIRules and is always compiled separately.
+func BuiltinRules() []model.Rule {
+	return []model.Rule{
 		sensitiveRule(
 			"secret.account",
 			"Cloud account value",
@@ -151,6 +166,14 @@ func urlRule(id, name, pattern string, group int) model.Rule {
 		ID: id, Name: name, Category: model.RuleCategoryURL,
 		Severity: model.SeverityInfo, Pattern: pattern, Group: group, Enabled: true,
 	}
+}
+
+// urlMethodRule is a URL rule whose match also captures the HTTP verb in a
+// second capture group.
+func urlMethodRule(id, name, pattern string, group, methodGroup int) model.Rule {
+	rule := urlRule(id, name, pattern, group)
+	rule.MethodGroup = methodGroup
+	return rule
 }
 
 func sensitiveRule(

@@ -29,11 +29,56 @@ type Candidate struct {
 	Raw    string
 	RuleID string
 	Offset int
+	// Method is the HTTP verb captured by rules with a method group.
+	Method string
 }
 
 type compiledRule struct {
 	rule model.Rule
 	re   *regexp.Regexp
+}
+
+// extractMethod returns the normalised HTTP verb captured by the rule's
+// method group, or "" when the rule has none or the verb is unrecognised.
+func (c compiledRule) extractMethod(body []byte, indices []int) string {
+	if c.rule.MethodGroup <= 0 {
+		return ""
+	}
+	groupOffset := c.rule.MethodGroup * 2
+	start, end := indices[groupOffset], indices[groupOffset+1]
+	if start < 0 || end <= start || end > len(body) {
+		return ""
+	}
+	return normalizeMethod(string(body[start:end]))
+}
+
+// normalizeMethod maps verb-bearing capture text (axios.get, fetch,
+// jQuery.ajax) to a canonical HTTP method; unknown verbs return "".
+func normalizeMethod(raw string) string {
+	verb := strings.ToLower(strings.TrimSpace(raw))
+	if index := strings.LastIndex(verb, "."); index >= 0 {
+		verb = verb[index+1:]
+	}
+	switch verb {
+	case "$fetch", "ofetch", "ky":
+		// fetch-style callables default to GET.
+		return "GET"
+	case "get":
+		return "GET"
+	case "post":
+		return "POST"
+	case "put":
+		return "PUT"
+	case "patch":
+		return "PATCH"
+	case "delete":
+		return "DELETE"
+	case "head":
+		return "HEAD"
+	case "options":
+		return "OPTIONS"
+	}
+	return ""
 }
 
 // Engine owns an immutable, compiled set of extraction rules.
@@ -42,10 +87,17 @@ type Engine struct {
 }
 
 // New compiles built-in and custom rules after applying disabled rule IDs.
+// The built-in API (URL) rules are always compiled: they are hard-wired in
+// code and can be neither disabled nor replaced through rule files.
 func New(custom []model.Rule, disabled []string) (*Engine, error) {
 	disabledSet := make(map[string]struct{}, len(disabled))
 	for _, id := range disabled {
 		disabledSet[id] = struct{}{}
+	}
+
+	apiIDs := make(map[string]struct{})
+	for _, rule := range APIRules() {
+		apiIDs[rule.ID] = struct{}{}
 	}
 
 	byID := make(map[string]model.Rule)
@@ -55,6 +107,9 @@ func New(custom []model.Rule, disabled []string) (*Engine, error) {
 		}
 	}
 	for _, rule := range custom {
+		if _, reserved := apiIDs[rule.ID]; reserved {
+			continue // API rules are code-owned and cannot be overridden
+		}
 		if _, disabled := disabledSet[rule.ID]; disabled || !rule.Enabled {
 			delete(byID, rule.ID)
 			continue
@@ -62,31 +117,49 @@ func New(custom []model.Rule, disabled []string) (*Engine, error) {
 		byID[rule.ID] = rule
 	}
 
-	ids := make([]string, 0, len(byID))
+	ids := make([]string, 0, len(byID)+len(apiIDs))
 	for id := range byID {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
 
-	engine := &Engine{rules: make([]compiledRule, 0, len(ids))}
-	for _, id := range ids {
-		rule := byID[id]
+	engine := &Engine{rules: make([]compiledRule, 0, len(ids)+len(apiIDs))}
+	compile := func(rule model.Rule) error {
 		if rule.ID == "" {
-			return nil, fmt.Errorf("rule ID is empty")
+			return fmt.Errorf("rule ID is empty")
 		}
 		compiled, err := regexp.Compile(rule.Pattern)
 		if err != nil {
-			return nil, fmt.Errorf("compile rule %s: %w", rule.ID, err)
+			return fmt.Errorf("compile rule %s: %w", rule.ID, err)
 		}
 		if rule.Group < 0 || rule.Group > compiled.NumSubexp() {
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"compile rule %s: capture group %d exceeds %d",
 				rule.ID,
 				rule.Group,
 				compiled.NumSubexp(),
 			)
 		}
+		if rule.MethodGroup < 0 || rule.MethodGroup > compiled.NumSubexp() {
+			return fmt.Errorf(
+				"compile rule %s: method group %d exceeds %d",
+				rule.ID,
+				rule.MethodGroup,
+				compiled.NumSubexp(),
+			)
+		}
 		engine.rules = append(engine.rules, compiledRule{rule: rule, re: compiled})
+		return nil
+	}
+	for _, rule := range APIRules() {
+		if err := compile(rule); err != nil {
+			return nil, err
+		}
+	}
+	for _, id := range ids {
+		if err := compile(byID[id]); err != nil {
+			return nil, err
+		}
 	}
 	return engine, nil
 }
@@ -137,6 +210,7 @@ func (e *Engine) Analyze(source ResourceRef, body []byte) ([]model.Finding, []Ca
 					seenCandidates[candidateKey] = struct{}{}
 					candidates = append(candidates, Candidate{
 						Raw: value, RuleID: rule.rule.ID, Offset: start,
+						Method: rule.extractMethod(body, indices),
 					})
 				}
 			}

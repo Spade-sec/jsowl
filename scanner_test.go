@@ -59,8 +59,8 @@ func TestScannerDirectRecursivelyCollectsChunkEndpointAndSensitiveFinding(t *tes
 
 	config := DefaultConfig()
 	config.Mode = ModeDirect
-	config.Concurrency.ResourcesPerTarget = 2
-	config.Limits.MaxResources = 20
+	config.Concurrency.ResourcesPerTarget = 8
+	config.Limits.MaxResources = 40
 	scanner, err := New(config)
 	if err != nil {
 		t.Fatal(err)

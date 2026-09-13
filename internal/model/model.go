@@ -130,6 +130,8 @@ type Rule struct {
 	Severity    Severity     `yaml:"severity" json:"severity"`
 	Pattern     string       `yaml:"pattern" json:"pattern"`
 	Group       int          `yaml:"group" json:"group"`
+	// MethodGroup optionally captures the HTTP verb from the same match.
+	MethodGroup int `yaml:"method_group,omitempty" json:"method_group,omitempty"`
 	Description string       `yaml:"description" json:"description"`
 	Enabled     bool         `yaml:"enabled" json:"enabled"`
 }

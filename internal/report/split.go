@@ -156,7 +156,7 @@ func renderAPIReport(result *model.Result) (int, string, error) {
 	for _, endpoint := range endpoints {
 		method := endpoint.Method
 		if method == "" {
-			method = "GET"
+			method = "—" // unknown: not recovered from AST or regex
 		}
 		source := endpoint.SourceURL
 		if source == "" {
@@ -171,10 +171,18 @@ func renderAPIReport(result *model.Result) (int, string, error) {
 		if len(endpoint.BodyParams) > 0 {
 			bodyNote = `<div class="muted">body: ` + htmlEscape(strings.Join(endpoint.BodyParams, ", ")) + `</div>`
 		}
+		rawNote := ""
+		if endpoint.Raw != "" && endpoint.Raw != endpoint.URL {
+			kind := "绝对"
+			if isRelativeRaw(endpoint.Raw) {
+				kind = "相对"
+			}
+			rawNote = `<div class="muted">原始(` + kind + `): ` + htmlEscape(endpoint.Raw) + `</div>`
+		}
 		fmt.Fprintf(&b,
-			"<tr><td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code></td><td><code>%s</code>%s%s</td><td>%t</td><td>%d</td></tr>",
+			"<tr><td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code>%s</td><td><code>%s</code>%s%s</td><td>%t</td><td>%d</td></tr>",
 			htmlEscape(method), evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
-			htmlEscape(endpoint.URL), htmlEscape(location), bodyNote, context, endpoint.Authorized, endpoint.StatusCode)
+			htmlEscape(endpoint.URL), rawNote, htmlEscape(location), bodyNote, context, endpoint.Authorized, endpoint.StatusCode)
 	}
 	b.WriteString("</tbody></table>")
 	return len(endpoints), b.String(), nil
@@ -490,6 +498,13 @@ func evidenceLabel(evidence string) string {
 		return "static"
 	}
 	return evidence
+}
+
+// isRelativeRaw reports whether the pre-resolution endpoint reference was
+// a relative path.
+func isRelativeRaw(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed.Scheme == "" && parsed.Host == ""
 }
 
 func htmlEscape(value string) string {

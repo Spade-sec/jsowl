@@ -18,7 +18,7 @@ func TestAnalyzeReportsCaptureLocationAndCandidate(t *testing.T) {
 		Pattern:  `fetch\(["']([^"']+)["']`,
 		Group:    1,
 		Enabled:  true,
-	}}, builtinIDs())
+	}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,18 +28,30 @@ func TestAnalyzeReportsCaptureLocationAndCandidate(t *testing.T) {
 		Type: model.ResourceTypeScript,
 	}, []byte("const ready = true;\nfetch('/api/users')"))
 
-	if len(findings) != 1 {
-		t.Fatalf("len(findings) = %d, want 1", len(findings))
+	// Built-in API rules are always compiled, so assert on the custom rule
+	// instead of total counts.
+	matched, ok := findingByRule(findings, "test.api")
+	if !ok {
+		t.Fatalf("custom rule finding missing in %v", findings)
 	}
-	if findings[0].Value != "/api/users" {
-		t.Fatalf("Value = %q", findings[0].Value)
+	if matched.Value != "/api/users" {
+		t.Fatalf("Value = %q", matched.Value)
 	}
-	if findings[0].Line != 2 || findings[0].Column != 8 {
-		t.Fatalf("location = %d:%d, want 2:8", findings[0].Line, findings[0].Column)
+	if matched.Line != 2 || matched.Column != 8 {
+		t.Fatalf("location = %d:%d, want 2:8", matched.Line, matched.Column)
 	}
 	if len(candidates) != 1 || candidates[0].Raw != "/api/users" {
 		t.Fatalf("candidates = %#v", candidates)
 	}
+}
+
+func findingByRule(findings []model.Finding, id string) (model.Finding, bool) {
+	for _, finding := range findings {
+		if finding.RuleID == id {
+			return finding, true
+		}
+	}
+	return model.Finding{}, false
 }
 
 func TestAnalyzeDeduplicatesSameRuleSourceAndValue(t *testing.T) {
@@ -51,7 +63,7 @@ func TestAnalyzeDeduplicatesSameRuleSourceAndValue(t *testing.T) {
 		Pattern:  `["'](/same)["']`,
 		Group:    1,
 		Enabled:  true,
-	}}, builtinIDs())
+	}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,8 +72,14 @@ func TestAnalyzeDeduplicatesSameRuleSourceAndValue(t *testing.T) {
 		URL: "https://example.test/app.js",
 	}, []byte(`const a="/same"; const b="/same";`))
 
-	if len(findings) != 1 || len(candidates) != 1 {
-		t.Fatalf("dedupe findings=%d candidates=%d", len(findings), len(candidates))
+	seen := 0
+	for _, finding := range findings {
+		if finding.RuleID == "test.path" {
+			seen++
+		}
+	}
+	if seen != 1 || len(candidates) != 1 {
+		t.Fatalf("dedupe findings=%d candidates=%d", seen, len(candidates))
 	}
 }
 
@@ -201,4 +219,48 @@ func builtinIDs() []string {
 		ids = append(ids, rule.ID)
 	}
 	return ids
+}
+
+func TestAPIRulesAreAlwaysCompiled(t *testing.T) {
+	engine, err := New(nil, builtinIDs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Even with every historical builtin ID disabled, the code-owned API
+	// rules must still fire.
+	findings, _ := engine.Analyze(ResourceRef{URL: "a.js"}, []byte(`fetch('/api/users')`))
+	if !hasRule(findings, "url.api-call") {
+		t.Fatalf("api rules disabled through rule file: %v", findings)
+	}
+}
+
+func TestExtractsMethodFromRuleCapture(t *testing.T) {
+	engine, err := New(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		body   string
+		method string
+	}{
+		{`axios.post('/api/login', {})`, "POST"},
+		{`$fetch('/api/session')`, "GET"},
+		{`xhr.open("delete", '/api/items/1')`, "DELETE"},
+		{`var u = "/just/a/path";`, ""},
+	}
+	for _, test := range cases {
+		_, candidates := engine.Analyze(ResourceRef{URL: "a.js"}, []byte(test.body))
+		if len(candidates) == 0 {
+			t.Fatalf("%s: no candidates", test.body)
+		}
+		found := ""
+		for _, candidate := range candidates {
+			if candidate.RuleID == "url.api-call" || candidate.RuleID == "url.xhr-open" {
+				found = candidate.Method
+			}
+		}
+		if found != test.method {
+			t.Fatalf("%s method = %q, want %q", test.body, found, test.method)
+		}
+	}
 }
