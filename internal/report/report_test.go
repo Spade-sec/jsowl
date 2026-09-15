@@ -218,17 +218,26 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 		SourceURL: "https://example.test/app.js", Authorized: true,
 	})
 	result.Endpoints = append(result.Endpoints, model.Endpoint{
+		Raw: "https://api.partner.test/v2/orders", URL: "https://api.partner.test/v2/orders",
+		SourceURL: "https://example.test/app.js", Authorized: false,
+		Method: "GET", Evidence: model.EvidenceFullURL,
+	})
+	result.Endpoints = append(result.Endpoints, model.Endpoint{
 		Raw: "/admin", URL: "https://example.test/admin",
 		SourceURL: "https://example.test/app.js", Authorized: false,
 		Type: "route", Source: "cdp-runtime", Evidence: model.EvidenceRuntime,
 		Probe: "server",
 	})
 	result.Findings[0].SourceURL = "https://example.test/app.js"
-	result.Endpoints[len(result.Endpoints)-1].Line = 42
-	result.Endpoints[len(result.Endpoints)-1].Column = 9
-	result.Endpoints[len(result.Endpoints)-1].ContextLines = []model.ContextLine{
-		{LineNumber: 41, Content: "const api = client;", MatchStart: -1, MatchEnd: -1},
-		{LineNumber: 42, Content: "client.post(\"/api/users\", body)", MatchStart: 0, MatchEnd: 31},
+	for index := range result.Endpoints {
+		if result.Endpoints[index].Raw == "/api/users?id=1" {
+			result.Endpoints[index].Line = 42
+			result.Endpoints[index].Column = 9
+			result.Endpoints[index].ContextLines = []model.ContextLine{
+				{LineNumber: 41, Content: "const api = client;", MatchStart: -1, MatchEnd: -1},
+				{LineNumber: 42, Content: "client.post(\"/api/users\", body)", MatchStart: 0, MatchEnd: 31},
+			}
+		}
 	}
 	if err := WriteSplitReports(directory, result); err != nil {
 		t.Fatal(err)
@@ -238,12 +247,18 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 	}
 	api, _ := os.ReadFile(filepath.Join(directory, "API报告.html"))
 	for _, want := range []string{
-		"POST", "runtime", "https://example.test/api/users?id=1",
+		"POST", "runtime", "/api/users?id=1", // raw path kept, not folded
+		"绝对路径", "相对路径", // grouped by path kind
+		"复制", "data-copy=\"/api/users?id=1\"", // one-click copy
 		"app.js:42:9", "上下文", "client.post(", "const api = client;",
+		"<mark>api/users</mark>", // path highlighted in context
 	} {
 		if !strings.Contains(string(api), want) {
 			t.Fatalf("API report missing %q", want)
 		}
+	}
+	if strings.Contains(string(api), `https://example.test/api/users?id=1`) {
+		t.Fatalf("API report should not display folded full URLs")
 	}
 	routes, err := os.ReadFile(filepath.Join(directory, "路由报告.html"))
 	if err != nil {

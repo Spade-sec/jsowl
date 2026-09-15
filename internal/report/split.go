@@ -111,6 +111,9 @@ code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(-
 .sev.runtime{background:rgba(126,231,135,.16);color:#7ee787}
 .sev.full-url{background:rgba(255,203,107,.15);color:var(--warn)}
 .muted{color:var(--muted);font-size:12px}
+.section-title{margin:18px 0 10px;font-size:15px;color:var(--accent)}
+.copy-btn{background:var(--bg);border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:1px 8px;font-size:11px;cursor:pointer;margin-left:8px;vertical-align:middle}
+.copy-btn:hover{color:var(--accent);border-color:var(--accent)}
 .filterbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px}
 .filterbar label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
 .filterbar select,.filterbar input[type="search"]{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:5px 10px;font-size:13px}
@@ -152,40 +155,99 @@ func renderSplitPage(result *model.Result, title string, links []linkItem, count
 
 func renderAPIReport(result *model.Result) (int, string, error) {
 	endpoints := append([]model.Endpoint(nil), result.Endpoints...)
-	sort.SliceStable(endpoints, func(i, j int) bool { return endpoints[i].URL < endpoints[j].URL })
-	var b strings.Builder
-	b.WriteString(`<table><thead><tr><th style="width:70px">方法</th><th style="width:90px">证据</th><th>URL</th><th>来源</th><th style="width:70px">授权</th><th style="width:70px">状态</th></tr></thead><tbody>`)
+	sort.SliceStable(endpoints, func(i, j int) bool {
+		return apiPath(endpoints[i]) < apiPath(endpoints[j])
+	})
+
+	relative, absolute := 0, 0
+	relativeRows, absoluteRows := &strings.Builder{}, &strings.Builder{}
 	for _, endpoint := range endpoints {
-		method := endpoint.Method
-		if method == "" {
-			method = "—" // unknown: not recovered from AST or regex
+		if isRelativeRaw(apiPath(endpoint)) {
+			renderAPIRow(relativeRows, endpoint)
+			relative++
+		} else {
+			renderAPIRow(absoluteRows, endpoint)
+			absolute++
 		}
-		source := endpoint.SourceURL
-		if source == "" {
-			source = result.Target
-		}
-		location := source
-		if endpoint.Line > 0 {
-			location = fmt.Sprintf("%s:%d:%d", source, endpoint.Line, endpoint.Column)
-		}
-		context := renderContextBlock(endpoint.ContextLines)
-		bodyNote := ""
-		if len(endpoint.BodyParams) > 0 {
-			bodyNote = `<div class="muted">body: ` + htmlEscape(strings.Join(endpoint.BodyParams, ", ")) + `</div>`
-		}
-		rawNote := rawPathNote(endpoint)
-		fmt.Fprintf(&b,
-			"<tr><td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code>%s</td><td><code>%s</code>%s%s</td><td>%t</td><td>%d</td></tr>",
-			htmlEscape(method), evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
-			htmlEscape(endpoint.URL), rawNote, htmlEscape(location), bodyNote, context, endpoint.Authorized, endpoint.StatusCode)
 	}
-	b.WriteString("</tbody></table>")
+
+	var b strings.Builder
+	b.WriteString(`<div class="filterbar"><span class="muted">点击路径旁的“复制”按钮复制纯路径；每条路径可展开查看 JS 上下文（路径已高亮）。</span></div>`)
+	writeAPISection := func(title string, rows *strings.Builder, count int) {
+		if count == 0 {
+			return
+		}
+		fmt.Fprintf(&b, `<h2 class="section-title">%s（%d）</h2><table><thead><tr><th>路径</th><th style="width:70px">方法</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:60px">状态</th></tr></thead><tbody>%s</tbody></table>`,
+			htmlEscape(title), count, rows.String())
+	}
+	writeAPISection("相对路径", relativeRows, relative)
+	writeAPISection("绝对路径", absoluteRows, absolute)
+	b.WriteString(`<script>
+	document.addEventListener('click', function(event){
+	  var button = event.target.closest('[data-copy]');
+	  if (!button) return;
+	  var text = button.getAttribute('data-copy');
+	  var done = function(){ button.textContent = '已复制'; setTimeout(function(){ button.textContent = '复制'; }, 1200); };
+	  if (navigator.clipboard && window.isSecureContext) {
+	    navigator.clipboard.writeText(text).then(done, function(){ fallbackCopy(text, done); });
+	  } else {
+	    fallbackCopy(text, done);
+	  }
+	});
+	function fallbackCopy(text, done){
+	  var area = document.createElement('textarea');
+	  area.value = text;
+	  area.style.position = 'fixed'; area.style.opacity = '0';
+	  document.body.appendChild(area);
+	  area.select();
+	  try { document.execCommand('copy'); done(); } catch (e) {}
+	  document.body.removeChild(area);
+	}
+	</script>`)
 	return len(endpoints), b.String(), nil
 }
 
+// apiPath returns the path as written in the source, without folding it
+// into a full URL.
+func apiPath(endpoint model.Endpoint) string {
+	if endpoint.Raw != "" {
+		return endpoint.Raw
+	}
+	return endpoint.URL
+}
+
+func renderAPIRow(b *strings.Builder, endpoint model.Endpoint) {
+	path := apiPath(endpoint)
+	method := endpoint.Method
+	if method == "" {
+		method = "—"
+	}
+	source := endpoint.SourceURL
+	if source == "" {
+		source = "—"
+	}
+	location := source
+	if endpoint.Line > 0 {
+		location = fmt.Sprintf("%s:%d:%d", source, endpoint.Line, endpoint.Column)
+	}
+	bodyNote := ""
+	if len(endpoint.BodyParams) > 0 {
+		bodyNote = `<div class="muted">body: ` + htmlEscape(strings.Join(endpoint.BodyParams, ", ")) + `</div>`
+	}
+	context := renderContextBlock(endpoint.ContextLines, endpoint.Raw, endpoint.URL)
+	fmt.Fprintf(b,
+		"<tr><td><code>%s</code><button class=\"copy-btn\" data-copy=\"%s\">复制</button>%s%s</td>"+
+			"<td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td>"+
+			"<td><code>%s</code></td><td>%d</td></tr>",
+		htmlEscape(path), htmlEscape(path), bodyNote, context,
+		htmlEscape(method), evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
+		htmlEscape(location), endpoint.StatusCode)
+}
+
 // renderContextBlock formats endpoint context lines as an expandable pre
-// block suitable for copying straight into an LLM prompt.
-func renderContextBlock(lines []model.ContextLine) string {
+// block; the extracted path fragments are highlighted inside the matched
+// line so the context can be pasted straight into an LLM prompt.
+func renderContextBlock(lines []model.ContextLine, raw, resolved string) string {
 	if len(lines) == 0 {
 		return ""
 	}
@@ -193,13 +255,53 @@ func renderContextBlock(lines []model.ContextLine) string {
 	b.WriteString(`<details class="ctx"><summary>上下文</summary><pre>`)
 	for _, line := range lines {
 		marker := " "
+		content := htmlEscape(line.Content)
 		if line.MatchStart >= 0 && line.MatchEnd > line.MatchStart {
 			marker = ">"
+			content = highlightFragments(line.Content, pathFragments(raw, resolved))
 		}
-		fmt.Fprintf(&b, "%s %4d | %s\n", marker, line.LineNumber, htmlEscape(line.Content))
+		fmt.Fprintf(&b, "%s %4d | %s\n", marker, line.LineNumber, content)
 	}
 	b.WriteString("</pre></details>")
 	return b.String()
+}
+
+// pathFragments splits an endpoint reference into literal segments around
+// {} placeholders and query strings so template URLs can still be
+// highlighted piecewise.
+func pathFragments(raw, resolved string) []string {
+	source := raw
+	if source == "" {
+		source = resolved
+	}
+	if source == "" {
+		return nil
+	}
+	fragments := strings.FieldsFunc(source, func(char rune) bool {
+		return char == '{' || char == '}' || char == '?'
+	})
+	kept := make([]string, 0, len(fragments))
+	for _, fragment := range fragments {
+		fragment = strings.Trim(fragment, "/")
+		if fragment != "" {
+			kept = append(kept, fragment)
+		}
+	}
+	return kept
+}
+
+// highlightFragments wraps every occurrence of the fragments with <mark>,
+// escaping both the content and the fragments.
+func highlightFragments(content string, fragments []string) string {
+	escaped := htmlEscape(content)
+	for _, fragment := range fragments {
+		needle := htmlEscape(fragment)
+		if needle == "" || !strings.Contains(escaped, needle) {
+			continue
+		}
+		escaped = strings.Replace(escaped, needle, `<mark>`+needle+`</mark>`, 1)
+	}
+	return escaped
 }
 
 func renderSensitiveReport(result *model.Result) (int, string, error) {
