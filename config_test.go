@@ -24,8 +24,8 @@ func TestDefaultConfigProvidesBoundedScanDefaults(t *testing.T) {
 	if cfg.Concurrency.ResourcesPerTarget != 16 {
 		t.Fatalf("ResourcesPerTarget = %d, want 16", cfg.Concurrency.ResourcesPerTarget)
 	}
-	if cfg.Output.DownloadJS {
-		t.Fatal("Output.DownloadJS = true, want false")
+	if !cfg.Output.DownloadJS {
+		t.Fatal("Output.DownloadJS = false, want true")
 	}
 	for _, suffix := range []string{
 		".png", ".woff2", ".mp4", ".zip", ".css", ".svg",

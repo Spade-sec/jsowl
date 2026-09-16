@@ -18,7 +18,9 @@ JsOwl 是一个使用 Go 编写的高性能 Web 安全信息收集工具和可�
 
 ## 构建
 
-需要 Go 1.25 或兼容版本。
+需要 Go 1.25 或兼容版本，以及可用的 C 编译器。JavaScript AST 使用
+Tree-sitter，因此构建时必须启用 CGO；交叉编译还需要目标平台对应的 C
+交叉编译器。
 
 ```bash
 go build -o jsowl ./cmd/jsowl
@@ -101,7 +103,7 @@ output:
   directory: ./jsowl-report
   json: true
   html: true
-  download_js: false
+  download_js: true
   js_directory: js
 ```
 
@@ -155,7 +157,7 @@ jsowl-report/
 
 同一主机的非根路径或带 query 的多个扫描目标会在主机名后添加稳定 URL 哈希，避免报告相互覆盖。
 
-`output.download_js` 默认为 `false`。开启后只保存普通 JS 和 chunk，文件名会清理 Windows 非法字符并使用稳定哈希避免 query/重名覆盖。超过正文上限的脚本不会保存，并在结果中记录 Issue。
+`output.download_js` 默认为 `true`。开启后只保存普通 JS 和 chunk，文件名会清理 Windows 非法字符并使用稳定哈希避免 query/重名覆盖。超过正文上限的脚本不会保存，并在结果中记录 Issue。开启后流水线会先把所有脚本和 chunk 下载完成，再统一对下载内容做正则匹配和 AST 解析（发现后续脚本/chunk 的递归抓取逻辑不变）。
 
 JSON 完整序列化 `Result`；HTML 是无需外部资源的交互报告。两者都会保留完整敏感值，不做脱敏。
 

@@ -82,7 +82,8 @@ output:
   json: true
   html: true
   # 只保存普通 JavaScript 和 chunk；API 正文不会保存。
-  download_js: false
+  # 默认开启：开启后会先把所有 JS 下载完成，再统一做正则匹配和 AST 解析。
+  download_js: true
   js_directory: js
 
 # 相对路径以本配置文件所在目录为基准。

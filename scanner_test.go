@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -421,6 +422,95 @@ func TestScannerOptionallyStoresOnlyJavaScript(t *testing.T) {
 		filepath.FromSlash(scriptPath),
 	)); err != nil {
 		t.Fatalf("stored script: %v", err)
+	}
+}
+
+// TestScannerDownloadsAllJSBeforeAnalysis verifies the fetch-first pipeline:
+// with download_js enabled every script is fetched before the regex and AST
+// analysis of any downloaded script runs (the probe of an endpoint extracted
+// from script 1 must happen after script 2 has been fetched).
+func TestScannerDownloadsAllJSBeforeAnalysis(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		mu.Lock()
+		order = append(order, request.URL.Path)
+		mu.Unlock()
+		switch request.URL.Path {
+		case "/":
+			writer.Header().Set("Content-Type", "text/html")
+			_, _ = writer.Write([]byte(
+				`<script src="/one.js"></script>` +
+					`<script src="/two.js"></script>`,
+			))
+		case "/one.js":
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write([]byte(
+				`fetch("/api/from-one");const access_key = "AKIAJSOWLTEST123";`,
+			))
+		case "/two.js":
+			writer.Header().Set("Content-Type", "application/javascript")
+			_, _ = writer.Write([]byte(`window.two = true;`))
+		case "/api/from-one":
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = writer.Write([]byte(`{"ok":true}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	config := DefaultConfig()
+	config.Mode = ModeDirect
+	config.Output.Directory = t.TempDir()
+	config.Output.DownloadJS = true
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := scanner.Scan(context.Background(), Target{URL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var findingValues []string
+	for _, finding := range result.Findings {
+		findingValues = append(findingValues, finding.Value)
+	}
+	if !slices.Contains(findingValues, "AKIAJSOWLTEST123") {
+		t.Fatalf("deferred regex analysis missed finding, values: %v", findingValues)
+	}
+
+	var endpoint *Endpoint
+	for index := range result.Endpoints {
+		if result.Endpoints[index].Raw == "/api/from-one" {
+			endpoint = &result.Endpoints[index]
+		}
+	}
+	if endpoint == nil {
+		t.Fatal("deferred AST analysis missed /api/from-one endpoint")
+	}
+	if endpoint.StatusCode != 200 {
+		t.Fatalf("deferred endpoint probe status = %d, want 200", endpoint.StatusCode)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	lastScript, firstProbe := -1, -1
+	for index, path := range order {
+		if path == "/two.js" {
+			lastScript = index
+		}
+		if path == "/api/from-one" && firstProbe == -1 {
+			firstProbe = index
+		}
+	}
+	if lastScript == -1 || firstProbe == -1 || firstProbe < lastScript {
+		t.Fatalf("analysis ran before all scripts were downloaded, order: %v", order)
 	}
 }
 

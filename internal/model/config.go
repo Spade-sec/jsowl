@@ -57,6 +57,7 @@ func DefaultConfig() Config {
 			Directory:   "./jsowl-report",
 			JSON:        true,
 			HTML:        true,
+			DownloadJS:  true,
 			JSDirectory: "js",
 		},
 	}

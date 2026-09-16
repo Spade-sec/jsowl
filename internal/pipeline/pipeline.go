@@ -56,6 +56,29 @@ type outcome struct {
 	spa        discover.SPAEvidence
 }
 
+// runState carries the mutable state shared by the collection drains and the
+// deferred JavaScript analysis phase.
+type runState struct {
+	result         *model.Result
+	queue          *scheduler.Queue
+	endpointIndex  map[string]int
+	findingSeen    map[string]struct{}
+	spa            *discover.SPAEvidence
+	pending        []deferredJS
+	deferJS        bool
+	targetScope    *scope.Scope
+	root           *url.URL
+	resolutionBase *url.URL
+}
+
+// deferredJS is one downloaded script or chunk waiting for the regex and AST
+// analysis pass that runs after collection completes.
+type deferredJS struct {
+	source *url.URL
+	body   []byte
+	depth  int
+}
+
 // New constructs a direct resource pipeline.
 func New(options Options) *Pipeline {
 	return &Pipeline{options: options}
@@ -193,163 +216,33 @@ func (p *Pipeline) RunDetailed(
 		}
 	}
 
-	findingSeen := make(map[string]struct{})
 	var spa discover.SPAEvidence
-	for queue.Len() > 0 {
-		if err := ctx.Err(); err != nil {
-			return result, spa, err
+	state := &runState{
+		result:         result,
+		queue:          queue,
+		endpointIndex:  endpointIndex,
+		findingSeen:    make(map[string]struct{}),
+		spa:            &spa,
+		deferJS:        p.options.Config.Output.DownloadJS,
+		targetScope:    targetScope,
+		root:           root,
+		resolutionBase: resolutionBase,
+	}
+	if err := p.drain(ctx, state, headers, entry); err != nil {
+		return result, spa, err
+	}
+	// Fetch-first mode: every script and chunk has been downloaded (and saved)
+	// before the regex engine and AST extractor run over the downloaded
+	// bodies. Endpoint candidates discovered here may enqueue fresh API
+	// probes, so the queue is drained again until nothing new is pending.
+	for len(state.pending) > 0 {
+		batch := state.pending
+		state.pending = nil
+		for _, item := range batch {
+			p.analyzeDeferred(state, item)
 		}
-		batch := queue.Take(p.options.Config.Concurrency.ResourcesPerTarget)
-		outcomes := p.collectBatch(
-			ctx, batch, headers, entry, root, resolutionBase,
-		)
-		for _, collected := range outcomes {
-			if collected.err != nil {
-				if contextErr := ctx.Err(); contextErr != nil {
-					return result, spa, contextErr
-				}
-				if collected.item.Depth == 0 {
-					return result, spa, collected.err
-				}
-				result.Issues = append(result.Issues, model.Issue{
-					Code:      "resource_get_failed",
-					Stage:     "collect",
-					URL:       collected.item.URL,
-					Message:   collected.err.Error(),
-					Retryable: true,
-				})
-				continue
-			}
-			mergeSPAEvidence(&spa, collected.spa)
-
-			resource := model.Resource{
-				URL:         collected.response.URL,
-				Type:        collected.item.Kind,
-				SourceURL:   collected.item.SourceURL,
-				StatusCode:  collected.response.StatusCode,
-				ContentType: collected.response.Header.Get("Content-Type"),
-				Size:        int64(len(collected.response.Body)),
-				Depth:       collected.item.Depth,
-			}
-			if collected.response.Truncated {
-				result.Issues = append(result.Issues, model.Issue{
-					Code: "body_truncated", Stage: "collect", URL: resource.URL,
-					Message: "response exceeded max_body_size",
-				})
-			}
-			if p.options.Config.Output.DownloadJS &&
-				(resource.Type == model.ResourceTypeScript ||
-					resource.Type == model.ResourceTypeChunk) {
-				if collected.response.Truncated {
-					result.Issues = append(result.Issues, model.Issue{
-						Code: "js_not_saved", Stage: "storage", URL: resource.URL,
-						Message: "truncated JavaScript body was not persisted",
-					})
-				} else {
-					localPath, saveErr := storage.SaveJSIn(
-						p.options.Config.Output.Directory,
-						root,
-						p.options.Config.Output.JSDirectory,
-						resource,
-						collected.response.Body,
-					)
-					if saveErr != nil {
-						result.Issues = append(result.Issues, model.Issue{
-							Code: "js_save_failed", Stage: "storage", URL: resource.URL,
-							Message: saveErr.Error(),
-						})
-					} else {
-						resource.LocalPath = localPath
-					}
-				}
-			}
-			result.Resources = append(result.Resources, resource)
-			if collected.item.Kind == model.ResourceTypeAPI {
-				if index, exists := endpointIndex[collected.item.URL]; exists {
-					result.Endpoints[index].StatusCode = collected.response.StatusCode
-				}
-			}
-
-			for _, finding := range collected.findings {
-				key := finding.RuleID + "\x00" + finding.SourceURL + "\x00" + finding.Value
-				if _, duplicate := findingSeen[key]; duplicate {
-					continue
-				}
-				findingSeen[key] = struct{}{}
-				result.Findings = append(result.Findings, finding)
-			}
-
-			base, parseErr := url.Parse(collected.response.URL)
-			if parseErr != nil {
-				continue
-			}
-			for _, candidate := range collected.candidates {
-				candidateBase := base
-				if resolutionBase != root && isRelativeReference(candidate.Raw) {
-					candidateBase = resolutionBase
-				}
-				resolved, resolveErr := targetScope.Resolve(
-					candidate.Raw, candidateBase,
-				)
-				if resolveErr != nil {
-					continue
-				}
-				if targetScope.IsSuffixBlocked(resolved) {
-					continue
-				}
-				canonical := scope.Canonical(resolved)
-				nextDepth := collected.item.Depth + 1
-				switch candidate.Kind {
-				case discover.KindScript:
-					if targetScope.CanFetchScript(resolved) {
-						queue.Add(scheduler.Item{
-							URL: canonical, Kind: model.ResourceTypeScript,
-							SourceURL: collected.response.URL, Depth: nextDepth,
-						})
-					}
-				case discover.KindChunk:
-					if targetScope.CanFetchScript(resolved) {
-						queue.Add(scheduler.Item{
-							URL: canonical, Kind: model.ResourceTypeChunk,
-							SourceURL: collected.response.URL, Depth: nextDepth,
-						})
-					}
-				case discover.KindEndpoint:
-					authorized := targetScope.CanProbe(resolved)
-					if _, exists := endpointIndex[canonical]; !exists {
-						endpointIndex[canonical] = len(result.Endpoints)
-						result.Endpoints = append(result.Endpoints, model.Endpoint{
-							Raw: candidate.Raw, URL: canonical,
-							SourceURL: collected.response.URL, Authorized: authorized,
-							Method:   candidate.Method,
-							Evidence: candidateEvidence(candidate, resolved),
-							Line:     candidate.Line,
-							Column:   candidate.Column,
-							ContextLines: candidate.ContextLines,
-							BodyParams:   candidate.BodyParams,
-							Source:       candidate.Source,
-							Type:         "api",
-						})
-					}
-					if authorized {
-						queue.Add(scheduler.Item{
-							URL: canonical, Kind: model.ResourceTypeAPI,
-							SourceURL: collected.response.URL, Depth: nextDepth,
-						})
-					}
-				case discover.KindRoute:
-					if _, exists := endpointIndex[canonical]; !exists {
-						endpointIndex[canonical] = len(result.Endpoints)
-						result.Endpoints = append(result.Endpoints, model.Endpoint{
-							Raw: candidate.Raw, URL: canonical,
-							SourceURL:  collected.response.URL,
-							Authorized: targetScope.CanProbe(resolved),
-							Type:       routeType(candidate),
-							Source:     candidate.Source,
-						})
-					}
-				}
-			}
+		if err := p.drain(ctx, state, headers, entry); err != nil {
+			return result, spa, err
 		}
 	}
 
@@ -370,6 +263,279 @@ func (p *Pipeline) RunDetailed(
 	return result, spa, nil
 }
 
+// drain collects and processes queued resources until the queue is empty.
+// In fetch-first mode (DownloadJS enabled) scripts and chunks are saved and
+// queued for the deferred analysis phase instead of being analyzed inline.
+func (p *Pipeline) drain(
+	ctx context.Context,
+	state *runState,
+	headers http.Header,
+	entry *collect.Response,
+) error {
+	for state.queue.Len() > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		batch := state.queue.Take(p.options.Config.Concurrency.ResourcesPerTarget)
+		outcomes := p.collectBatch(
+			ctx, batch, headers, entry, state.root, state.resolutionBase,
+			state.deferJS,
+		)
+		for _, collected := range outcomes {
+			if err := p.processOutcome(state, collected); err != nil {
+				if contextErr := ctx.Err(); contextErr != nil {
+					return contextErr
+				}
+				if collected.item.Depth == 0 {
+					return err
+				}
+				state.result.Issues = append(state.result.Issues, model.Issue{
+					Code:      "resource_get_failed",
+					Stage:     "collect",
+					URL:       collected.item.URL,
+					Message:   err.Error(),
+					Retryable: true,
+				})
+			}
+		}
+	}
+	return nil
+}
+
+// processOutcome records one collected response and expands its candidates;
+// a non-nil error marks a collection failure (already logged when nil-safe).
+func (p *Pipeline) processOutcome(state *runState, collected outcome) error {
+	result := state.result
+	if collected.err != nil {
+		return collected.err
+	}
+	mergeSPAEvidence(state.spa, collected.spa)
+
+	resource := model.Resource{
+		URL:         collected.response.URL,
+		Type:        collected.item.Kind,
+		SourceURL:   collected.item.SourceURL,
+		StatusCode:  collected.response.StatusCode,
+		ContentType: collected.response.Header.Get("Content-Type"),
+		Size:        int64(len(collected.response.Body)),
+		Depth:       collected.item.Depth,
+	}
+	if collected.response.Truncated {
+		result.Issues = append(result.Issues, model.Issue{
+			Code: "body_truncated", Stage: "collect", URL: resource.URL,
+			Message: "response exceeded max_body_size",
+		})
+	}
+	if state.deferJS &&
+		(resource.Type == model.ResourceTypeScript ||
+			resource.Type == model.ResourceTypeChunk) {
+		if source, parseErr := url.Parse(collected.response.URL); parseErr == nil {
+			state.pending = append(state.pending, deferredJS{
+				source: source,
+				body:   collected.response.Body,
+				depth:  collected.item.Depth,
+			})
+		}
+	}
+	if p.options.Config.Output.DownloadJS &&
+		(resource.Type == model.ResourceTypeScript ||
+			resource.Type == model.ResourceTypeChunk) {
+		if collected.response.Truncated {
+			result.Issues = append(result.Issues, model.Issue{
+				Code: "js_not_saved", Stage: "storage", URL: resource.URL,
+				Message: "truncated JavaScript body was not persisted",
+			})
+		} else {
+			localPath, saveErr := storage.SaveJSIn(
+				p.options.Config.Output.Directory,
+				state.root,
+				p.options.Config.Output.JSDirectory,
+				resource,
+				collected.response.Body,
+			)
+			if saveErr != nil {
+				result.Issues = append(result.Issues, model.Issue{
+					Code: "js_save_failed", Stage: "storage", URL: resource.URL,
+					Message: saveErr.Error(),
+				})
+			} else {
+				resource.LocalPath = localPath
+			}
+		}
+	}
+	result.Resources = append(result.Resources, resource)
+	if collected.item.Kind == model.ResourceTypeAPI {
+		if index, exists := state.endpointIndex[collected.item.URL]; exists {
+			result.Endpoints[index].StatusCode = collected.response.StatusCode
+		}
+	}
+
+	for _, finding := range collected.findings {
+		key := finding.RuleID + "\x00" + finding.SourceURL + "\x00" + finding.Value
+		if _, duplicate := state.findingSeen[key]; duplicate {
+			continue
+		}
+		state.findingSeen[key] = struct{}{}
+		result.Findings = append(result.Findings, finding)
+	}
+
+	p.processCandidates(
+		state, collected.response.URL, collected.candidates, collected.item.Depth,
+	)
+	return nil
+}
+
+// processCandidates resolves discovery candidates against their source,
+// deduplicates endpoints and enqueues follow-up resources and API probes.
+func (p *Pipeline) processCandidates(
+	state *runState,
+	sourceURL string,
+	candidates []discover.Candidate,
+	depth int,
+) {
+	result := state.result
+	base, parseErr := url.Parse(sourceURL)
+	if parseErr != nil {
+		return
+	}
+	for _, candidate := range candidates {
+		candidateBase := base
+		if state.resolutionBase != state.root && isRelativeReference(candidate.Raw) {
+			candidateBase = state.resolutionBase
+		}
+		resolved, resolveErr := state.targetScope.Resolve(
+			candidate.Raw, candidateBase,
+		)
+		if resolveErr != nil {
+			continue
+		}
+		if state.targetScope.IsSuffixBlocked(resolved) {
+			continue
+		}
+		canonical := scope.Canonical(resolved)
+		nextDepth := depth + 1
+		switch candidate.Kind {
+		case discover.KindScript:
+			if state.targetScope.CanFetchScript(resolved) {
+				state.queue.Add(scheduler.Item{
+					URL: canonical, Kind: model.ResourceTypeScript,
+					SourceURL: sourceURL, Depth: nextDepth,
+				})
+			}
+		case discover.KindChunk:
+			if state.targetScope.CanFetchScript(resolved) {
+				state.queue.Add(scheduler.Item{
+					URL: canonical, Kind: model.ResourceTypeChunk,
+					SourceURL: sourceURL, Depth: nextDepth,
+				})
+			}
+		case discover.KindEndpoint:
+			authorized := state.targetScope.CanProbe(resolved)
+			if index, exists := state.endpointIndex[canonical]; exists {
+				enrichEndpoint(
+					&result.Endpoints[index], candidate,
+					candidateEvidence(candidate, resolved),
+				)
+			} else {
+				state.endpointIndex[canonical] = len(result.Endpoints)
+				result.Endpoints = append(result.Endpoints, model.Endpoint{
+					Raw: candidate.Raw, URL: canonical,
+					SourceURL: sourceURL, Authorized: authorized,
+					Method:   candidate.Method,
+					Evidence: candidateEvidence(candidate, resolved),
+					Line:     candidate.Line,
+					Column:   candidate.Column,
+					ContextLines: candidate.ContextLines,
+					BodyParams:   candidate.BodyParams,
+					Source:       candidate.Source,
+					Type:         "api",
+				})
+			}
+			if authorized {
+				state.queue.Add(scheduler.Item{
+					URL: canonical, Kind: model.ResourceTypeAPI,
+					SourceURL: sourceURL, Depth: nextDepth,
+				})
+			}
+		case discover.KindRoute:
+			if _, exists := state.endpointIndex[canonical]; !exists {
+				state.endpointIndex[canonical] = len(result.Endpoints)
+				result.Endpoints = append(result.Endpoints, model.Endpoint{
+					Raw: candidate.Raw, URL: canonical,
+					SourceURL:  sourceURL,
+					Authorized: state.targetScope.CanProbe(resolved),
+					Type:       routeType(candidate),
+					Source:     candidate.Source,
+				})
+			}
+		}
+	}
+}
+
+// enrichEndpoint fills fields an earlier, coarser candidate left empty on an
+// existing endpoint. Fetch-first mode sees regex candidates before AST
+// candidates, so the richer AST data (body parameters, context lines, method)
+// has to be merged instead of winning the initial dedup.
+func enrichEndpoint(
+	endpoint *model.Endpoint,
+	candidate discover.Candidate,
+	evidence string,
+) {
+	if len(endpoint.BodyParams) == 0 && len(candidate.BodyParams) > 0 {
+		endpoint.BodyParams = candidate.BodyParams
+	}
+	if len(endpoint.ContextLines) == 0 && len(candidate.ContextLines) > 0 {
+		endpoint.ContextLines = candidate.ContextLines
+	}
+	if endpoint.Method == "" && candidate.Method != "" {
+		endpoint.Method = candidate.Method
+	}
+	if endpoint.Line == 0 && candidate.Line != 0 {
+		endpoint.Line = candidate.Line
+	}
+	if endpoint.Column == 0 && candidate.Column != 0 {
+		endpoint.Column = candidate.Column
+	}
+	if evidenceRank(evidence) > evidenceRank(endpoint.Evidence) {
+		endpoint.Evidence = evidence
+	}
+}
+
+func evidenceRank(evidence string) int {
+	switch evidence {
+	case model.EvidenceRuntime:
+		return 3
+	case model.EvidenceFullURL:
+		return 2
+	case model.EvidenceStatic:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// analyzeDeferred runs the regex engine and AST extractor over one downloaded
+// script or chunk, merging findings and endpoint candidates into the result.
+// Follow-up resources enqueued here (API probes) are drained by the caller.
+func (p *Pipeline) analyzeDeferred(state *runState, item deferredJS) {
+	jsResult := discover.FromJavaScript(item.source, item.body, p.options.Analyzer)
+	mergeSPAEvidence(state.spa, jsResult.SPA)
+	for _, finding := range jsResult.Findings {
+		key := finding.RuleID + "\x00" + finding.SourceURL + "\x00" + finding.Value
+		if _, duplicate := state.findingSeen[key]; duplicate {
+			continue
+		}
+		state.findingSeen[key] = struct{}{}
+		state.result.Findings = append(state.result.Findings, finding)
+	}
+	p.processCandidates(
+		state,
+		item.source.String(),
+		discover.APIFromAST(item.source, item.body),
+		item.depth,
+	)
+}
+
 func (p *Pipeline) collectBatch(
 	ctx context.Context,
 	batch []scheduler.Item,
@@ -377,6 +543,7 @@ func (p *Pipeline) collectBatch(
 	entry *collect.Response,
 	root *url.URL,
 	resolutionBase *url.URL,
+	deferJS bool,
 ) []outcome {
 	outcomes := make([]outcome, len(batch))
 	var wait sync.WaitGroup
@@ -385,7 +552,7 @@ func (p *Pipeline) collectBatch(
 		go func() {
 			defer wait.Done()
 			outcomes[index] = p.collectOne(
-				ctx, item, headers, entry, root, resolutionBase,
+				ctx, item, headers, entry, root, resolutionBase, deferJS,
 			)
 		}()
 	}
@@ -400,6 +567,7 @@ func (p *Pipeline) collectOne(
 	entry *collect.Response,
 	root *url.URL,
 	resolutionBase *url.URL,
+	deferJS bool,
 ) outcome {
 	target, err := url.Parse(item.URL)
 	if err != nil {
@@ -455,11 +623,20 @@ func (p *Pipeline) collectOne(
 		}
 	case item.Kind == model.ResourceTypeScript || item.Kind == model.ResourceTypeChunk ||
 		strings.Contains(contentType, "javascript"):
-		result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
+		if !deferJS {
+			result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
+		}
 		jsResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, jsResult.SPA)
-		result.findings = append(result.findings, jsResult.Findings...)
-		result.candidates = append(result.candidates, jsResult.Candidates...)
+		// Fetch-first mode reruns the regex engine and AST extractor over the
+		// downloaded bodies after collection, so this pass keeps only the
+		// candidates needed to discover follow-up scripts and chunks.
+		if deferJS {
+			result.candidates = append(result.candidates, jsResult.Candidates...)
+		} else {
+			result.findings = append(result.findings, jsResult.Findings...)
+			result.candidates = append(result.candidates, jsResult.Candidates...)
+		}
 		result.candidates = append(
 			result.candidates,
 			discover.FromWebpack(
