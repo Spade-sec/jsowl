@@ -165,7 +165,7 @@ func TestConfigValidateRejectsUnsafeBounds(t *testing.T) {
 		{"target concurrency", func(cfg *Config) { cfg.Concurrency.Targets = 0 }},
 		{"resource concurrency", func(cfg *Config) { cfg.Concurrency.ResourcesPerTarget = 0 }},
 		{"max depth", func(cfg *Config) { cfg.Limits.MaxDepth = -1 }},
-		{"max resources", func(cfg *Config) { cfg.Limits.MaxResources = 0 }},
+		{"max resources", func(cfg *Config) { cfg.Limits.MaxResources = -1 }},
 		{"max body size", func(cfg *Config) { cfg.Limits.MaxBodySize = 0 }},
 	}
 

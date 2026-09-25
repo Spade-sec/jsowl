@@ -78,6 +78,29 @@ func TestSaveJSRejectsNonScriptResources(t *testing.T) {
 	}
 }
 
+func TestLoadJSReadsSavedScriptAndRejectsEscapePaths(t *testing.T) {
+	root := t.TempDir()
+	relative, err := SaveJS(root, mustURL(t, "https://example.test"), model.Resource{
+		URL: "https://example.test/app.js", Type: model.ResourceTypeScript,
+	}, []byte("window.ok = true"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadJS(root, relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(loaded) != "window.ok = true" {
+		t.Fatalf("LoadJS() = %q", loaded)
+	}
+
+	for _, escape := range []string{"../outside.js", "..\\outside.js", "C:\\abs.js", "/abs.js"} {
+		if _, err := LoadJS(root, escape); err == nil {
+			t.Fatalf("LoadJS(%q) error = nil", escape)
+		}
+	}
+}
+
 func mustURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	parsed, err := url.Parse(raw)

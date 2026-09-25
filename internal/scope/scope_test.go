@@ -143,6 +143,73 @@ func TestSuffixBlacklistIgnoresCaseAndQuery(t *testing.T) {
 	}
 }
 
+func TestRestrictDomainsLimitsFetchingAndProbing(t *testing.T) {
+	root := parseURL(t, "https://app.example.com/start")
+	s, err := New(root, model.ScopeConfig{
+		FetchExternalScripts:   true,
+		ProbeExternalEndpoints: true,
+		AllowDomains:           []string{"allowed-outside.test"},
+		RestrictDomains:        []string{"api.partner.test", ".static.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		raw       string
+		wantFetch bool
+		wantProbe bool
+	}{
+		{"https://app.example.com/api/users", true, true},
+		{"https://api.partner.test/v1", true, true},
+		{"https://sub.static.test/app.js", true, true},
+		{"https://static.test/app.js", false, false},
+		{"https://outside.test/v1", false, false},
+		{"https://allowed-outside.test/v1", false, false},
+	}
+	for _, test := range tests {
+		t.Run(test.raw, func(t *testing.T) {
+			resolved := parseURL(t, test.raw)
+			if got := s.CanFetchScript(resolved); got != test.wantFetch {
+				t.Errorf("CanFetchScript(%q) = %t, want %t", test.raw, got, test.wantFetch)
+			}
+			if got := s.CanProbe(resolved); got != test.wantProbe {
+				t.Errorf("CanProbe(%q) = %t, want %t", test.raw, got, test.wantProbe)
+			}
+		})
+	}
+}
+
+func TestRestrictDomainsEmptyKeepsExistingBehavior(t *testing.T) {
+	root := parseURL(t, "https://app.example.com/start")
+	s, err := New(root, model.ScopeConfig{
+		FetchExternalScripts:   true,
+		ProbeExternalEndpoints: false,
+		AllowDomains:           []string{"allowed-outside.test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.CanFetchScript(parseURL(t, "https://outside.test/app.js")) {
+		t.Error("CanFetchScript(external) = false without restriction")
+	}
+	if !s.CanProbe(parseURL(t, "https://allowed-outside.test/v1")) {
+		t.Error("CanProbe(allowlisted) = false without restriction")
+	}
+	if s.CanProbe(parseURL(t, "https://outside.test/v1")) {
+		t.Error("CanProbe(external) = true without opt-in")
+	}
+}
+
+func TestNewRejectsMalformedRestrictDomains(t *testing.T) {
+	root := parseURL(t, "https://example.com")
+	for _, entry := range []string{"bad path/x", "user:pass@test", "", "."} {
+		if _, err := New(root, model.ScopeConfig{RestrictDomains: []string{entry}}); err == nil {
+			t.Errorf("New() accepted restricted domain %q", entry)
+		}
+	}
+}
+
 func parseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	parsed, err := url.Parse(raw)

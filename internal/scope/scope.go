@@ -18,6 +18,11 @@ type Scope struct {
 	allowExact  map[string]struct{}
 	allowSuffix []string
 	blocked     []string
+	// restrictExact/restrictSuffix are set only when config.RestrictDomains
+	// is non-empty; then the root origin plus these domains form the whole
+	// crawl boundary for both script fetching and endpoint probing.
+	restrictExact  map[string]struct{}
+	restrictSuffix []string
 }
 
 // New builds an authorization scope rooted at one HTTP or HTTPS target.
@@ -53,6 +58,27 @@ func New(root *url.URL, config model.ScopeConfig) (*Scope, error) {
 		}
 		s.blocked = append(s.blocked, suffix)
 	}
+	if len(config.RestrictDomains) > 0 {
+		s.restrictExact = make(map[string]struct{}, len(config.RestrictDomains))
+		for _, entry := range config.RestrictDomains {
+			host := strings.ToLower(strings.TrimSpace(entry))
+			if host == "" || strings.ContainsAny(host, "/:@") {
+				return nil, fmt.Errorf("invalid restricted domain %q", entry)
+			}
+			host = strings.TrimSuffix(host, ".")
+			if host == "" {
+				return nil, fmt.Errorf("invalid restricted domain %q", entry)
+			}
+			if strings.HasPrefix(host, ".") {
+				if len(host) == 1 {
+					return nil, fmt.Errorf("invalid restricted domain %q", entry)
+				}
+				s.restrictSuffix = append(s.restrictSuffix, host)
+				continue
+			}
+			s.restrictExact[host] = struct{}{}
+		}
+	}
 	return s, nil
 }
 
@@ -84,7 +110,13 @@ func (s *Scope) CanFetchScript(candidate *url.URL) bool {
 	if validateHTTPURL(candidate) != nil {
 		return false
 	}
-	return sameOrigin(s.root, candidate) || s.config.FetchExternalScripts
+	if sameOrigin(s.root, candidate) {
+		return true
+	}
+	if s.restricted() {
+		return s.matchesRestriction(candidate)
+	}
+	return s.config.FetchExternalScripts
 }
 
 // CanProbe reports whether an endpoint URL is same-origin or explicitly authorized.
@@ -92,7 +124,13 @@ func (s *Scope) CanProbe(candidate *url.URL) bool {
 	if validateHTTPURL(candidate) != nil {
 		return false
 	}
-	if sameOrigin(s.root, candidate) || s.config.ProbeExternalEndpoints {
+	if sameOrigin(s.root, candidate) {
+		return true
+	}
+	if s.restricted() {
+		return s.matchesRestriction(candidate)
+	}
+	if s.config.ProbeExternalEndpoints {
 		return true
 	}
 	host := normalizedHostname(candidate)
@@ -100,6 +138,27 @@ func (s *Scope) CanProbe(candidate *url.URL) bool {
 		return true
 	}
 	for _, suffix := range s.allowSuffix {
+		if strings.HasSuffix(host, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// restricted reports whether an explicit domain restriction is active.
+func (s *Scope) restricted() bool {
+	return len(s.restrictExact)+len(s.restrictSuffix) > 0
+}
+
+// matchesRestriction reports whether a cross-origin URL falls inside the
+// configured restrict_domains list. The root origin is always allowed and
+// was checked by the caller.
+func (s *Scope) matchesRestriction(candidate *url.URL) bool {
+	host := normalizedHostname(candidate)
+	if _, ok := s.restrictExact[host]; ok {
+		return true
+	}
+	for _, suffix := range s.restrictSuffix {
 		if strings.HasSuffix(host, suffix) {
 			return true
 		}

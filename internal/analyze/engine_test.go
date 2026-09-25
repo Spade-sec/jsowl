@@ -83,7 +83,7 @@ func TestAnalyzeDeduplicatesSameRuleSourceAndValue(t *testing.T) {
 	}
 }
 
-func TestAnalyzeContextContainsExactlyThreeSurroundingLines(t *testing.T) {
+func TestAnalyzeContextContainsExactlyTwoSurroundingLines(t *testing.T) {
 	engine, err := New([]model.Rule{{
 		ID:       "test.context",
 		Name:     "Context",
@@ -117,13 +117,11 @@ func TestAnalyzeContextContainsExactlyThreeSurroundingLines(t *testing.T) {
 		num   int
 		match bool
 	}{
-		{2, false},
 		{3, false},
 		{4, false},
 		{5, true},
 		{6, false},
 		{7, false},
-		{8, false},
 	}
 	if len(context) != len(wantLines) {
 		t.Fatalf("len(ContextLines) = %d, want %d", len(context), len(wantLines))
@@ -140,7 +138,7 @@ func TestAnalyzeContextContainsExactlyThreeSurroundingLines(t *testing.T) {
 			t.Errorf("ContextLines[%d].Content does not contain TOKEN: %q", i, context[i].Content)
 		}
 	}
-	for _, excluded := range []string{"line one", "line nine"} {
+	for _, excluded := range []string{"line one", "line two", "line eight", "line nine"} {
 		for _, line := range context {
 			if strings.Contains(line.Content, excluded) {
 				t.Errorf("Context unexpectedly contains %q in line %d", excluded, line.LineNumber)

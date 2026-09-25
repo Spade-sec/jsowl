@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod/lib/launcher"
+	"github.com/youmulijiang/jsowl/internal/collect"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
@@ -180,4 +181,122 @@ func containsCookie(cookies []*http.Cookie, name, value string) bool {
 		}
 	}
 	return false
+}
+
+// A polling SPA keeps the network busy forever, so WaitRequestIdle alone
+// would block until Timeout; IdleMax must abandon the wait and still let
+// the injected collector deliver its snapshot.
+func TestCollectorAbandonsIdleWaitOnPollingApp(t *testing.T) {
+	bin, found := launcher.LookPath()
+	if !found {
+		t.Skip("local Chromium-compatible browser is not installed")
+	}
+
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><html><body><div id="app"></div><script>
+const el = document.getElementById("app");
+const router = { getRoutes: () => [{ path: "/polled/dashboard", name: "dash" }] };
+Object.defineProperty(el, "__vue_app__", {
+  value: { _context: { config: { globalProperties: { $router: router } } } },
+});
+fetch("/api/poll-items");
+setInterval(() => fetch("/heartbeat?t=" + Date.now()), 500);
+</script></body></html>`)
+	})
+
+	collector, err := New(model.BrowserConfig{
+		Path: bin, Headless: true, NoSandbox: true,
+		Idle:    800 * time.Millisecond,
+		IdleMax: 2 * time.Second,
+		Wait:    300 * time.Millisecond,
+		Timeout: 15 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now()
+	result, err := collector.Collect(context.Background(), target, http.Header{})
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("Collect() after %v error = %v", elapsed, err)
+	}
+	if elapsed >= 10*time.Second {
+		t.Fatalf("Collect() blocked %v instead of abandoning the idle wait", elapsed)
+	}
+	foundRoute := slices.ContainsFunc(result.Routes, func(
+		route collect.BrowserRoute,
+	) bool {
+		return strings.Contains(route.Path, "dashboard")
+	})
+	if !foundRoute {
+		t.Errorf("routes missing /polled/dashboard: %#v", result.Routes)
+	}
+	foundAPI := slices.ContainsFunc(result.URLs, func(raw string) bool {
+		return strings.Contains(raw, "/api/poll-items")
+	})
+	if !foundAPI {
+		t.Errorf("URLs missing /api/poll-items: %#v", result.URLs)
+	}
+}
+
+// Regular site navigation anchors must not be reported as framework routes;
+// only SPA hash anchors (a[href^="#/"]) are treated as routes.
+func TestCollectorExcludesPlainAnchorsFromRoutes(t *testing.T) {
+	bin, found := launcher.LookPath()
+	if !found {
+		t.Skip("local Chromium-compatible browser is not installed")
+	}
+
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<!doctype html><html><body><div id="app"></div>
+<a href="/login?redirect_to_url=/">登录</a>
+<a href="https://other.example.com/">外部</a>
+<a href="#/admin/users">hash 路由</a>
+</body></html>`)
+	})
+
+	collector, err := New(model.BrowserConfig{
+		Path: bin, Headless: true, NoSandbox: true,
+		Idle: 50 * time.Millisecond, Wait: 200 * time.Millisecond,
+		Timeout: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := collector.Collect(context.Background(), target, http.Header{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hasHashRoute := slices.ContainsFunc(result.Routes, func(route collect.BrowserRoute) bool {
+		return route.Path == "/#/admin/users"
+	})
+	if !hasHashRoute {
+		t.Errorf("hash anchor route missing its fragment: %#v", result.Routes)
+	}
+	for _, route := range result.Routes {
+		if strings.Contains(route.Path, "login") {
+			t.Errorf("plain navigation anchor leaked as route: %#v", route)
+		}
+		if strings.Contains(route.Path, "other.example.com") {
+			t.Errorf("external anchor leaked as route: %#v", route)
+		}
+	}
 }

@@ -23,6 +23,12 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 	seen := make(map[string]struct{})
 	for _, extractedCandidate := range extracted {
 		kind := classifyCandidate(extractedCandidate)
+		if (kind == KindEndpoint || kind == KindRoute) &&
+			!looksLikePath(extractedCandidate.Raw) {
+			// Quoted field names, i18n labels and regex fragments are not
+			// request targets; keeping them floods the path reports.
+			continue
+		}
 		key := string(kind) + "\x00" + extractedCandidate.Raw
 		if _, duplicate := seen[key]; duplicate {
 			continue
@@ -36,7 +42,8 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 			Method:    extractedCandidate.Method,
 			RuleID:    extractedCandidate.RuleID,
 		}
-		if kind == KindEndpoint && extractedCandidate.Offset > 0 {
+		if (kind == KindEndpoint || kind == KindRoute) &&
+			extractedCandidate.Offset > 0 {
 			candidate.Line, candidate.Column = lineColumn(body, extractedCandidate.Offset)
 			candidate.ContextLines = extractContext(
 				body, extractedCandidate.Offset, contextSpanLines,
@@ -49,6 +56,9 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 	result.SPA.DynamicImport = bytes.Contains(lower, []byte("import("))
 	result.SPA.HistoryRouting = bytes.Contains(lower, []byte("history.pushstate")) ||
 		bytes.Contains(lower, []byte("history.replacestate"))
+	result.SPA.HashRouting = bytes.Contains(lower, []byte("createwebhashhistory")) ||
+		bytes.Contains(lower, []byte(`mode:"hash"`)) ||
+		bytes.Contains(lower, []byte(`mode:'hash'`))
 	result.SPA.DynamicScript = bytes.Contains(lower, []byte("createelement(\"script\"")) ||
 		bytes.Contains(lower, []byte("createelement('script'"))
 	result.SPA.Webpack = bytes.Contains(lower, []byte("webpackchunk")) ||
@@ -68,15 +78,84 @@ func classifyCandidate(candidate analyze.Candidate) Kind {
 	case "url.webpack-loader":
 		return KindChunk
 	case "url.static-resource":
+		if isSourceMapPath(candidate.Raw) {
+			return KindSourceMap
+		}
 		if isJavaScriptPath(candidate.Raw) {
 			return KindScript
 		}
 		return KindAsset
 	}
+	if isSourceMapPath(candidate.Raw) {
+		return KindSourceMap
+	}
 	if isJavaScriptPath(candidate.Raw) {
 		return KindScript
 	}
 	return KindRoute
+}
+
+// pathSegmentAlphabet lists the characters allowed inside one relative-path
+// segment. Braces are kept so template paths ("/api/{id}") survive.
+const pathSegmentAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-{}"
+
+// moduleDirectoryNames lists first path segments that mark a webpack module
+// request ("lib/inflate", "utils/common") rather than an application route or
+// endpoint. Chunks are full of these; keeping them drowns the real paths.
+var moduleDirectoryNames = map[string]struct{}{
+	"audio": {}, "blots": {}, "core": {}, "ace": {}, "icon": {},
+	"css": {}, "formats": {}, "image": {}, "js": {}, "modules": {},
+	"text": {}, "themes": {}, "ui": {}, "video": {}, "static": {},
+	"attributors": {}, "application": {}, "lib": {}, "utils": {},
+	"lang": {}, "locale": {}, "locales": {}, "plugins": {},
+	"directives": {}, "mixins": {}, "node_modules": {}, "dist": {}, "src": {},
+}
+
+// looksLikePath reports whether an extracted string can be a request target.
+// Minified bundles and i18n dictionaries yield thousands of quoted strings
+// that are field names, labels or regex fragments; this gate keeps them out
+// of the path reports.
+func looksLikePath(value string) bool {
+	if value == "" || len(value) > 2048 {
+		return false
+	}
+	for _, char := range value {
+		switch char {
+		case ' ', '\t', '\n', '\r',
+			'(', ')', '[', ']', '<', '>', '|', '\\',
+			'^', '$', '*', '"', '\'', '`', ',':
+			return false
+		}
+	}
+	if strings.Contains(value, "://") {
+		return true
+	}
+	// "./x" and "../x" are module specifiers, never request targets.
+	if strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../") {
+		return false
+	}
+	if strings.HasPrefix(value, "#/") || strings.HasPrefix(value, "/") {
+		return true
+	}
+	// Bare relative path such as "user/login": require at least two
+	// identifier-like segments so "mmol/L" or "m/d/yy" are rejected, and
+	// drop the module directories chunks are full of.
+	segments := strings.Split(value, "/")
+	if len(segments) < 2 {
+		return false
+	}
+	if _, module := moduleDirectoryNames[strings.ToLower(segments[0])]; module {
+		return false
+	}
+	for _, segment := range segments {
+		if len(segment) < 2 {
+			return false
+		}
+		if strings.Trim(segment, pathSegmentAlphabet) != "" {
+			return false
+		}
+	}
+	return true
 }
 
 func isJavaScriptPath(raw string) bool {
@@ -90,6 +169,42 @@ func isJavaScriptPath(raw string) bool {
 	default:
 		return false
 	}
+}
+
+// staticAssetExtensions lists path extensions that never identify an API
+// endpoint: images, fonts, stylesheets, media, bundles, documents and
+// archives. A quoted "/a/b.png" is a resource reference, not an interface.
+// Mirrors the extension filters browser-extension collectors apply.
+var staticAssetExtensions = map[string]struct{}{
+	// images
+	".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {}, ".webp": {}, ".svg": {},
+	".ico": {}, ".bmp": {}, ".tif": {}, ".tiff": {}, ".avif": {},
+	// fonts and stylesheets
+	".woff": {}, ".woff2": {}, ".ttf": {}, ".otf": {}, ".eot": {}, ".css": {},
+	".scss": {}, ".sass": {}, ".less": {}, ".styl": {},
+	// media
+	".mp3": {}, ".wav": {}, ".ogg": {}, ".flac": {}, ".m4a": {}, ".swf": {},
+	".mp4": {}, ".webm": {}, ".avi": {}, ".mov": {}, ".mkv": {},
+	// scripts, bundles and source maps
+	".js": {}, ".mjs": {}, ".jsx": {}, ".ts": {}, ".tsx": {}, ".map": {},
+	// documents, office internals and archives
+	".pdf": {}, ".doc": {}, ".docx": {}, ".xls": {}, ".xlsx": {},
+	".ppt": {}, ".pptx": {}, ".zip": {}, ".rar": {}, ".7z": {}, ".tar": {},
+	".gz": {}, ".dmg": {}, ".exe": {}, ".dll": {}, ".apk": {}, ".iso": {},
+	".xml": {}, ".rels": {}, ".bin": {}, ".vml": {},
+	// markup and binary blobs
+	".html": {}, ".htm": {}, ".wasm": {},
+}
+
+// IsStaticAssetPath reports whether a path ends in an extension that is never
+// an API endpoint. Query strings and fragments are ignored.
+func IsStaticAssetPath(pathname string) bool {
+	ext := strings.ToLower(path.Ext(pathname))
+	if ext == "" {
+		return false
+	}
+	_, blocked := staticAssetExtensions[ext]
+	return blocked
 }
 
 // lineColumn converts a byte offset into 1-based line and rune column.

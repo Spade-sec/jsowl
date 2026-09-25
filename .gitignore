@@ -9,6 +9,7 @@ bin/
 /jsowl.exe
 /jsowl-mcp
 /jsowl-mcp.exe
+/tools.exe
 
 # Scan outputs and reports
 report/

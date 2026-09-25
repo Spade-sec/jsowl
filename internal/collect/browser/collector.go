@@ -5,10 +5,13 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -160,8 +163,7 @@ func (c *Collector) collectOnce(
 	var networkMu sync.Mutex
 	network := make(map[string]collect.NetworkRecord)
 	requests := make(map[string]collect.NetworkRecord)
-	eventPage, stopEvents := page.WithCancel()
-	waitEvents := eventPage.EachEvent(func(event *proto.NetworkResponseReceived) {
+	recordResponse := func(event *proto.NetworkResponseReceived) {
 		if event.Response == nil || event.Response.URL == "" {
 			return
 		}
@@ -180,9 +182,8 @@ func (c *Collector) collectOnce(
 		}
 		network[event.Response.URL] = record
 		networkMu.Unlock()
-	})
-	go waitEvents()
-	waitRequests := eventPage.EachEvent(func(event *proto.NetworkRequestWillBeSent) {
+	}
+	recordRequest := func(event *proto.NetworkRequestWillBeSent) {
 		if event.Request == nil || event.Request.URL == "" {
 			return
 		}
@@ -209,9 +210,20 @@ func (c *Collector) collectOnce(
 			network[event.Request.URL] = record
 		}
 		networkMu.Unlock()
-	})
+	}
+
+	eventPage, stopEvents := page.WithCancel()
+	waitEvents := eventPage.EachEvent(recordResponse)
+	go waitEvents()
+	waitRequests := eventPage.EachEvent(recordRequest)
 	go waitRequests()
 	defer stopEvents()
+
+	// Cross-origin iframes and workers are separate CDP targets: their
+	// traffic never reaches the page session. Auto-attach plus a
+	// browser-level subscription mirrors it into the same recorders.
+	stopChildTargets := observeChildTargets(ctx, rodBrowser, page, recordResponse, recordRequest)
+	defer stopChildTargets()
 
 	idle := c.config.Idle
 	if idle <= 0 {
@@ -225,7 +237,7 @@ func (c *Collector) collectOnce(
 	if err := page.WaitLoad(); err != nil {
 		return collect.BrowserResult{}, fmt.Errorf("wait for page load: %w", err)
 	}
-	waitForIdle()
+	abandonIdleWait(ctx, waitForIdle, c.config.IdleMax)
 	if err := waitDuration(ctx, c.config.Wait); err != nil {
 		return collect.BrowserResult{}, err
 	}
@@ -234,9 +246,20 @@ func (c *Collector) collectOnce(
 	if err != nil {
 		return collect.BrowserResult{}, fmt.Errorf("read rendered HTML: %w", err)
 	}
-	injectedURLs, injectedRoutes, err := snapshotURLs(page, c.config.DisableInjection)
+	injectedURLs, injectedScripts, injectedRoutes, err := snapshotURLs(page, c.config.DisableInjection)
 	if err != nil {
 		return collect.BrowserResult{}, err
+	}
+	if c.config.CrawlRoutes && !c.config.DisableInjection {
+		// Render every discovered route so each view's own requests are
+		// observed: a front-end route guard is not authorization.
+		crawled := c.crawlRouteViews(ctx, page, target, injectedRoutes,
+			func() ([]string, []string, []collect.BrowserRoute, error) {
+				return snapshotURLs(page, c.config.DisableInjection)
+			})
+		injectedURLs = append(injectedURLs, crawled.URLs...)
+		injectedScripts = append(injectedScripts, crawled.Scripts...)
+		injectedRoutes = append(injectedRoutes, crawled.Routes...)
 	}
 	browserCookies, err := page.Cookies([]string{target.String()})
 	if err != nil {
@@ -265,8 +288,9 @@ func (c *Collector) collectOnce(
 		return injectedRoutes[i].Path < injectedRoutes[j].Path
 	})
 	return collect.BrowserResult{
-		HTML: []byte(html), URLs: urls, Routes: injectedRoutes,
-		Network: records, Cookies: convertCookies(browserCookies),
+		HTML: []byte(html), URLs: urls, Scripts: injectedScripts,
+		Routes: injectedRoutes, Network: records,
+		Cookies: convertCookies(browserCookies),
 	}, nil
 }
 
@@ -287,6 +311,314 @@ func isTransientPreNavigation(err error) bool {
 		}
 	}
 	return false
+}
+
+// routeCrawl accumulates what rendering extra framework-route views revealed.
+type routeCrawl struct {
+	URLs    []string
+	Scripts []string
+	Routes  []collect.BrowserRoute
+	Visited int
+}
+
+// digitRun collapses volatile numbers (ids, timestamps) inside a rendered
+// document before it is hashed into a view signature.
+var digitRun = regexp.MustCompile(`[0-9]+`)
+
+// viewSignature reduces a rendered document to a stable digest so two routes
+// that render the same view are only walked once.
+func viewSignature(html string) string {
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(digitRun.ReplaceAllString(html, "0")))
+	return strconv.FormatUint(hash.Sum64(), 16)
+}
+
+// normalizeRoutePath folds a route into a comparable key: query and fragment
+// are dropped and instance segments collapse to ":id", so "/user/1" and
+// "/user/2" count as one route instead of recursing forever.
+func normalizeRoutePath(raw string) string {
+	value := raw
+	if index := strings.IndexAny(value, "?#"); index >= 0 {
+		value = value[:index]
+	}
+	value = strings.Trim(value, "/")
+	if value == "" {
+		return ""
+	}
+	segments := strings.Split(value, "/")
+	for index, segment := range segments {
+		if isDynamicSegment(segment) {
+			segments[index] = ":id"
+		}
+	}
+	return strings.Join(segments, "/")
+}
+
+// isDynamicSegment reports whether one route segment is an instance value
+// (numeric id, UUID, long token) rather than a stable path name.
+func isDynamicSegment(segment string) bool {
+	if segment == "" {
+		return false
+	}
+	allDigits, letters := true, 0
+	for _, char := range segment {
+		switch {
+		case char >= '0' && char <= '9':
+		case char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z':
+			allDigits = false
+			letters++
+		case char == '-' || char == '_' || char == '.':
+			allDigits = false
+		default:
+			return false
+		}
+	}
+	return allDigits || (letters > 0 && len(segment) >= 16)
+}
+
+// routeViewURL turns a discovered route into the URL to navigate to. Hash
+// routers keep the route in the fragment, so it cannot be resolved as a path.
+func routeViewURL(root *url.URL, route string) string {
+	value := strings.TrimSpace(route)
+	if value == "" {
+		return ""
+	}
+	reference, err := url.Parse(value)
+	if err != nil {
+		return ""
+	}
+	if reference.IsAbs() {
+		return reference.String()
+	}
+	if strings.Contains(value, "#") {
+		origin := &url.URL{Scheme: root.Scheme, Host: root.Host}
+		return origin.ResolveReference(reference).String()
+	}
+	return root.ResolveReference(reference).String()
+}
+
+// routerPathFor extracts the path a SPA router expects: hash routers keep it
+// after "#", history routers use it directly.
+func routerPathFor(route string) string {
+	value := strings.TrimSpace(route)
+	if index := strings.Index(value, "#"); index >= 0 {
+		value = value[index+1:]
+	}
+	if value == "" {
+		return ""
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	return value
+}
+
+// crawlRouteViews renders discovered framework routes so each view's own
+// requests are observed. Front-end route guards are frequently not
+// authorization, so navigating straight to a view often renders it and fires
+// its API calls. Bounded by view count, total time and a normalised document
+// signature so identical views are not walked twice.
+func (c *Collector) crawlRouteViews(
+	ctx context.Context,
+	page *rod.Page,
+	root *url.URL,
+	seeds []collect.BrowserRoute,
+	snapshot func() ([]string, []string, []collect.BrowserRoute, error),
+) routeCrawl {
+	result := routeCrawl{}
+	deadline := time.Now().Add(c.crawlTimeout())
+	maxRoutes := c.maxRoutes()
+	seenPaths := make(map[string]struct{})
+	seenViews := make(map[string]struct{})
+	urls := make(map[string]struct{})
+	scripts := make(map[string]struct{})
+	routes := make(map[string]collect.BrowserRoute)
+	queue := append([]collect.BrowserRoute(nil), seeds...)
+
+	for len(queue) > 0 {
+		if ctx.Err() != nil || result.Visited >= maxRoutes ||
+			time.Now().After(deadline) {
+			break
+		}
+		route := queue[0]
+		queue = queue[1:]
+		key := normalizeRoutePath(route.Path)
+		if key == "" {
+			continue
+		}
+		if _, seen := seenPaths[key]; seen {
+			continue
+		}
+		seenPaths[key] = struct{}{}
+		target := routeViewURL(root, route.Path)
+		if target == "" || !c.navigateRoute(ctx, page, route.Path, target) {
+			continue
+		}
+		result.Visited++
+
+		html, err := page.HTML()
+		if err != nil {
+			continue
+		}
+		signature := viewSignature(html)
+		if _, seen := seenViews[signature]; seen {
+			// The view rendered identically to one already walked, so it
+			// cannot expose new routes; skip it and its subtree.
+			continue
+		}
+		seenViews[signature] = struct{}{}
+
+		foundURLs, foundScripts, foundRoutes, err := snapshot()
+		if err != nil {
+			continue
+		}
+		for _, raw := range foundURLs {
+			urls[raw] = struct{}{}
+		}
+		for _, raw := range foundScripts {
+			scripts[raw] = struct{}{}
+		}
+		for _, discovered := range foundRoutes {
+			if discovered.Path == "" {
+				continue
+			}
+			if _, seen := routes[discovered.Path]; seen {
+				continue
+			}
+			routes[discovered.Path] = discovered
+			queue = append(queue, discovered)
+		}
+	}
+
+	for raw := range urls {
+		result.URLs = append(result.URLs, raw)
+	}
+	for raw := range scripts {
+		result.Scripts = append(result.Scripts, raw)
+	}
+	for _, route := range routes {
+		result.Routes = append(result.Routes, route)
+	}
+	sort.Strings(result.URLs)
+	sort.Strings(result.Scripts)
+	sort.Slice(result.Routes, func(i, j int) bool {
+		return result.Routes[i].Path < result.Routes[j].Path
+	})
+	return result
+}
+
+// navigateRoute switches to one route, preferring an in-page router push so
+// the shell is not re-downloaded for every view.
+func (c *Collector) navigateRoute(
+	ctx context.Context,
+	page *rod.Page,
+	route string,
+	target string,
+) bool {
+	if path := routerPathFor(route); path != "" {
+		value, err := page.Eval(
+			`(p) => window.__jsowlCollector && window.__jsowlCollector.navigate ? window.__jsowlCollector.navigate(p) : false`,
+			path,
+		)
+		if err == nil && value.Value.Bool() {
+			return waitDuration(ctx, c.routeViewWait()) == nil
+		}
+	}
+	if err := page.Navigate(target); err != nil {
+		return false
+	}
+	if err := page.WaitLoad(); err != nil {
+		return false
+	}
+	return waitDuration(ctx, c.routeViewWait()) == nil
+}
+
+func (c *Collector) maxRoutes() int {
+	if c.config.MaxRoutes > 0 {
+		return c.config.MaxRoutes
+	}
+	return 30
+}
+
+func (c *Collector) crawlTimeout() time.Duration {
+	if c.config.CrawlTimeout > 0 {
+		return c.config.CrawlTimeout
+	}
+	return 60 * time.Second
+}
+
+// routeViewWait is the grace period after switching views. It is deliberately
+// shorter than the entry-page wait: crawling multiplies it by the route count.
+func (c *Collector) routeViewWait() time.Duration {
+	switch wait := c.config.Wait; {
+	case wait <= 0:
+		return 800 * time.Millisecond
+	case wait > 2*time.Second:
+		return 2 * time.Second
+	default:
+		return wait
+	}
+}
+
+// observeChildTargets attaches to the cross-origin iframes and workers the
+// page spawns and mirrors their Network events into the page-level recorders.
+// Those targets run in their own CDP sessions, so without auto-attach the
+// scripts and endpoints they load are invisible to the scan.
+func observeChildTargets(
+	ctx context.Context,
+	browser *rod.Browser,
+	page *rod.Page,
+	onResponse func(*proto.NetworkResponseReceived),
+	onRequest func(*proto.NetworkRequestWillBeSent),
+) func() {
+	// Attach on the page session so only targets related to this page — its
+	// frames and workers — are followed, never unrelated browser tabs.
+	if err := (proto.TargetSetAutoAttach{
+		AutoAttach:             true,
+		WaitForDebuggerOnStart: false,
+		Flatten:                true,
+	}).Call(page); err != nil {
+		return func() {}
+	}
+	messages := browser.Event()
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-done:
+				return
+			case message, ok := <-messages:
+				if !ok {
+					return
+				}
+				switch message.Method {
+				case "Target.attachedToTarget":
+					event := &proto.TargetAttachedToTarget{}
+					if message.Load(event) {
+						// A session reports nothing until its Network
+						// domain is enabled.
+						_, _ = browser.Call(
+							ctx, string(event.SessionID),
+							"Network.enable", proto.NetworkEnable{},
+						)
+					}
+				case "Network.responseReceived":
+					event := &proto.NetworkResponseReceived{}
+					if message.Load(event) {
+						onResponse(event)
+					}
+				case "Network.requestWillBeSent":
+					event := &proto.NetworkRequestWillBeSent{}
+					if message.Load(event) {
+						onRequest(event)
+					}
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 func installHeaderIsolation(
@@ -451,23 +783,51 @@ func waitDuration(ctx context.Context, duration time.Duration) error {
 	}
 }
 
+// abandonIdleWait caps the WaitRequestIdle phase at maxWait: polling SPAs
+// never keep the network quiet for the idle duration, so waiting forever
+// would run the browser session to Timeout. When maxWait elapses the wait
+// is abandoned in the background and collection continues with what has
+// already been observed. maxWait <= 0 restores the uncapped behavior.
+func abandonIdleWait(ctx context.Context, waitForIdle func(), maxWait time.Duration) bool {
+	if maxWait <= 0 {
+		waitForIdle()
+		return false
+	}
+	abandoned := make(chan struct{})
+	go func() {
+		waitForIdle()
+		close(abandoned)
+	}()
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-abandoned:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func snapshotURLs(
 	page *rod.Page,
 	disabled bool,
-) ([]string, []collect.BrowserRoute, error) {
+) ([]string, []string, []collect.BrowserRoute, error) {
 	if disabled {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
-	value, err := page.Eval(`() => window.__jsowlCollector ? window.__jsowlCollector.snapshot() : {urls: [], routes: []}`)
+	value, err := page.Eval(`() => window.__jsowlCollector ? window.__jsowlCollector.snapshot() : {urls: [], scripts: [], routes: []}`)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read injected collector results: %w", err)
+		return nil, nil, nil, fmt.Errorf("read injected collector results: %w", err)
 	}
 	var snapshot struct {
-		URLs   []string               `json:"urls"`
-		Routes []collect.BrowserRoute `json:"routes"`
+		URLs    []string               `json:"urls"`
+		Scripts []string               `json:"scripts"`
+		Routes  []collect.BrowserRoute `json:"routes"`
 	}
 	if err := value.Value.Unmarshal(&snapshot); err != nil {
-		return nil, nil, fmt.Errorf("decode injected collector results: %w", err)
+		return nil, nil, nil, fmt.Errorf("decode injected collector results: %w", err)
 	}
-	return snapshot.URLs, snapshot.Routes, nil
+	return snapshot.URLs, snapshot.Scripts, snapshot.Routes, nil
 }

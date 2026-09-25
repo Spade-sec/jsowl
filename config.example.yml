@@ -14,7 +14,11 @@ browser:
   path: ""
   # 页面 load 与网络空闲后，继续等待异步 JavaScript 的时间。
   wait: 3s
+  # 判定"网络空闲"所需的最短静止时长。
   idle: 800ms
+  # 空闲等待的上限：轮询型 SPA 的网络永远不会静止 idle 时长，
+  # 到达上限后放弃等待、直接用已收集内容拍快照。0 表示不限制（旧行为）。
+  idle_max: 5s
   timeout: 45s
   headless: true
   # 仅在受限容器/靶场中 Chrome 沙箱无法启动时开启；默认保持 false。
@@ -22,6 +26,14 @@ browser:
   # 可覆盖为 collect_resource_urls.js 的绝对路径。
   collector_script: ""
   disable_injection: false
+  # 发现框架路由后逐个渲染，采集每个视图自己的请求/相对路径/敏感信息。
+  # 前端路由守卫常常不是鉴权，直接导航往往能渲染出视图并触发其接口调用。
+  # 默认关闭：它会成倍放大请求量，并可能触发目标自身的写操作。
+  crawl_routes: false
+  # 单次扫描最多渲染多少个路由视图。
+  max_routes: 30
+  # 路由渲染的总时长上限。
+  crawl_timeout: 60s
 
 concurrency:
   targets: 4
@@ -29,11 +41,15 @@ concurrency:
 
 limits:
   max_depth: 5
-  max_resources: 2000
+  # 0 表示不限制：所有可达的脚本与 chunk 都会被下载并解析。
+  max_resources: 0
   max_body_size: 10MiB
 
 scope:
   allow_domains: []
+  # 非空时只爬取根目标与列表内域名：列表外的脚本不抓取、端点不探测。
+  # 精确域名直接写，子域名前加点，例如 .static.example。
+  restrict_domains: []
   # 请求队列会忽略 URL path 以这些后缀结尾的资源；匹配忽略大小写和 query。
   suffix_blacklist:
     - .png
@@ -76,6 +92,37 @@ scope:
     - .css
   fetch_external_scripts: true
   probe_external_endpoints: false
+  # 识别版权注释（/*! ... */、@license、Copyright 等）判定第三方库 bundle 并跳过
+  # 正则/AST 解析：库代码体量大但不含目标业务接口，跳过可显著提速并降噪。默认开启。
+  # 设为 false 时仍解析，但结果会打上 vendor 标记（JSON: "vendor": true，报告显示徽标）。
+  skip_library_bundles: true
+  # 探测 JS source map（.map）并把 sourcesContent 里还原出的源码重新喂给提取器。
+  # 生产站点多半忘了删 .map，拿到它基本等于拿到未压缩的整套前端源码。默认开启。
+  probe_source_maps: true
+  # 命中的 map 不探测：路径包含任一片段即跳过（库/厂商 bundle 的 map 又大又没用）。
+  source_map_blacklist:
+    - chunk-vendors
+    - chunk-libs
+    - vendors~
+    - /vendor
+    - node_modules
+    - /polyfills
+    - /runtime.
+    - /libs/
+    - axios
+    - lodash
+    - jquery
+    - moment
+    - echarts
+    - element-ui
+    - elementui
+    - antd
+    - highlight.js
+    - /umd/
+    - core-js
+    - regenerator-runtime
+    - zone.js
+    - bootstrap
 
 output:
   directory: ./jsowl-report

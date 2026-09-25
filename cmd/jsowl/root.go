@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/spf13/cobra"
@@ -22,6 +23,7 @@ var version = "dev"
 
 type scanService interface {
 	ScanBatch(context.Context, []jsowl.Target) <-chan jsowl.BatchItem
+	SetProbeSink(chan<- jsowl.ProbeEvent)
 }
 
 type dependencies struct {
@@ -46,6 +48,7 @@ type options struct {
 	proxy   string
 	baseURL string
 	headers []string
+	scopes  []string
 	threads int
 	silent  bool
 	version bool
@@ -106,6 +109,8 @@ func newRootCommand(deps dependencies) *cobra.Command {
 	flags.StringVarP(&opts.proxy, "proxy", "p", "", "HTTP(S) or SOCKS5 proxy URL")
 	flags.StringVar(&opts.baseURL, "base-url", "", "base URL for relative discoveries")
 	flags.StringArrayVarP(&opts.headers, "header", "H", nil, "request header Name: value")
+	flags.StringArrayVar(&opts.scopes, "scope", nil,
+		"restrict crawling to these comma-separated domains (repeatable; root origin always allowed)")
 	flags.IntVarP(&opts.threads, "threads", "t", 0, "per-target resource concurrency")
 	flags.BoolVarP(&opts.silent, "silent", "s", false, "suppress successful result lines")
 	flags.BoolVarP(&opts.version, "version", "v", false, "print version")
@@ -194,6 +199,9 @@ func applyOverrides(
 	}
 	if command.Flags().Changed("threads") {
 		config.Concurrency.ResourcesPerTarget = opts.threads
+	}
+	if command.Flags().Changed("scope") {
+		config.Scope.RestrictDomains = parseScopeDomains(opts.scopes)
 	}
 	if command.Flags().Changed("proxy") {
 		config.Request.Proxy = opts.proxy
@@ -343,9 +351,29 @@ func runScans(
 	if err != nil {
 		return err
 	}
+	// Producer-consumer printing: the scanner (producer) pushes one probe
+	// event per completed API probe into a buffered channel; a dedicated
+	// printer goroutine (consumer) drains it so report writing and further
+	// scanning are never blocked. A slow terminal only drops events. Both
+	// the printer and the batch loop write to stdout, so they share a
+	// synchronized writer to keep lines from interleaving.
+	probeEvents := make(chan jsowl.ProbeEvent, 256)
+	printable := &synchronizedWriter{writer: deps.stdout}
+	if !silent {
+		scanner.SetProbeSink(probeEvents)
+	}
+	printerDone := startProbePrinter(printable, probeEvents, silent)
 	failures := 0
 	for item := range scanner.ScanBatch(ctx, targets) {
 		if item.Result != nil {
+			if status := item.Result.BrowserStatus; status.Degraded {
+				// Keep the degradation visible even with --silent: the scan
+				// still succeeds, but runtime extraction was lost.
+				_, _ = fmt.Fprintf(
+					deps.stderr, "%s: browser degraded, keeping direct results: %s\n",
+					item.Target.URL, status.Reason,
+				)
+			}
 			if reportErr := writeReports(deps, config, item.Target, item.Result); reportErr != nil {
 				failures++
 				_, _ = fmt.Fprintf(deps.stderr, "%s: %v\n", item.Target.URL, reportErr)
@@ -358,14 +386,74 @@ func runScans(
 		}
 		if !silent {
 			for _, line := range formatResultLines(item.Result) {
-				_, _ = fmt.Fprintln(deps.stdout, line)
+				_, _ = fmt.Fprintln(printable, line)
 			}
 		}
 	}
+	close(probeEvents)
+	<-printerDone
 	if failures > 0 {
 		return fmt.Errorf("%d target or report task(s) failed", failures)
 	}
 	return nil
+}
+
+// parseScopeDomains accepts both repeated flags and comma-separated values:
+// --scope a.com --scope b.com and --scope a.com,b.com produce the same list.
+func parseScopeDomains(values []string) []string {
+	domains := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, domain := range strings.Split(value, ",") {
+			domain = strings.TrimSpace(domain)
+			if domain != "" {
+				domains = append(domains, domain)
+			}
+		}
+	}
+	return domains
+}
+
+// synchronizedWriter serializes concurrent writes so probe lines from the
+// printer goroutine never interleave with batch result lines mid-line.
+type synchronizedWriter struct {
+	mu     sync.Mutex
+	writer io.Writer
+}
+
+func (writer *synchronizedWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.writer.Write(data)
+}
+
+// startProbePrinter launches the consumer side of probe-event streaming. It
+// returns a channel closed once the printer has drained every event, so the
+// caller can guarantee all lines are flushed before exiting. In silent mode
+// events are still drained (keeping the producer unblocked) but not printed.
+func startProbePrinter(
+	stdout io.Writer,
+	events <-chan jsowl.ProbeEvent,
+	silent bool,
+) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for event := range events {
+			if silent {
+				continue
+			}
+			_, _ = fmt.Fprintln(stdout, formatProbeLine(event))
+		}
+	}()
+	return done
+}
+
+func formatProbeLine(event jsowl.ProbeEvent) string {
+	method := event.Method
+	if method == "" {
+		method = "GET"
+	}
+	return fmt.Sprintf("[%d] %s %s [%s]", event.StatusCode, method, event.URL, event.Evidence)
 }
 
 func formatResultLines(result *jsowl.Result) []string {

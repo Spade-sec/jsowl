@@ -47,8 +47,11 @@ type BrowserRoute struct {
 
 // BrowserResult contains the rendered document and resources observed at runtime.
 type BrowserResult struct {
-	HTML    []byte
-	URLs    []string
+	HTML []byte
+	URLs []string
+	// Scripts lists JavaScript the page loaded, including extension-less
+	// script URLs that a generic URL list cannot classify.
+	Scripts []string
 	Routes  []BrowserRoute
 	Network []NetworkRecord
 	Cookies []*http.Cookie

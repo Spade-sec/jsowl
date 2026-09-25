@@ -4,6 +4,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/youmulijiang/jsowl/internal/analyze"
 
@@ -78,7 +79,7 @@ func TestAPIFromASTResolvesConstantsAndTemplates(t *testing.T) {
 		client.get(suffix + "/users/" + id);
 		var legacy = "https://legacy.example.test/rpc";
 		fetch(legacy);
-		fetch(` + "`" + `/inline/${id}/detail` + "`" + `);
+		fetch(`+"`"+`/inline/${id}/detail`+"`"+`);
 	`)
 	full := findCandidate(candidates, "https://legacy.example.test/rpc")
 	if full == nil {
@@ -165,18 +166,45 @@ func TestAPIFromASTCapturesContextLines(t *testing.T) {
 	if got == nil {
 		t.Fatalf("candidate missing in %v", candidates)
 	}
-	if len(got.ContextLines) != 7 {
-		t.Fatalf("context lines = %d, want 7", len(got.ContextLines))
+	if len(got.ContextLines) != 5 {
+		t.Fatalf("context lines = %d, want 5", len(got.ContextLines))
 	}
-	if got.ContextLines[0].LineNumber != 1 ||
-		got.ContextLines[6].LineNumber != 7 {
-		t.Fatalf("context range = %d..%d", got.ContextLines[0].LineNumber, got.ContextLines[6].LineNumber)
+	if got.ContextLines[0].LineNumber != 2 ||
+		got.ContextLines[4].LineNumber != 6 {
+		t.Fatalf("context range = %d..%d", got.ContextLines[0].LineNumber, got.ContextLines[4].LineNumber)
 	}
-	if got.ContextLines[3].MatchStart < 0 {
-		t.Fatalf("matched line not marked: %+v", got.ContextLines[3])
+	if got.ContextLines[2].MatchStart < 0 {
+		t.Fatalf("matched line not marked: %+v", got.ContextLines[2])
 	}
-	if !strings.Contains(got.ContextLines[2].Content, "lead line 3") {
+	if !strings.Contains(got.ContextLines[1].Content, "lead line 3") {
 		t.Fatalf("unexpected context content: %+v", got.ContextLines)
+	}
+}
+
+// A minified bundle keeps everything on one physical line; the context must
+// be trimmed around the call instead of dragging the whole file in.
+func TestAPIFromASTTrimsMinifiedSingleLineContext(t *testing.T) {
+	source := strings.Repeat("var x=1;", 300) +
+		`fetch("/api/minified");` +
+		strings.Repeat("var y=2;", 300)
+	candidates := astCandidates(t, source)
+	got := findCandidate(candidates, "/api/minified")
+	if got == nil {
+		t.Fatalf("candidate missing in %v", candidates)
+	}
+	if len(got.ContextLines) != 1 {
+		t.Fatalf("context lines = %d, want 1", len(got.ContextLines))
+	}
+	line := got.ContextLines[0]
+	runes := utf8.RuneCountInString(line.Content)
+	if runes > 402 {
+		t.Fatalf("context line = %d runes, want <= 402", runes)
+	}
+	if !strings.HasPrefix(line.Content, "…") {
+		t.Fatalf("trimmed line should start with ellipsis: %q", line.Content[:8])
+	}
+	if line.MatchStart < 0 || line.MatchEnd <= line.MatchStart {
+		t.Fatalf("match window = [%d,%d]", line.MatchStart, line.MatchEnd)
 	}
 }
 
@@ -215,6 +243,33 @@ func TestAPIFromASTExtractsBodyParameters(t *testing.T) {
 	}
 	if get := findCandidate(candidates, "/users/list"); len(get.BodyParams) != 0 {
 		t.Fatalf("GET should have no body params: %v", get.BodyParams)
+	}
+}
+
+func TestAPIFromASTDecodesUnicodeStrings(t *testing.T) {
+	candidates := astCandidates(t, `
+		fetch("/api/用户");
+		fetch("/emoji/\uD83D\uDE00");
+		const 路径 = "/接口/详情";
+		axios.get(路径);
+		fetch(`+"`"+`/模板/${id}/\u8BE6\u60C5`+"`"+`);
+	`)
+	for _, raw := range []string{"/api/用户", "/emoji/😀", "/接口/详情", "/模板/{}/详情"} {
+		if findCandidate(candidates, raw) == nil {
+			t.Errorf("missing decoded Unicode candidate %q in %v", raw, candidates)
+		}
+	}
+}
+
+func TestAPIFromASTRecoversAroundSyntaxErrors(t *testing.T) {
+	candidates := astCandidates(t, `
+		fetch("/api/before-error");
+		const broken = ;
+		axios.get("/api/after-error");
+	`)
+	if findCandidate(candidates, "/api/before-error") == nil ||
+		findCandidate(candidates, "/api/after-error") == nil {
+		t.Fatalf("Tree-sitter did not recover valid calls: %v", candidates)
 	}
 }
 

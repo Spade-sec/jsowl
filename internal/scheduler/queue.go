@@ -23,7 +23,8 @@ type Queue struct {
 	maxDepth int
 }
 
-// New creates a queue with hard resource and recursion limits.
+// New creates a queue with recursion and, when maxItems > 0, resource limits.
+// maxItems <= 0 leaves the item count uncapped.
 func New(maxItems, maxDepth int) *Queue {
 	return &Queue{
 		seen:     make(map[string]struct{}, maxItems),
@@ -37,7 +38,8 @@ func (q *Queue) Add(item Item) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if item.URL == "" || item.Depth > q.maxDepth || len(q.seen) >= q.maxItems {
+	if item.URL == "" || item.Depth > q.maxDepth ||
+		(q.maxItems > 0 && len(q.seen) >= q.maxItems) {
 		return false
 	}
 	if _, duplicate := q.seen[item.URL]; duplicate {
@@ -60,7 +62,7 @@ func (q *Queue) MarkSeen(urls []string) {
 		if _, exists := q.seen[raw]; exists {
 			continue
 		}
-		if len(q.seen) >= q.maxItems {
+		if q.maxItems > 0 && len(q.seen) >= q.maxItems {
 			return
 		}
 		q.seen[raw] = struct{}{}

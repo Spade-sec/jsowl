@@ -39,6 +39,9 @@ const (
 	ResourceTypeExternal = model.ResourceTypeExternal
 )
 
+// ProbeEvent is emitted the moment one API probe completes; see Scanner.SetProbeSink.
+type ProbeEvent = model.ProbeEvent
+
 // WriteJSONReport atomically writes the complete scan result as JSON.
 func WriteJSONReport(path string, result *Result) error {
 	return report.WriteJSON(path, result)
@@ -49,8 +52,8 @@ func WriteHTMLReport(path string, result *Result) error {
 	return report.WriteHTML(path, result)
 }
 
-// WriteTextReports atomically writes api路径.txt, 参数.txt and 敏感信息.txt
-// into the target's report directory.
+// WriteTextReports atomically writes api绝对路径.txt, api相对路径.txt,
+// 参数.txt, 敏感信息.txt and 路由.txt into the target's report directory.
 func WriteTextReports(directory string, result *Result) error {
 	return report.WriteTextReports(directory, result)
 }

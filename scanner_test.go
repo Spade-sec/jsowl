@@ -62,6 +62,7 @@ func TestScannerDirectRecursivelyCollectsChunkEndpointAndSensitiveFinding(t *tes
 	config.Mode = ModeDirect
 	config.Concurrency.ResourcesPerTarget = 8
 	config.Limits.MaxResources = 40
+	tempOutputRedirects(t, &config)
 	scanner, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +105,7 @@ func TestScannerKeepsPartialResultWhenNestedResourceFails(t *testing.T) {
 
 	config := DefaultConfig()
 	config.Mode = ModeDirect
+	tempOutputRedirects(t, &config)
 	scanner, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -146,6 +148,7 @@ func TestScannerModeSelectionAndAutoDegradation(t *testing.T) {
 		browser := &fakeBrowser{err: errors.New("must not be called")}
 		config := DefaultConfig()
 		config.Mode = ModeDirect
+		tempOutputRedirects(t, &config)
 		scanner, err := New(config)
 		if err != nil {
 			t.Fatal(err)
@@ -166,6 +169,7 @@ func TestScannerModeSelectionAndAutoDegradation(t *testing.T) {
 		browser := &fakeBrowser{err: errors.New("chrome missing")}
 		config := DefaultConfig()
 		config.Mode = ModeAuto
+		tempOutputRedirects(t, &config)
 		scanner, err := New(config)
 		if err != nil {
 			t.Fatal(err)
@@ -242,6 +246,7 @@ func TestAutoMergesBrowserResourcesWithoutDuplicates(t *testing.T) {
 	}}
 	config := DefaultConfig()
 	config.Mode = ModeAuto
+	tempOutputRedirects(t, &config)
 	scanner, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -306,6 +311,7 @@ func TestAutoDoesNotRefetchDirectResourcesDuringBrowserMerge(t *testing.T) {
 	}}
 	config := DefaultConfig()
 	config.Mode = ModeAuto
+	tempOutputRedirects(t, &config)
 	scanner, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -541,6 +547,7 @@ func TestScannerDoesNotForwardTargetHeadersToExternalScripts(t *testing.T) {
 	config.Mode = ModeDirect
 	config.Request.Headers["Authorization"] = "Bearer target-secret"
 	config.Request.Headers["X-API-Key"] = "target-key"
+	tempOutputRedirects(t, &config)
 	scanner, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -668,6 +675,7 @@ func TestBrowserCookiesFlowBackToSurfResourceGETs(t *testing.T) {
 	}}
 	config := DefaultConfig()
 	config.Mode = ModeBrowser
+	tempOutputRedirects(t, &config)
 	scanner, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -704,6 +712,7 @@ func TestScannerSkipsSensitiveAnalysisForBinaryBodies(t *testing.T) {
 
 	config := DefaultConfig()
 	config.Mode = ModeDirect
+	tempOutputRedirects(t, &config)
 	scanner, err := New(config)
 	if err != nil {
 		t.Fatal(err)
@@ -726,6 +735,13 @@ func containsResource(result *Result, path string, resourceType ResourceType) bo
 		}
 	}
 	return false
+}
+
+// tempOutputRedirects points config.Output.Directory at a per-test temp dir
+// so DownloadJS never writes reports into the repository during go test.
+func tempOutputRedirects(t *testing.T, config *Config) {
+	t.Helper()
+	config.Output.Directory = t.TempDir()
 }
 
 func containsEndpoint(result *Result, path string, status int) bool {

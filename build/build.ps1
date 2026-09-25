@@ -28,7 +28,7 @@ if (-not $Version) {
     }
 }
 
-$ldflags = "-X main.version=$Version"
+$ldflags = "-X main.version=$Version -s -w"
 New-Item -ItemType Directory -Force -Path "bin" | Out-Null
 
 Write-Host "== JsOwl build: version $Version ==" -ForegroundColor Cyan

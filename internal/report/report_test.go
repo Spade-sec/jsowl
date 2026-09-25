@@ -131,19 +131,56 @@ func TestWriteTextReportsWritesAPIPathsParametersAndSensitive(t *testing.T) {
 		Raw: "/api/users", URL: "https://example.test/api/users?id=42&tab=profile",
 		SourceURL: "https://example.test/app.js", Authorized: true, StatusCode: 200,
 	})
+	result.Endpoints = append(result.Endpoints, model.Endpoint{
+		Raw: "./v2/orders?expand=1", URL: "https://example.test/v2/orders?expand=1",
+		SourceURL: "https://example.test/app.js", Authorized: true, StatusCode: 200,
+	})
+	result.Endpoints = append(result.Endpoints, model.Endpoint{
+		Raw: "https://api.partner.test/v2/orders", URL: "https://api.partner.test/v2/orders",
+		SourceURL: "https://example.test/app.js", Authorized: false,
+		Method: "GET", Evidence: model.EvidenceFullURL,
+	})
 	directory := t.TempDir()
 	if err := WriteTextReports(directory, result); err != nil {
 		t.Fatal(err)
 	}
 
-	apiData, err := os.ReadFile(filepath.Join(directory, "api路径.txt"))
+	absoluteData, err := os.ReadFile(filepath.Join(directory, "api绝对路径.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := string(apiData)
-	if !strings.Contains(api, "https://example.test/api/users\n") ||
-		!strings.Contains(api, "https://example.test/api/users?id=42&tab=profile\n") {
-		t.Fatalf("api report missing endpoints: %q", api)
+	absolute := string(absoluteData)
+	// The absolute list mirrors the API report: the reference exactly as
+	// written in the source, not the folded resolved URL.
+	if !strings.Contains(absolute, "/api/users\n") {
+		t.Fatalf("absolute api report missing /api/users: %q", absolute)
+	}
+	if strings.Contains(absolute, "?id=42") {
+		t.Fatalf("absolute api report must use the source reference: %q", absolute)
+	}
+	if strings.Contains(absolute, "https://example.test/api/users") {
+		t.Fatalf("absolute api report must not contain folded full URLs: %q", absolute)
+	}
+	if strings.Contains(absolute, "https://api.partner.test") {
+		t.Fatalf("absolute api report must exclude full URLs: %q", absolute)
+	}
+
+	urlData, err := os.ReadFile(filepath.Join(directory, "url.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	urlList := string(urlData)
+	if !strings.Contains(urlList, "https://api.partner.test/v2/orders\n") {
+		t.Fatalf("url.txt missing full URL: %q", urlList)
+	}
+
+	relativeData, err := os.ReadFile(filepath.Join(directory, "api相对路径.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative := string(relativeData)
+	if !strings.Contains(relative, "./v2/orders?expand=1\n") {
+		t.Fatalf("relative api report missing endpoint: %q", relative)
 	}
 
 	paramData, err := os.ReadFile(filepath.Join(directory, "参数.txt"))
@@ -151,9 +188,14 @@ func TestWriteTextReportsWritesAPIPathsParametersAndSensitive(t *testing.T) {
 		t.Fatal(err)
 	}
 	params := string(paramData)
-	for _, want := range []string{"id=42", "tab=profile"} {
+	for _, want := range []string{"id\n", "tab\n", "expand\n"} {
 		if !strings.Contains(params, want) {
 			t.Fatalf("parameter report missing %q: %q", want, params)
+		}
+	}
+	for _, unwanted := range []string{"id=42", "\t", "http"} {
+		if strings.Contains(params, unwanted) {
+			t.Fatalf("parameter report must be bare names, found %q: %q", unwanted, params)
 		}
 	}
 
@@ -186,8 +228,8 @@ func TestWriteTextReportsHandlesEmptyResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(params), "（未发现参数）") {
-		t.Fatalf("empty parameter report = %q", params)
+	if len(params) != 0 {
+		t.Fatalf("empty parameter report should be empty, got %q", params)
 	}
 }
 
@@ -203,7 +245,7 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{
-		"报告导航.html", "API报告.html", "敏感信息报告.html", "参数报告.html", "资源报告.html",
+		"API报告.html", "敏感信息报告.html", "参数报告.html", "资源报告.html", "URL报告.html",
 	} {
 		data, err := os.ReadFile(filepath.Join(directory, name))
 		if err != nil {
@@ -212,6 +254,9 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 		if !strings.Contains(string(data), "https://example.test") {
 			t.Fatalf("%s missing target", name)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(directory, "报告导航.html")); !os.IsNotExist(err) {
+		t.Fatalf("报告导航.html should no longer be written: %v", err)
 	}
 	result.Endpoints = append(result.Endpoints, model.Endpoint{
 		Raw: "/search", URL: "https://example.test/search?q=hello",
@@ -257,8 +302,23 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 			t.Fatalf("API report missing %q", want)
 		}
 	}
-	if strings.Contains(string(api), `https://example.test/api/users?id=1`) {
-		t.Fatalf("API report should not display folded full URLs")
+	// Full URLs moved out of the API report into the URL report.
+	for _, unwanted := range []string{
+		`https://example.test/api/users?id=1`,
+		`data-copy="https://api.partner.test/v2/orders"`,
+	} {
+		if strings.Contains(string(api), unwanted) {
+			t.Fatalf("API report should not contain %q", unwanted)
+		}
+	}
+	urlReport, err := os.ReadFile(filepath.Join(directory, "URL报告.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"https://api.partner.test/v2/orders", "data-page-size"} {
+		if !strings.Contains(string(urlReport), want) {
+			t.Fatalf("URL report missing %q", want)
+		}
 	}
 	routes, err := os.ReadFile(filepath.Join(directory, "路由报告.html"))
 	if err != nil {
@@ -286,13 +346,32 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 			t.Fatalf("parameter report missing %q", want)
 		}
 	}
-	nav, _ := os.ReadFile(filepath.Join(directory, "报告导航.html"))
+	// Merged navigation: every split page links back to report.html and to
+	// its siblings; no standalone navigation page exists.
+	for _, name := range []string{"API报告.html", "路由报告.html"} {
+		page, err := os.ReadFile(filepath.Join(directory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"report.html", "API 端点报告", "敏感信息报告"} {
+			if !strings.Contains(string(page), want) {
+				t.Fatalf("%s nav missing %q", name, want)
+			}
+		}
+	}
+	if err := WriteHTML(filepath.Join(directory, "report.html"), result); err != nil {
+		t.Fatal(err)
+	}
+	main, err := os.ReadFile(filepath.Join(directory, "report.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, want := range []string{
-		"report.html", "API 端点报告", "敏感信息报告", "请求参数报告",
-		"资源报告", "API 路径", "请求参数", "敏感信息",
+		"API报告.html", "URL报告.html", "敏感信息报告.html", "参数报告.html",
+		"路由报告.html", "资源报告.html", "url.txt", "api绝对路径.txt",
 	} {
-		if !strings.Contains(string(nav), want) {
-			t.Fatalf("navigation missing %q", want)
+		if !strings.Contains(string(main), want) {
+			t.Fatalf("main report nav missing %q", want)
 		}
 	}
 }

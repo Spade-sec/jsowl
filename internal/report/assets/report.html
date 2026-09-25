@@ -6,20 +6,25 @@
   <title>JsOwl 安全信息收集报告</title>
   <style>
     :root{
-      color-scheme:dark;
-      --bg:#0b1020;
-      --panel:#151c31;
-      --line:#29334f;
-      --text:#e8edf8;
-      --muted:#9aa8c7;
-      --accent:#79d7ff;
-      --warn:#ffcb6b;
-      --danger:#ff6b6b;
-      --success:#7ee787;
-      --info:#79d7ff;
+      color-scheme:light;
+      --bg:#f5f6f8;
+      --panel:#ffffff;
+      --line:#e4e7ec;
+      --text:#1f2329;
+      --muted:#8a919c;
+      --accent:#2f6fed;
+      --accent-soft:#eaf1fe;
+      --warn:#b7791f;
+      --warn-soft:#fdf3e3;
+      --danger:#d64545;
+      --danger-soft:#fdecec;
+      --success:#2f9e6e;
+      --success-soft:#e6f6ef;
+      --info:#8a919c;
+      --info-soft:#f0f1f3;
     }
     *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif;height:100vh;display:flex;overflow:hidden}
+    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;height:100vh;display:flex;overflow:hidden}
     button{font:inherit;cursor:pointer}
     a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
     code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
@@ -28,19 +33,19 @@
     .sidebar{order:2;flex:0 0 340px;max-width:45vw;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;transition:flex-basis .2s,opacity .2s}
     .sidebar.collapsed{flex:0 0 0;opacity:0;overflow:hidden;border-left:none}
     .sidebar-header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
-    .sidebar-header h3{margin:0;font-size:16px}
-    .tree-toggle,.icon-button{width:28px;height:28px;background:var(--bg);border:1px solid var(--line);border-radius:6px;color:var(--text);display:flex;align-items:center;justify-content:center}
-    .tree-toggle:hover,.icon-button:hover{border-color:var(--accent)}
+    .sidebar-header h3{margin:0;font-size:15px;font-weight:600}
+    .tree-toggle,.icon-button{width:28px;height:28px;background:var(--panel);border:1px solid var(--line);border-radius:6px;color:var(--muted);display:flex;align-items:center;justify-content:center}
+    .tree-toggle:hover,.icon-button:hover{border-color:var(--accent);color:var(--accent)}
     .tree-panel{flex:1;overflow:auto;padding:12px}
 
     .tree-node{user-select:none}
     .tree-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer}
-    .tree-row:hover{background:rgba(121,215,255,.08)}
-    .tree-row.active{background:rgba(121,215,255,.18)}
+    .tree-row:hover{background:var(--accent-soft)}
+    .tree-row.active{background:var(--accent-soft)}
     .tree-caret{width:14px;height:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);transition:transform .15s;flex-shrink:0}
     .tree-caret.collapsed{transform:rotate(-90deg)}
     .tree-caret.leaf{visibility:hidden}
-    .tree-icon{font-size:13px;flex-shrink:0}
+    .tree-icon{font-size:13px;flex-shrink:0;color:var(--muted)}
     .tree-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
     .tree-label.muted{color:var(--muted)}
     .tree-children{padding-left:18px;display:none}
@@ -48,11 +53,11 @@
     .tree-count{font-size:11px;color:var(--muted);background:var(--bg);padding:1px 6px;border-radius:10px;margin-left:auto;flex-shrink:0}
 
     .main{order:1;flex:1;display:flex;flex-direction:column;min-width:0}
-    .topbar{position:sticky;top:0;z-index:10;background:var(--bg);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:12px;justify-content:space-between}
+    .topbar{position:sticky;top:0;z-index:10;background:var(--panel);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:12px;justify-content:space-between}
     .topbar-left{display:flex;align-items:center;gap:12px}
     .topbar-right{display:flex;align-items:center;gap:12px;min-width:0}
-    .report-title{margin:0;font-size:18px}
-    .warning{font-size:12px;padding:8px 12px;border:1px solid #806c32;background:#332d18;color:var(--warn);border-radius:8px}
+    .report-title{margin:0;font-size:17px;font-weight:600}
+    .warning{font-size:12px;padding:6px 10px;border:1px solid #f0d9a8;background:var(--warn-soft);color:var(--warn);border-radius:8px}
     .content{flex:1;overflow:auto;padding:20px}
 
     .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
@@ -64,25 +69,31 @@
 
     .toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
     .toolbar label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
-    .toolbar select{background:var(--bg);color:var(--text);border:1px solid var(--line);padding:6px 8px;border-radius:6px;min-width:110px}
-    .toolbar input[type="search"]{background:var(--bg);color:var(--text);border:1px solid var(--line);padding:6px 10px;border-radius:6px;min-width:180px}
+    .toolbar select{background:var(--panel);color:var(--text);border:1px solid var(--line);padding:6px 8px;border-radius:8px;min-width:110px}
+    .toolbar input[type="search"]{background:var(--panel);color:var(--text);border:1px solid var(--line);padding:6px 10px;border-radius:8px;min-width:180px}
     .toolbar .count{margin-left:auto;color:var(--muted);font-size:12px}
 
     .table-wrap{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:auto}
     table{width:100%;border-collapse:collapse;min-width:900px}
     th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-    th{background:rgba(11,16,32,.6);font-size:12px;color:var(--muted);font-weight:500;position:sticky;top:0;z-index:5}
+    th{background:#fafbfc;font-size:12px;color:var(--muted);font-weight:500;position:sticky;top:0;z-index:5}
     tbody tr{cursor:pointer;transition:background .1s}
-    tbody tr:hover{background:rgba(121,215,255,.06)}
-    tbody tr.expanded{background:rgba(121,215,255,.1)}
+    tbody tr:hover{background:#f8f9fb}
+    tbody tr.expanded{background:var(--accent-soft)}
     tbody tr.hidden-row{display:none}
     td{font-size:13px}
-    .severity{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;text-transform:uppercase}
-    .severity.critical{background:rgba(255,107,107,.18);color:var(--danger)}
-    .severity.high{background:rgba(255,107,107,.12);color:#ff8787}
-    .severity.medium{background:rgba(255,203,107,.15);color:var(--warn)}
-    .severity.low{background:rgba(121,215,255,.15);color:var(--accent)}
-    .severity.info{background:rgba(158,168,199,.15);color:var(--muted)}
+    .severity{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;text-transform:uppercase}
+    .severity.critical{background:var(--danger-soft);color:var(--danger)}
+    .severity.high{background:var(--danger-soft);color:var(--danger)}
+    .severity.medium{background:var(--warn-soft);color:var(--warn)}
+    .severity.low{background:var(--accent-soft);color:var(--accent)}
+    .severity.info{background:var(--info-soft);color:var(--info)}
+    .method-tag{display:inline-block;padding:1px 8px;border-radius:6px;font-size:11px;font-weight:700}
+    .method-tag.get{background:var(--accent-soft);color:var(--accent)}
+    .method-tag.post{background:var(--success-soft);color:var(--success)}
+    .method-tag.put{background:#f3e8fd;color:#8b5cf6}
+    .method-tag.delete{background:var(--danger-soft);color:var(--danger)}
+    .method-tag.patch{background:var(--warn-soft);color:var(--warn)}
     .rule-name{font-weight:500}
     .rule-id{font-size:11px;color:var(--muted)}
     .value-cell{max-width:300px;word-break:break-all}
@@ -102,16 +113,16 @@
     .context-code .line{display:block;padding:0 4px}
     .context-code .line-num{display:inline-block;width:36px;color:var(--muted);text-align:right;user-select:none;margin-right:12px;flex-shrink:0}
     .context-code .line-content{word-break:break-all;white-space:pre-wrap}
-    .context-code mark{background:rgba(255,203,107,.25);color:var(--warn);border-radius:3px;padding:0 2px}
-    .context-code .line.match{background:rgba(255,203,107,.06);border-radius:4px}
+    .context-code mark{background:#fdeea8;color:#7a5d00;border-radius:3px;padding:0 2px}
+    .context-code .line.match{background:var(--warn-soft);border-radius:4px}
 
     .pagination{display:flex;align-items:center;justify-content:center;gap:8px;padding:14px}
-    .pagination button{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:6px 12px;border-radius:6px;font-size:12px}
-    .pagination button:hover:not(:disabled){border-color:var(--accent)}
+    .pagination button{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:6px 12px;border-radius:8px;font-size:12px}
+    .pagination button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
     .pagination button:disabled{opacity:.4;cursor:not-allowed}
     .pagination .page-info{font-size:12px;color:var(--muted);min-width:120px;text-align:center}
     .page-size{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
-    .page-size select{padding:4px 6px;border-radius:6px;background:var(--bg);color:var(--text);border:1px solid var(--line)}
+    .page-size select{padding:4px 6px;border-radius:6px;background:var(--panel);color:var(--text);border:1px solid var(--line)}
 
     .empty{padding:40px;text-align:center;color:var(--muted)}
     .section{margin-bottom:24px}
@@ -122,14 +133,18 @@
 
     .tabbar{display:flex;gap:8px;margin-bottom:12px;border-bottom:1px solid var(--line)}
     .tab{padding:8px 14px;background:none;border:none;color:var(--muted);font-size:13px;border-bottom:2px solid transparent}
-    .tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+    .tab:hover{color:var(--accent)}
+    .tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
+    .split-nav{display:flex;flex-wrap:wrap;gap:8px;padding:10px 12px;margin-bottom:12px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+    .split-nav a{color:var(--muted);text-decoration:none;padding:3px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px;background:var(--bg)}
+    .split-nav a:hover{color:var(--accent);border-color:var(--accent)}
 
     .resource-table td,.resource-table th{font-size:12px}
     .target-filter{display:none;margin-bottom:12px}
     .target-filter.active{display:block}
 
     @media(max-width:900px){
-      .sidebar{position:absolute;right:0;top:0;bottom:0;z-index:20;flex:0 0 280px;max-width:85vw;box-shadow:-12px 0 30px rgba(0,0,0,.3)}
+      .sidebar{position:absolute;right:0;top:0;bottom:0;z-index:20;flex:0 0 280px;max-width:85vw;box-shadow:-12px 0 30px rgba(0,0,0,.12)}
       .cards{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
     }
   </style>
@@ -165,6 +180,21 @@
         <button class="tab" data-tab="resources">资源 ({{len .Resources}})</button>
         <button class="tab" data-tab="issues">诊断 ({{len .Issues}})</button>
       </div>
+
+      <nav class="split-nav">
+        <a href="API报告.html">API 端点报告</a>
+        <a href="URL报告.html">完整 URL 报告</a>
+        <a href="敏感信息报告.html">敏感信息报告</a>
+        <a href="参数报告.html">请求参数报告</a>
+        <a href="路由报告.html">路由探测报告</a>
+        <a href="资源报告.html">资源报告</a>
+        <a href="api绝对路径.txt">API 绝对路径.txt</a>
+        <a href="api相对路径.txt">API 相对路径.txt</a>
+        <a href="url.txt">url.txt</a>
+        <a href="路由.txt">路由.txt</a>
+        <a href="参数.txt">参数.txt</a>
+        <a href="敏感信息.txt">敏感信息.txt</a>
+      </nav>
 
       <div class="tab-panel active" id="panel-findings">
         <div class="target-filter" id="target-filter"></div>
@@ -203,7 +233,7 @@
       <div class="tab-panel" id="panel-endpoints" style="display:none">
         <div class="table-wrap">
           <table class="resource-table">
-            <thead><tr><th>方法</th><th>证据</th><th>URL</th><th>来源</th><th>授权</th><th>GET 状态</th></tr></thead>
+            <thead><tr><th style="width:80px">方法</th><th style="width:90px">证据</th><th>路径</th><th style="width:280px">来源</th><th style="width:70px">授权</th><th style="width:80px">GET 状态</th></tr></thead>
             <tbody id="endpoints-body"></tbody>
           </table>
         </div>
@@ -213,7 +243,7 @@
       <div class="tab-panel" id="panel-resources" style="display:none">
         <div class="table-wrap">
           <table class="resource-table">
-            <thead><tr><th>类型</th><th>URL</th><th>状态</th><th>大小</th><th>本地路径</th></tr></thead>
+            <thead><tr><th style="width:90px">类型</th><th>URL</th><th style="width:60px">状态</th><th style="width:90px">大小</th><th style="width:220px">本地路径</th></tr></thead>
             <tbody id="resources-body"></tbody>
           </table>
         </div>
@@ -223,7 +253,7 @@
       <div class="tab-panel" id="panel-issues" style="display:none">
         <div class="table-wrap">
           <table class="resource-table">
-            <thead><tr><th>代码</th><th>阶段</th><th>URL</th><th>消息</th></tr></thead>
+            <thead><tr><th style="width:110px">代码</th><th style="width:80px">阶段</th><th>URL</th><th>消息</th></tr></thead>
             <tbody id="issues-body"></tbody>
           </table>
         </div>
@@ -282,6 +312,7 @@ window.__DATA__ = {
   });
   const normalizeEndpoint = e => ({
     url: pick(e, 'url', 'URL'),
+    raw: pick(e, 'raw', 'Raw'),
     sourceURL: pick(e, 'source_url', 'SourceURL'),
     authorized: pick(e, 'authorized', 'Authorized'),
     statusCode: pick(e, 'status_code', 'StatusCode') || 0,
@@ -298,6 +329,24 @@ window.__DATA__ = {
   const resources = (data.resources || []).map(normalizeResource);
   const endpoints = (data.endpoints || []).map(normalizeEndpoint);
   const issues = (data.issues || []).map(normalizeIssue);
+
+  // Endpoint display: prefer the raw source path; fall back to the URL
+  // parsed into path + host so tables never show a folded absolute URL.
+  const endpointDisplay = e => {
+    let raw = e.raw || '';
+    if (raw && !/^https?:\/\//i.test(raw)) return { path: raw, host: '' };
+    try {
+      const u = new URL(e.url);
+      const path = u.pathname + u.search;
+      return { path: path || e.url, host: u.host };
+    } catch {
+      return { path: e.url, host: '' };
+    }
+  };
+  const methodTag = m => {
+    const v = (m || 'GET').toLowerCase();
+    return '<span class="method-tag ' + v + '">' + escapeHtml((m || 'GET').toUpperCase()) + '</span>';
+  };
 
   let state = {
     severity: '',
@@ -611,9 +660,13 @@ window.__DATA__ = {
     simplePage.endpoints = pageState.page;
     tbody.innerHTML = pageState.rows.length === 0
       ? '<tr><td colspan="6" class="empty">无端点</td></tr>'
-      : pageState.rows.map(e => '<tr><td>' + (e.method ? '<b>' + escapeHtml(e.method) + '</b>' : 'GET') + '</td>' +
-          '<td><span class="severity ' + (e.evidence === 'runtime' ? 'critical' : e.evidence === 'full-url' ? 'medium' : 'info') + '">' + escapeHtml(e.evidence || 'static') + '</span></td>' +
-          '<td><code>' + escapeHtml(e.url) + '</code></td><td><code>' + escapeHtml(e.sourceURL) + '</code></td><td>' + e.authorized + '</td><td>' + e.statusCode + '</td></tr>').join('');
+      : pageState.rows.map(e => {
+          const d = endpointDisplay(e);
+          return '<tr><td>' + methodTag(e.method) + '</td>' +
+            '<td><span class="severity ' + (e.evidence === 'runtime' ? 'critical' : e.evidence === 'full-url' ? 'medium' : 'info') + '">' + escapeHtml(e.evidence || 'static') + '</span></td>' +
+            '<td><code>' + escapeHtml(d.path) + '</code>' + (d.host ? '<div class="loc">' + escapeHtml(d.host) + '</div>' : '') + '</td>' +
+            '<td><code>' + escapeHtml(e.sourceURL) + '</code></td><td>' + e.authorized + '</td><td>' + e.statusCode + '</td></tr>';
+        }).join('');
     renderSimplePagination(
       document.getElementById('endpoints-pagination'),
       pageState,

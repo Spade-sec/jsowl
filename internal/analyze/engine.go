@@ -11,7 +11,7 @@ import (
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
-const contextLines = 3
+const contextLines = 2
 
 // Minified bundles keep megabytes on a single physical line; report contexts
 // are trimmed around the match so reports stay openable.

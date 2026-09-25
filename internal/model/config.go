@@ -27,22 +27,37 @@ func DefaultConfig() Config {
 			Cookies:       make(map[string]string),
 		},
 		Browser: BrowserConfig{
-			Wait:     3 * time.Second,
-			Idle:     800 * time.Millisecond,
-			Timeout:  45 * time.Second,
-			Headless: true,
+			Wait:         3 * time.Second,
+			Idle:         800 * time.Millisecond,
+			IdleMax:      5 * time.Second,
+			Timeout:      45 * time.Second,
+			Headless:     true,
+			MaxRoutes:    30,
+			CrawlTimeout: 60 * time.Second,
 		},
 		Concurrency: ConcurrencyConfig{
 			Targets:            4,
 			ResourcesPerTarget: 16,
 		},
 		Limits: LimitsConfig{
-			MaxDepth:     5,
-			MaxResources: 2000,
+			MaxDepth: 5,
+			// 0 means no resource cap: every reachable script and chunk is
+			// fetched and analyzed.
+			MaxResources: 0,
 			MaxBodySize:  10 * 1024 * 1024,
 		},
 		Scope: ScopeConfig{
 			FetchExternalScripts: true,
+			ProbeSourceMaps:      true,
+			SkipLibraryBundles:   true,
+			SourceMapBlacklist: []string{
+				// Library and vendor bundles: their maps are huge and their
+				// sources never describe the target application.
+				"chunk-vendors", "chunk-libs", "vendors~", "/vendor", "node_modules",
+				"/polyfills", "/runtime.", "/libs/", "axios", "lodash", "jquery",
+				"moment", "echarts", "element-ui", "elementui", "antd", "highlight.js",
+				"/umd/", "core-js", "regenerator-runtime", "zone.js", "bootstrap",
+			},
 			SuffixBlacklist: []string{
 				".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
 				".bmp", ".tif", ".tiff",
@@ -128,19 +143,29 @@ func (c Config) Validate() error {
 	if c.Request.Timeout <= 0 || c.Request.TargetTimeout <= 0 {
 		return errors.New("request timeouts must be positive")
 	}
-	if c.Browser.Wait < 0 || c.Browser.Idle < 0 || c.Browser.Timeout <= 0 {
+	if c.Browser.Wait < 0 || c.Browser.Idle < 0 ||
+		c.Browser.IdleMax < 0 || c.Browser.Timeout <= 0 {
 		return errors.New("browser durations are invalid")
+	}
+	if c.Browser.MaxRoutes < 0 || c.Browser.CrawlTimeout < 0 {
+		return errors.New("browser crawl bounds are invalid")
 	}
 	if c.Concurrency.Targets <= 0 || c.Concurrency.ResourcesPerTarget <= 0 {
 		return errors.New("concurrency values must be positive")
 	}
-	if c.Limits.MaxDepth < 0 || c.Limits.MaxResources <= 0 || c.Limits.MaxBodySize <= 0 {
+	// MaxResources accepts 0 for "no cap"; negative values are rejected.
+	if c.Limits.MaxDepth < 0 || c.Limits.MaxResources < 0 || c.Limits.MaxBodySize <= 0 {
 		return errors.New("resource limits are invalid")
 	}
 	if err := validateProxy(c.Request.Proxy); err != nil {
 		return err
 	}
 	for _, domain := range c.Scope.AllowDomains {
+		if err := validateAllowDomain(domain); err != nil {
+			return err
+		}
+	}
+	for _, domain := range c.Scope.RestrictDomains {
 		if err := validateAllowDomain(domain); err != nil {
 			return err
 		}

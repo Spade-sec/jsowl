@@ -60,6 +60,7 @@ jsowl -h
 | `-p, --proxy` | 覆盖 Surf 与 Rod 使用的 HTTP(S)/SOCKS5 代理 |
 | `--base-url` | 覆盖发现的相对 script、chunk、API 和 route 的解析基准 |
 | `-H, --header` | `Name: value` 请求头，可重复 |
+| `--scope` | 限制只能爬取的域名，逗号分隔、可重复；根目标始终允许，例：`--scope api.example.net,aaa.example.net` |
 | `-t, --threads` | 覆盖单目标资源并发数 |
 | `-s, --silent` | 不输出成功结果行，错误仍输出到 stderr |
 | `-v, --version` | 显示版本 |
@@ -82,8 +83,14 @@ browser:
   path: ""
   wait: 3s
   idle: 800ms
+  idle_max: 5s
   timeout: 45s
   headless: true
+  # 发现框架路由后逐个渲染，采集每个视图自己的请求、相对路径与敏感信息。
+  # 默认关闭：成倍放大请求量，且可能触发目标自身的写操作。
+  crawl_routes: false
+  max_routes: 30
+  crawl_timeout: 60s
   # 仅在受限容器/靶场中 Chrome 沙箱无法启动时开启。
   no_sandbox: false
   collector_script: ""
@@ -92,10 +99,14 @@ concurrency:
   resources_per_target: 16
 limits:
   max_depth: 5
-  max_resources: 2000
+  max_resources: 0
   max_body_size: 10MiB
 scope:
   allow_domains: []
+  restrict_domains: []
+  probe_source_maps: true
+  skip_library_bundles: true
+  source_map_blacklist: [chunk-vendors, chunk-libs, node_modules, axios, lodash]
   suffix_blacklist: [.png, .jpg, .svg, .css, .woff2, .mp4, .zip]
   fetch_external_scripts: true
   probe_external_endpoints: false
@@ -107,7 +118,13 @@ output:
   js_directory: js
 ```
 
-Rod 的路径、等待、网络空闲、超时、窗口模式和注入脚本只通过 YAML 配置。`wait` 默认 `3s`，表示页面加载并达到网络空闲后，继续等待异步 JS 的时间。`headless: false` 可显示浏览器窗口，等待时间仍受 `browser.timeout` 限制。
+Rod 的路径、等待、网络空闲、超时、窗口模式和注入脚本只通过 YAML 配置。`wait` 默认 `3s`，表示页面加载并达到网络空闲后，继续等待异步 JS 的时间。`idle` 是判定"网络空闲"所需的最短静止时长；带轮询心跳的 SPA 永远达不到，因此 `idle_max`（默认 `5s`）会封顶空闲等待，超时后放弃等待、直接用已收集内容拍快照（`0` 表示不限制）。`headless: false` 可显示浏览器窗口，等待时间仍受 `browser.timeout` 限制。auto 模式下浏览器阶段失败会降级到 direct 并向 stderr 打印一行 `browser degraded` 提示，原因同时记录在报告的 `browser_status` 中。
+
+`scope.skip_library_bundles` 默认 `true`。开启后扫描读取脚本头部的版权注释（`/*! ... */` 形式或含 `@license`、`@preserve`、`Copyright`、`licensed under` 的注释），若注释里出现已知库名（jQuery、lodash、axios、Vue、React、Element UI、echarts、core-js 等），就判定该脚本是第三方库 bundle，**跳过它的正则与 AST 解析**——库文件体量极大却不含目标业务接口，跳过既提速又降噪；资源本身仍会记录在资源报告里。source map 还原出的原始文件走同一判定。把 `skip_library_bundles` 设为 `false` 时**仍会解析**这些库文件，但结果全部打上 `vendor` 标记：API 报告与敏感信息报告的对应行会显示虚线 `vendor` 徽标，JSON 里为 `"vendor": true`——便于你把库噪声与业务结果分开看。同一路径若同时被业务代码引用，标记会被清除（业务引用优先）。
+
+`scope.probe_source_maps` 默认 `true`。开启后扫描会探测 JS source map：既解析脚本里 `//# sourceMappingURL=` 指向的 `.map`（含内联 base64 形式），也直接抓取以 `.map` 结尾的资源；拿到 map 后按 shuji 的方式把 `sourcesContent` 里的**原始未压缩源码**取出，重新跑一遍正则与 AST 提取，因此路径、参数与敏感信息都按还原后的源码统计。`source_map_blacklist` 里的片段命中 map 路径时跳过下载，默认覆盖 `chunk-vendors`、`chunk-libs`、`node_modules`、`axios`、`lodash`、`element-ui` 等库 bundle，避免为体积巨大的厂商 map 浪费请求与磁盘。
+
+`browser.crawl_routes` 默认 `false`。开启后，扫描会在发现框架路由时逐个渲染这些路由视图：前端路由守卫常常只是"未登录就跳转"、并非鉴权，直接导航往往能渲染出视图并触发它自己的接口调用，从而额外采集该视图的请求路径、相对路径、敏感信息与嵌套路由（新路由会继续入队递归）。为避免失控，遍历受 `max_routes`（默认 `30`）与 `crawl_timeout`（默认 `60s`）双重约束；路由按归一化路径去重（`/user/1` 与 `/user/2` 折叠为同一路由），并对渲染结果做归一化签名，视图相同的路由不再继续展开。渲染优先通过页面自身的 `router.push()` 做页内跳转，拿不到路由器时才整页导航。注意它会把扫描从"单页只读"变成"对目标的多页主动爬取"，请求量成倍增加，且视图内的页面脚本可能发起写操作，请仅在已授权范围内开启。
 
 JsOwl 始终显式解析本地浏览器路径，并禁用了 Rod 的自动下载路径。找不到 Chrome/Chromium 时，`browser` 模式返回错误，`auto` 模式降级到 Surf。
 
@@ -147,8 +164,18 @@ https://example.com/ [18240] [200] [text/html; charset=utf-8]
 ```text
 jsowl-report/
 └── example.com/
+    ├── report.html          # 交互式总览 + 分项报告导航（合并入口）
+    ├── API报告.html          # API 路径（相对/绝对分组，分页 + 上下文）
+    ├── URL报告.html          # 完整 http(s) URL（分页）
+    ├── 敏感信息报告.html
+    ├── 参数报告.html
+    ├── 路由报告.html
+    ├── 资源报告.html
+    ├── api绝对路径.txt       # /a/b/c 形式的纯路径
+    ├── api相对路径.txt       # a/b/c 形式的纯路径
+    ├── url.txt              # 完整 http(s) URL
+    ├── 路由.txt / 参数.txt / 敏感信息.txt
     ├── report.json
-    ├── report.html
     └── js/
         ├── app.<hash>.js
         └── chunks/

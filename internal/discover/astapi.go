@@ -1,704 +1,567 @@
 package discover
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/url"
-	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
-	"github.com/dop251/goja/ast"
-	"github.com/dop251/goja/file"
-	"github.com/dop251/goja/parser"
-	"github.com/dop251/goja/token"
+	sitter "github.com/tree-sitter/go-tree-sitter"
+	javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
-// apiCall is one HTTP call site recovered from the syntax tree.
-type apiCall struct {
-	Raw        string
-	Method     string
-	Evidence   string
-	Line       int
-	Column     int
-	Context    []model.ContextLine
-	BodyParams []string
-}
+// maxJSONFieldNames caps how many response field names one probe contributes.
+const maxJSONFieldNames = 32
 
-// APIFromAST parses JavaScript with a real grammar and recovers HTTP call
-// sites that regex extraction misses: wrapped clients, object-literal
-// arguments, template URLs and constant baseURL concatenation. Unparsable
-// input yields nothing; regex rules remain the fallback.
-func APIFromAST(source *url.URL, body []byte) []Candidate {
-	program, err := parser.ParseFile(nil, source.String(), body, 0)
-	if err != nil || program == nil || len(program.Body) == 0 {
+// maxJSONFieldDepth bounds how deep response field names are collected.
+const maxJSONFieldDepth = 2
+
+// JSONFieldNames returns the field names carried by a JSON body so they can be
+// fuzzed. An array contributes the keys of its first object element, and
+// nested objects contribute their own keys up to a small depth. Only names are
+// kept, never values, so no response body is persisted.
+func JSONFieldNames(body []byte) []string {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
 		return nil
 	}
-	w := &astWalker{
-		constants:   make(map[string]string),
-		instanceBSE: make(map[string]string),
-		file:        program.File,
-		source:      body,
-	}
-	w.walkProgram(program)
-
-	calls := w.calls
-	sort.SliceStable(calls, func(i, j int) bool {
-		if calls[i].Line != calls[j].Line {
-			return calls[i].Line < calls[j].Line
+	object := map[string]json.RawMessage{}
+	switch trimmed[0] {
+	case '{':
+		if err := json.Unmarshal(trimmed, &object); err != nil {
+			return nil
 		}
-		return calls[i].Raw < calls[j].Raw
+	case '[':
+		var list []map[string]json.RawMessage
+		if err := json.Unmarshal(trimmed, &list); err != nil || len(list) == 0 {
+			return nil
+		}
+		object = list[0]
+	default:
+		return nil
+	}
+	seen := make(map[string]struct{}, maxJSONFieldNames)
+	collectJSONFieldNames(object, 0, seen)
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func collectJSONFieldNames(
+	object map[string]json.RawMessage,
+	depth int,
+	seen map[string]struct{},
+) {
+	if depth > maxJSONFieldDepth || len(seen) >= maxJSONFieldNames {
+		return
+	}
+	for name, raw := range object {
+		seen[name] = struct{}{}
+		if len(seen) >= maxJSONFieldNames {
+			return
+		}
+		nested := bytes.TrimSpace(raw)
+		if len(nested) == 0 {
+			continue
+		}
+		switch nested[0] {
+		case '{':
+			var child map[string]json.RawMessage
+			if json.Unmarshal(nested, &child) == nil {
+				collectJSONFieldNames(child, depth+1, seen)
+			}
+		case '[':
+			var list []map[string]json.RawMessage
+			if json.Unmarshal(nested, &list) == nil && len(list) > 0 {
+				collectJSONFieldNames(list[0], depth+1, seen)
+			}
+		}
+	}
+}
+
+// maxBodyParams caps how many field names one request contributes.
+const maxBodyParams = 32
+
+type apiCall struct {
+	Raw, Method, Evidence string
+	Line, Column          int
+	Context               []model.ContextLine
+	BodyParams            []string
+}
+
+// APIFromAST parses JavaScript with Tree-sitter. Unlike the old parser, a
+// local syntax error does not discard valid call sites elsewhere in the file.
+func APIFromAST(source *url.URL, body []byte) []Candidate {
+	parser := sitter.NewParser()
+	defer parser.Close()
+	if err := parser.SetLanguage(sitter.NewLanguage(javascript.Language())); err != nil {
+		return nil
+	}
+	tree := parser.Parse(body, nil)
+	if tree == nil {
+		return nil
+	}
+	defer tree.Close()
+	root := tree.RootNode()
+	if root == nil || root.NamedChildCount() == 0 {
+		return nil
+	}
+	w := &astWalker{constants: map[string]string{}, instanceBSE: map[string]string{}, source: body}
+	w.walk(root)
+	sort.SliceStable(w.calls, func(i, j int) bool {
+		if w.calls[i].Line != w.calls[j].Line {
+			return w.calls[i].Line < w.calls[j].Line
+		}
+		return w.calls[i].Raw < w.calls[j].Raw
 	})
-	seen := make(map[string]struct{}, len(calls))
-	candidates := make([]Candidate, 0, len(calls))
-	for _, call := range calls {
+	seen := make(map[string]struct{}, len(w.calls))
+	result := make([]Candidate, 0, len(w.calls))
+	for _, call := range w.calls {
+		key := call.Method + "\x00" + call.Raw
 		if call.Raw == "" {
 			continue
 		}
-		key := call.Method + "\x00" + call.Raw
-		if _, duplicate := seen[key]; duplicate {
+		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
-		candidates = append(candidates, Candidate{
-			Raw: call.Raw, Kind: KindEndpoint,
-			Method: call.Method, Evidence: call.Evidence,
-			Line: call.Line, Column: call.Column,
-			ContextLines: call.Context, BodyParams: call.BodyParams,
-			Source: "ast",
+		result = append(result, Candidate{
+			Raw: call.Raw, Kind: KindEndpoint, Method: call.Method,
+			Evidence: call.Evidence, Line: call.Line, Column: call.Column,
+			ContextLines: call.Context, BodyParams: call.BodyParams, Source: "ast",
 		})
 	}
-	return candidates
+	return result
 }
 
 type astWalker struct {
 	calls       []apiCall
-	constants   map[string]string // identifier -> folded string constant
-	instanceBSE map[string]string // client instance identifier -> baseURL
-	file        *file.File
+	constants   map[string]string
+	instanceBSE map[string]string
 	source      []byte
 }
 
-func (w *astWalker) position(index file.Idx) (int, int) {
-	if w.file == nil {
-		return 0, 0
+func (w *astWalker) text(n *sitter.Node) string {
+	if n == nil || n.StartByte() > n.EndByte() || n.EndByte() > uint(len(w.source)) {
+		return ""
 	}
-	positioned := w.file.Position(int(index) - w.file.Base())
-	return positioned.Line, positioned.Column
+	return string(w.source[n.StartByte():n.EndByte()])
 }
 
-func (w *astWalker) walkProgram(program *ast.Program) {
-	for _, item := range program.Body {
-		w.walk(item)
-	}
-}
-
-func (w *astWalker) walk(node ast.Node) {
-	// Parser output can carry typed-nil nodes; a plain nil check below would
-	// not catch a nil pointer inside a non-nil interface.
-	if node == nil {
+func (w *astWalker) walk(n *sitter.Node) {
+	if n == nil {
 		return
 	}
-	if value := reflect.ValueOf(node); value.Kind() == reflect.Pointer && value.IsNil() {
-		return
+	switch n.Kind() {
+	case "variable_declarator":
+		w.bind(n.ChildByFieldName("name"), n.ChildByFieldName("value"))
+	case "assignment_expression":
+		w.bindAssignment(n.ChildByFieldName("left"), n.ChildByFieldName("right"))
+	case "call_expression":
+		w.visitCall(n)
 	}
-	switch n := node.(type) {
-	case *ast.Program:
-		for _, item := range n.Body {
-			w.walk(item)
-		}
-
-	case *ast.VariableDeclaration:
-		for _, binding := range n.List {
-			w.bind(binding)
-			w.walk(binding.Initializer)
-		}
-	case *ast.VariableStatement:
-		for _, binding := range n.List {
-			w.bind(binding)
-			w.walk(binding.Initializer)
-		}
-	case *ast.LexicalDeclaration:
-		for _, binding := range n.List {
-			w.bind(binding)
-			w.walk(binding.Initializer)
-		}
-	case *ast.AssignExpression:
-		w.walk(n.Left)
-		w.walk(n.Right)
-		if n.Operator != token.ASSIGN {
-			return
-		}
-		if identifier, ok := n.Left.(*ast.Identifier); ok {
-			if base, ok := axiosCreateBase(n.Right); ok {
-				w.instanceBSE[string(identifier.Name)] = base
-			} else if literal, ok := n.Right.(*ast.StringLiteral); ok {
-				w.constants[string(identifier.Name)] = string(literal.Value)
-			}
-		}
-		if base, ok := baseURLTarget(n.Left); ok {
-			w.instanceBSE[base] = baseURLFromExpression(n.Right, w.constants)
-		}
-
-	case *ast.BinaryExpression:
-		w.walk(n.Left)
-		w.walk(n.Right)
-	case *ast.UnaryExpression:
-		w.walk(n.Operand)
-	case *ast.ConditionalExpression:
-		w.walk(n.Test)
-		w.walk(n.Consequent)
-		w.walk(n.Alternate)
-	case *ast.SequenceExpression:
-		for _, expression := range n.Sequence {
-			w.walk(expression)
-		}
-	case *ast.CallExpression:
-		w.visitCall(n.Callee, n.ArgumentList)
-	case *ast.NewExpression:
-		w.walk(n.Callee)
-		for _, argument := range n.ArgumentList {
-			w.walk(argument)
-		}
-	case *ast.DotExpression:
-		w.walk(n.Left)
-	case *ast.PrivateDotExpression:
-		w.walk(n.Left)
-	case *ast.OptionalChain:
-		w.walk(n.Expression)
-	case *ast.Optional:
-		w.walk(n.Expression)
-	case *ast.BracketExpression:
-		w.walk(n.Left)
-		w.walk(n.Member)
-	case *ast.ArrayLiteral:
-		for _, value := range n.Value {
-			w.walk(value)
-		}
-	case *ast.ObjectLiteral:
-		for _, property := range n.Value {
-			w.walkProperty(property)
-		}
-	case *ast.ObjectPattern:
-		for _, property := range n.Properties {
-			w.walkProperty(property)
-		}
-	case *ast.ArrayPattern:
-		for _, element := range n.Elements {
-			w.walk(element)
-		}
-		w.walk(n.Rest)
-	case *ast.TemplateLiteral:
-		for _, expression := range n.Expressions {
-			w.walk(expression)
-		}
-	case *ast.FunctionLiteral:
-		w.walk(n.Body)
-	case *ast.ArrowFunctionLiteral:
-		switch body := n.Body.(type) {
-		case *ast.BlockStatement:
-			w.walk(body)
-		case *ast.ExpressionBody:
-			w.walk(body.Expression)
-		}
-	case *ast.ClassLiteral:
-		for _, element := range n.Body {
-			w.walkClassElement(element)
-		}
-	case *ast.ClassStaticBlock:
-		w.walk(n.Block)
-	case *ast.SpreadElement:
-		w.walk(n.Expression)
-	case *ast.BlockStatement:
-		for _, item := range n.List {
-			w.walk(item)
-		}
-	case *ast.ExpressionStatement:
-		w.walk(n.Expression)
-	case *ast.IfStatement:
-		w.walk(n.Test)
-		w.walk(n.Consequent)
-		w.walk(n.Alternate)
-	case *ast.ForStatement:
-		switch initializer := n.Initializer.(type) {
-		case *ast.ForLoopInitializerExpression:
-			w.walk(initializer.Expression)
-		case *ast.ForLoopInitializerVarDeclList:
-			for _, binding := range initializer.List {
-				w.bind(binding)
-				w.walk(binding.Initializer)
-			}
-		case *ast.ForLoopInitializerLexicalDecl:
-			for _, binding := range initializer.LexicalDeclaration.List {
-				w.bind(binding)
-				w.walk(binding.Initializer)
-			}
-		}
-		w.walk(n.Test)
-		w.walk(n.Update)
-		w.walk(n.Body)
-	case *ast.ForInStatement:
-		w.walkForInto(n.Into)
-		w.walk(n.Source)
-		w.walk(n.Body)
-	case *ast.ForOfStatement:
-		w.walkForInto(n.Into)
-		w.walk(n.Source)
-		w.walk(n.Body)
-	case *ast.WhileStatement:
-		w.walk(n.Test)
-		w.walk(n.Body)
-	case *ast.DoWhileStatement:
-		w.walk(n.Body)
-		w.walk(n.Test)
-	case *ast.SwitchStatement:
-		w.walk(n.Discriminant)
-		for _, item := range n.Body {
-			w.walk(item.Test)
-			for _, statement := range item.Consequent {
-				w.walk(statement)
-			}
-		}
-	case *ast.TryStatement:
-		w.walk(n.Body)
-		if n.Catch != nil {
-			w.walk(n.Catch.Body)
-		}
-		w.walk(n.Finally)
-	case *ast.ReturnStatement:
-		w.walk(n.Argument)
-	case *ast.ThrowStatement:
-		w.walk(n.Argument)
-	case *ast.LabelledStatement:
-		w.walk(n.Statement)
-	case *ast.WithStatement:
-		w.walk(n.Object)
-		w.walk(n.Body)
-	case *ast.FunctionDeclaration:
-		w.walk(n.Function.Body)
-	case *ast.ClassDeclaration:
-		for _, element := range n.Class.Body {
-			w.walkClassElement(element)
-		}
-	case *ast.AwaitExpression:
-		w.walk(n.Argument)
-	case *ast.YieldExpression:
-		w.walk(n.Argument)
+	// ERROR nodes are named nodes too. Walking through them is intentional:
+	// valid descendants in malformed or truncated bundles remain recoverable.
+	for i := uint(0); i < n.NamedChildCount(); i++ {
+		w.walk(n.NamedChild(i))
 	}
 }
 
-func (w *astWalker) walkProperty(property ast.Property) {
-	switch p := property.(type) {
-	case *ast.PropertyKeyed:
-		w.walk(p.Key)
-		w.walk(p.Value)
-	case *ast.PropertyShort:
-		w.walk(p.Initializer)
+func (w *astWalker) bind(nameNode, value *sitter.Node) {
+	nameNode, value = unwrap(nameNode), unwrap(value)
+	if nameNode == nil || nameNode.Kind() != "identifier" || value == nil {
+		return
+	}
+	name := w.text(nameNode)
+	if base, ok := w.axiosCreateBase(value); ok {
+		w.instanceBSE[name] = base
+		return
+	}
+	if value.Kind() == "string" {
+		w.constants[name] = decodeJSString(w.text(value))
 	}
 }
 
-func (w *astWalker) walkClassElement(element ast.ClassElement) {
-	switch e := element.(type) {
-	case *ast.MethodDefinition:
-		if e.Body != nil {
-			w.walk(e.Body.Body)
+func (w *astWalker) bindAssignment(left, right *sitter.Node) {
+	left, right = unwrap(left), unwrap(right)
+	if left == nil || right == nil {
+		return
+	}
+	if left.Kind() == "identifier" {
+		name := w.text(left)
+		if base, ok := w.axiosCreateBase(right); ok {
+			w.instanceBSE[name] = base
+		} else if right.Kind() == "string" {
+			w.constants[name] = decodeJSString(w.text(right))
 		}
-	case *ast.FieldDefinition:
-		w.walk(e.Initializer)
-	case *ast.ClassStaticBlock:
-		w.walk(e.Block)
+	}
+	if name, ok := w.baseURLTarget(left); ok {
+		w.instanceBSE[name] = w.baseURLFromExpression(right)
 	}
 }
 
-func (w *astWalker) walkForInto(into ast.ForInto) {
-	switch i := into.(type) {
-	case *ast.ForIntoVar:
-		w.bind(i.Binding)
-		w.walk(i.Binding.Initializer)
-	case *ast.ForIntoExpression:
-		w.walk(i.Expression)
+func (w *astWalker) visitCall(call *sitter.Node) {
+	callee := unwrap(call.ChildByFieldName("function"))
+	args := w.arguments(call)
+	if callee == nil {
+		return
 	}
-}
+	method, urlArg, bodyArg := "", -1, -1
+	var urlOverride *sitter.Node
 
-// bind records string-literal constants for later URL folding, and captures
-// `client = axios.create({baseURL: ...})` instance bindings.
-func (w *astWalker) bind(binding *ast.Binding) {
-	if binding == nil || binding.Initializer == nil {
-		return
-	}
-	identifier, ok := binding.Target.(*ast.Identifier)
-	if !ok {
-		return
-	}
-	if base, ok := axiosCreateBase(binding.Initializer); ok {
-		w.instanceBSE[string(identifier.Name)] = base
-		return
-	}
-	literal, ok := binding.Initializer.(*ast.StringLiteral)
-	if !ok {
-		return
-	}
-	w.constants[string(identifier.Name)] = string(literal.Value)
-}
-
-// visitCall inspects one call site and records it when the callee matches a
-// known HTTP client pattern.
-func (w *astWalker) visitCall(callee ast.Expression, args []ast.Expression) {
-	w.walk(callee)
-
-	method := ""
-	urlArgument := -1
-	bodyArgument := -1
-	var urlOverride ast.Expression
-	switch expressed := unwrap(callee).(type) {
-	case *ast.DotExpression:
-		property := string(expressed.Identifier.Name)
-		receiver := outermostIdentifierString(expressed.Left)
+	if object, property, ok := w.memberParts(callee); ok {
+		receiver := w.outermostIdentifier(object)
 		switch property {
 		case "open":
-			// XMLHttpRequest.open(method, url, ...)
-			if len(args) >= 2 {
-				if literal, ok := unwrap(args[0]).(*ast.StringLiteral); ok {
-					method = strings.ToUpper(string(literal.Value))
-				}
-				urlArgument = 1
+			if len(args) >= 2 && kind(unwrap(args[0])) == "string" {
+				method, urlArg = strings.ToUpper(decodeJSString(w.text(unwrap(args[0])))), 1
 			}
-		case "get", "post", "put", "patch", "delete", "head", "options",
-			"getJSON", "Get", "Post", "Put", "Patch", "Delete", "Head":
-			method = strings.ToUpper(strings.TrimSuffix(property, "JSON"))
-			urlArgument = 0
-			writeVerb := method == "POST" || method == "PUT" ||
-				method == "PATCH" || method == "DELETE"
-			if head, ok := unwrap(expressed.Left).(*ast.CallExpression); ok {
-				if calleeID, ok := unwrap(head.Callee).(*ast.Identifier); ok &&
-					string(calleeID.Name) == "wretch" {
-					// wretch(url).post(body): the URL lives in the head call.
-					if headURL := arg(head.ArgumentList, 0); headURL != nil {
-						urlOverride = headURL
-						urlArgument = -1
+		case "get", "post", "put", "patch", "delete", "head", "options", "getJSON",
+			"Get", "Post", "Put", "Patch", "Delete", "Head":
+			method, urlArg = strings.ToUpper(strings.TrimSuffix(property, "JSON")), 0
+			write := method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE"
+			if kind(object) == "call_expression" {
+				head := unwrap(object.ChildByFieldName("function"))
+				if kind(head) == "identifier" && w.text(head) == "wretch" {
+					headArgs := w.arguments(object)
+					if len(headArgs) > 0 {
+						urlOverride, urlArg = headArgs[0], -1
 					}
-					if writeVerb {
-						bodyArgument = 0
-					} else {
-						bodyArgument = -1
+					if write {
+						bodyArg = 0
 					}
 				}
 			}
-			switch {
-			case receiver == "ky":
-				// ky.post(url, {json: ...}) keeps the body in the options.
-				if arg(args, 1) != nil {
-					bodyArgument = -4
-				}
-			case writeVerb && bodyArgument == -1:
-				bodyArgument = 1
+			if receiver == "ky" && len(args) > 1 {
+				bodyArg = -4
+			} else if write && bodyArg == -1 {
+				bodyArg = 1
+			} else if bodyArg == -1 && len(args) > 1 {
+				// axios-style trailing config object: {params:{...}} carries
+				// the query fields, {data:{...}} the body fields.
+				bodyArg = -7
 			}
 		case "request", "ajax", "api":
-			method, urlArgument = objectCallArgs(args)
-			bodyArgument = -2 // body rides inside the options object
+			method, urlArg, bodyArg = w.objectCallArgs(args)
 		case "fetch":
-			method = "GET"
-			urlArgument = 0
-			if fromOptions := optionsMethod(arg(args, 1)); fromOptions != "" {
-				method = fromOptions
-			}
-			if arg(args, 1) != nil {
-				bodyArgument = -3 // body may live in the options object
-			}
-		}
-		if receiver == "wx" || receiver == "uni" || receiver == "taro" ||
-			receiver == "Taro" || receiver == "my" || receiver == "tt" {
-			if property == "request" {
-				method, urlArgument = objectCallArgs(args)
-				if method == "" {
-					method = "GET" // mini-program requests default to GET
+			method, urlArg = "GET", 0
+			if len(args) > 1 {
+				if m := w.optionsMethod(args[1]); m != "" {
+					method = m
 				}
-				bodyArgument = -2 // mini-program bodies ride in {data: ...}
+				bodyArg = -3
 			}
 		}
-	case *ast.Identifier:
-		switch expressed.Name {
-		case "fetch":
-			method = "GET"
-			urlArgument = 0
-			if fromOptions := optionsMethod(arg(args, 1)); fromOptions != "" {
-				method = fromOptions
+		if isMiniProgram(receiver) && property == "request" {
+			method, urlArg, bodyArg = w.objectCallArgs(args)
+			if method == "" {
+				method = "GET"
 			}
-			if arg(args, 1) != nil {
-				bodyArgument = -3 // body may live in the options object
+		}
+	} else if callee.Kind() == "identifier" {
+		switch w.text(callee) {
+		case "fetch":
+			method, urlArg = "GET", 0
+			if len(args) > 1 {
+				if m := w.optionsMethod(args[1]); m != "" {
+					method = m
+				}
+				bodyArg = -3
 			}
 		case "ajax", "api":
-			method, urlArgument = objectCallArgs(args)
-			bodyArgument = -2 // body rides inside the options object
+			method, urlArg, bodyArg = w.objectCallArgs(args)
 		case "request":
-			// umi-request(url, {method, data})
-			method = "GET"
-			urlArgument = 0
-			if fromOptions := optionsMethod(arg(args, 1)); fromOptions != "" {
-				method = fromOptions
-			}
-			if arg(args, 1) != nil {
-				bodyArgument = -6
+			method, urlArg = "GET", 0
+			if len(args) > 1 {
+				if m := w.optionsMethod(args[1]); m != "" {
+					method = m
+				}
+				bodyArg = -6
 			}
 		case "useSWR":
-			// React data-fetching hook; the first argument is a GET URL.
-			method = "GET"
-			urlArgument = 0
+			method, urlArg = "GET", 0
 		case "$fetch", "ofetch", "$ofetch", "ky":
-			// ofetch/ky callables: url first, options object second.
-			method = "GET"
-			urlArgument = 0
-			if fromOptions := optionsMethod(arg(args, 1)); fromOptions != "" {
-				method = fromOptions
-			}
-			if arg(args, 1) != nil {
-				bodyArgument = -5 // {body} for ofetch, {json} for ky
+			method, urlArg = "GET", 0
+			if len(args) > 1 {
+				if m := w.optionsMethod(args[1]); m != "" {
+					method = m
+				}
+				bodyArg = -5
 			}
 		}
 	}
-	var urlExpression ast.Expression
-	switch {
-	case urlOverride != nil:
-		urlExpression = urlOverride
-	case urlArgument >= 0 && urlArgument < len(args):
-		urlExpression = args[urlArgument]
-	default:
+
+	// A wrapper call hides the request shape behind a call expression, as in
+	// Object(service["a"])({url:"/soap/x", method:"post"}): the callee is not
+	// an identifier or a member expression, so no branch above matched. Fall
+	// back to the object-literal form whenever the first argument is one.
+	if urlArg < 0 && len(args) > 0 {
+		if first := unwrap(args[0]); kind(first) == "object" &&
+			w.objectValue(first, "url") != nil {
+			method, urlArg, bodyArg = w.objectCallArgs(args)
+		}
+	}
+
+	var urlNode *sitter.Node
+	if urlOverride != nil {
+		urlNode = urlOverride
+	} else if urlArg >= 0 && urlArg < len(args) {
+		urlNode = args[urlArg]
+	} else {
 		return
 	}
-	raw, evidence := w.resolveURLExpression(urlExpression)
+	raw, evidence := w.resolveURLExpression(urlNode)
 	if raw == "" {
 		return
 	}
-	line, column := w.position(callee.Idx0())
-	context := extractContext(w.source, int(callee.Idx0())-1, contextSpanLines)
-	bodyParams := w.bodyParameterNames(args, method, urlArgument, bodyArgument)
-	w.calls = append(w.calls, apiCall{
-		Raw: raw, Method: method, Evidence: evidence,
-		Line: line, Column: column, Context: context, BodyParams: bodyParams,
-	})
-	// Keep the static relative endpoint and additionally emit the client's
-	// bound baseURL folded in, upgraded to full-url evidence.
-	if dot, ok := unwrap(callee).(*ast.DotExpression); ok && evidence == model.EvidenceStatic {
-		if base, ok := w.instanceBSE[outermostIdentifierString(dot.Left)]; ok && base != "" {
+	// A call like map.get("ArrowDown") matches the generic HTTP-verb branch;
+	// only path-shaped values are real request targets.
+	if !looksLikePath(raw) {
+		return
+	}
+	point := callee.StartPosition()
+	line, column := int(point.Row)+1, int(point.Column)+1
+	ctx := extractContext(w.source, int(callee.StartByte()), contextSpanLines)
+	params := w.bodyParameterNames(args, bodyArg)
+	w.calls = append(w.calls, apiCall{raw, method, evidence, line, column, ctx, params})
+	if object, _, ok := w.memberParts(callee); ok && evidence == model.EvidenceStatic {
+		if base := w.instanceBSE[w.outermostIdentifier(object)]; base != "" {
 			if joined := joinBaseURL(base, raw); joined != "" {
-				w.calls = append(w.calls, apiCall{
-					Raw: joined, Method: method, Evidence: model.EvidenceFullURL,
-					Line: line, Column: column, Context: context, BodyParams: bodyParams,
-				})
+				w.calls = append(w.calls, apiCall{joined, method, model.EvidenceFullURL, line, column, ctx, params})
 			}
 		}
 	}
+}
+
+func isMiniProgram(s string) bool {
+	return s == "wx" || s == "uni" || s == "taro" || s == "Taro" || s == "my" || s == "tt"
+}
+
+func (w *astWalker) arguments(call *sitter.Node) []*sitter.Node {
+	n := call.ChildByFieldName("arguments")
+	if kind(n) != "arguments" {
+		return nil
+	}
+	result := make([]*sitter.Node, 0, n.NamedChildCount())
+	for i := uint(0); i < n.NamedChildCount(); i++ {
+		result = append(result, n.NamedChild(i))
+	}
+	return result
 }
 
 // objectCallArgs handles request({url, method}) and $.ajax({url, type}).
-func objectCallArgs(args []ast.Expression) (method string, urlIndex int) {
-	urlIndex = -1
+func (w *astWalker) objectCallArgs(args []*sitter.Node) (string, int, int) {
 	if len(args) == 0 {
-		return "", -1
+		return "", -1, -2
 	}
-	switch first := unwrap(args[0]).(type) {
-	case *ast.ObjectLiteral:
-		for _, property := range first.Value {
-			keyed, ok := property.(*ast.PropertyKeyed)
-			if !ok {
-				continue
-			}
-			literal, ok := unwrap(keyed.Value).(*ast.StringLiteral)
-			if !ok {
-				continue
-			}
-			switch propertyName(keyed.Key) {
-			case "url":
-				urlIndex = 0
-			case "method", "type":
-				method = strings.ToUpper(string(literal.Value))
+	first := unwrap(args[0])
+	if kind(first) == "object" {
+		urlIndex := -1
+		if w.objectValue(first, "url") != nil {
+			urlIndex = 0
+		}
+		method := ""
+		for _, key := range []string{"method", "type"} {
+			if value := unwrap(w.objectValue(first, key)); kind(value) == "string" {
+				method = strings.ToUpper(decodeJSString(w.text(value)))
 			}
 		}
-		return method, urlIndex
-	case *ast.StringLiteral, *ast.TemplateLiteral:
-		return "", 0
+		return method, urlIndex, -2
 	}
-	return "", -1
+	if kind(first) == "string" || kind(first) == "template_string" {
+		return "", 0, -2
+	}
+	return "", -1, -2
 }
 
-// resolveURLExpression extracts a URL string from literals, identifier
-// constants, concatenation folds, and templates (as {} placeholders).
-func (w *astWalker) resolveURLExpression(expression ast.Expression) (string, string) {
-	switch expressed := unwrap(expression).(type) {
-	case *ast.StringLiteral:
-		return string(expressed.Value), evidenceFor(string(expressed.Value))
-	case *ast.Identifier:
-		if value, ok := w.constants[string(expressed.Name)]; ok {
+func (w *astWalker) resolveURLExpression(n *sitter.Node) (string, string) {
+	n = unwrap(n)
+	switch kind(n) {
+	case "string":
+		value := decodeJSString(w.text(n))
+		return value, evidenceFor(value)
+	case "identifier":
+		if value, ok := w.constants[w.text(n)]; ok {
 			return value, evidenceFor(value)
 		}
-	case *ast.TemplateLiteral:
-		return templatePlaceholder(expressed), model.EvidenceStatic
-	case *ast.BinaryExpression:
-		if expressed.Operator == token.PLUS {
-			if raw, ok := w.foldConcat(expressed, 0); ok {
-				return raw, evidenceFor(raw)
+	case "template_string":
+		return w.templatePlaceholder(n), model.EvidenceStatic
+	case "binary_expression":
+		if w.text(n.ChildByFieldName("operator")) == "+" {
+			if value, ok := w.foldConcat(n, 0); ok {
+				return value, evidenceFor(value)
 			}
 		}
-	case *ast.ObjectLiteral:
-		for _, property := range expressed.Value {
-			keyed, ok := property.(*ast.PropertyKeyed)
-			if !ok || propertyName(keyed.Key) != "url" {
-				continue
-			}
-			return w.resolveURLExpression(keyed.Value)
+	case "object":
+		if value := w.objectValue(n, "url"); value != nil {
+			return w.resolveURLExpression(value)
 		}
 	}
 	return "", ""
 }
 
-// bodyParameterNames collects body field names for write-method calls:
-// the second positional argument, the options object's data/body property,
-// or FormData.append keys seen inside the call arguments.
-func (w *astWalker) bodyParameterNames(args []ast.Expression, method string, urlArgument, bodyArgument int) []string {
-	var body ast.Expression
-	switch bodyArgument {
-	case -2: // request({url, method, data: {...}})
-		if options, ok := unwrap(arg(args, 0)).(*ast.ObjectLiteral); ok {
-			for _, property := range options.Value {
-				keyed, ok := property.(*ast.PropertyKeyed)
-				if !ok || propertyName(keyed.Key) != "data" {
-					continue
-				}
-				body = keyed.Value
+// bodyParameterNames lists the field names a request carries so they can be
+// fuzzed. It accepts the request-body shapes of the common clients, plus
+// axios-style "params" (query) objects, and reads JSON string literals
+// because minified bundles often inline the payload that way.
+func (w *astWalker) bodyParameterNames(args []*sitter.Node, bodyArg int) []string {
+	candidates := make([]*sitter.Node, 0, 2)
+	appendValue := func(object *sitter.Node, keys ...string) {
+		for _, key := range keys {
+			if value := w.objectValue(object, key); value != nil {
+				candidates = append(candidates, value)
 			}
 		}
-	case -3: // fetch/ofetch(url, {body: ...})
-		if options, ok := unwrap(arg(args, 1)).(*ast.ObjectLiteral); ok {
-			for _, property := range options.Value {
-				keyed, ok := property.(*ast.PropertyKeyed)
-				if !ok || propertyName(keyed.Key) != "body" {
-					continue
-				}
-				body = keyed.Value
-			}
+	}
+	switch bodyArg {
+	case -2:
+		if len(args) > 0 {
+			appendValue(unwrap(args[0]), "data", "params")
 		}
-	case -4: // ky.post(url, {json: ...})
-		if options, ok := unwrap(arg(args, 1)).(*ast.ObjectLiteral); ok {
-			for _, property := range options.Value {
-				keyed, ok := property.(*ast.PropertyKeyed)
-				if !ok || propertyName(keyed.Key) != "json" {
-					continue
-				}
-				body = keyed.Value
-			}
+	case -3:
+		if len(args) > 1 {
+			appendValue(unwrap(args[1]), "body")
 		}
-	case -6: // umi-request(url, {data: ...})
-		if options, ok := unwrap(arg(args, 1)).(*ast.ObjectLiteral); ok {
-			for _, property := range options.Value {
-				keyed, ok := property.(*ast.PropertyKeyed)
-				if !ok || propertyName(keyed.Key) != "data" {
-					continue
-				}
-				body = keyed.Value
-			}
+	case -4:
+		if len(args) > 1 {
+			appendValue(unwrap(args[1]), "json")
 		}
-	case -5: // ofetch/$fetch/ky(url, {body|json: ...})
-		if options, ok := unwrap(arg(args, 1)).(*ast.ObjectLiteral); ok {
-			for _, property := range options.Value {
-				keyed, ok := property.(*ast.PropertyKeyed)
-				if !ok {
-					continue
-				}
-				switch propertyName(keyed.Key) {
-				case "body", "json":
-					body = keyed.Value
-				}
-			}
+	case -5:
+		if len(args) > 1 {
+			appendValue(unwrap(args[1]), "body", "json")
+		}
+	case -6:
+		if len(args) > 1 {
+			appendValue(unwrap(args[1]), "data", "params")
+		}
+	case -7:
+		if len(args) > 1 {
+			appendValue(unwrap(args[1]), "params", "data", "body", "json")
 		}
 	default:
-		if bodyArgument >= 0 && bodyArgument < len(args) {
-			body = args[bodyArgument]
+		if bodyArg >= 0 && bodyArg < len(args) {
+			candidates = append(candidates, args[bodyArg])
 		}
 	}
-	if body == nil {
-		return nil
-	}
-	// JSON.stringify({...}) is the most common fetch body wrapper.
-	if call, ok := unwrap(body).(*ast.CallExpression); ok {
-		if isStringifyCall(call.Callee) {
-			body = arg(call.ArgumentList, 0)
-		}
-	}
-	if object, ok := unwrap(body).(*ast.ObjectLiteral); ok {
-		return objectPropertyNames(object)
-	}
-	return nil
-}
 
-// isStringifyCall reports whether the callee is JSON.stringify.
-func isStringifyCall(callee ast.Expression) bool {
-	dot, ok := unwrap(callee).(*ast.DotExpression)
-	return ok && string(dot.Identifier.Name) == "stringify"
-}
-
-// objectPropertyNames lists the top-level keys of an object literal,
-// including shorthand properties like {username, password}.
-func objectPropertyNames(object *ast.ObjectLiteral) []string {
-	const maxBodyParams = 32
-	names := make([]string, 0, len(object.Value))
-	for _, property := range object.Value {
-		name := ""
-		switch p := property.(type) {
-		case *ast.PropertyKeyed:
-			name = propertyName(p.Key)
-		case *ast.PropertyShort:
-			name = string(p.Name.Name)
+	names := make([]string, 0, 8)
+	seen := make(map[string]struct{})
+	for _, candidate := range candidates {
+		body := unwrap(candidate)
+		if kind(body) == "call_expression" &&
+			w.isStringifyCall(body.ChildByFieldName("function")) {
+			if wrapped := w.arguments(body); len(wrapped) > 0 {
+				body = unwrap(wrapped[0])
+			}
 		}
-		if name == "" {
-			continue
-		}
-		names = append(names, name)
-		if len(names) >= maxBodyParams {
-			break
+		for _, name := range w.parameterNamesOf(body) {
+			if _, duplicate := seen[name]; duplicate {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
 		}
 	}
 	return names
 }
 
-// optionsMethod reads {method: "..."} / {type: "..."} option objects.
-func optionsMethod(expression ast.Expression) string {
-	object, ok := unwrap(expression).(*ast.ObjectLiteral)
-	if !ok {
+// parameterNamesOf reads field names from an object literal or from a JSON
+// string literal (the payload inlined as text); anything else yields nothing.
+func (w *astWalker) parameterNamesOf(node *sitter.Node) []string {
+	switch kind(node) {
+	case "object":
+		return w.objectPropertyNames(node)
+	case "string":
+		return jsonObjectKeys(decodeJSString(w.text(node)))
+	case "template_string":
+		return jsonObjectKeys(w.templatePlaceholder(node))
+	}
+	return nil
+}
+
+// jsonObjectKeys returns the top-level keys of a JSON object literal so a
+// payload written as '{"a":1,"b":2}' still yields fuzzable field names.
+func jsonObjectKeys(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "{") ||
+		!json.Valid([]byte(trimmed)) {
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &object); err != nil {
+		return nil
+	}
+	names := make([]string, 0, len(object))
+	for name := range object {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) > maxBodyParams {
+		names = names[:maxBodyParams]
+	}
+	return names
+}
+
+func (w *astWalker) isStringifyCall(n *sitter.Node) bool {
+	object, property, ok := w.memberParts(unwrap(n))
+	return ok && property == "stringify" && w.outermostIdentifier(object) == "JSON"
+}
+
+func (w *astWalker) objectPropertyNames(object *sitter.Node) []string {
+
+	var names []string
+	for i := uint(0); i < object.NamedChildCount() && len(names) < maxBodyParams; i++ {
+		child, name := object.NamedChild(i), ""
+		if child.Kind() == "pair" {
+			name = w.propertyName(child.ChildByFieldName("key"))
+		} else if child.Kind() == "shorthand_property_identifier" || child.Kind() == "shorthand_property_identifier_pattern" {
+			name = w.text(child)
+		}
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+func (w *astWalker) optionsMethod(n *sitter.Node) string {
+	n = unwrap(n)
+	if kind(n) != "object" {
 		return ""
 	}
-	for _, property := range object.Value {
-		keyed, ok := property.(*ast.PropertyKeyed)
-		if !ok {
-			continue
-		}
-		name := propertyName(keyed.Key)
-		if name != "method" && name != "type" {
-			continue
-		}
-		if literal, ok := unwrap(keyed.Value).(*ast.StringLiteral); ok {
-			return strings.ToUpper(string(literal.Value))
+	for _, key := range []string{"method", "type"} {
+		if value := unwrap(w.objectValue(n, key)); kind(value) == "string" {
+			return strings.ToUpper(decodeJSString(w.text(value)))
 		}
 	}
 	return ""
 }
 
-// foldConcat folds identifier/string concatenation chains such as
-// baseURL + "/user/" + id; unknown identifiers become {} placeholders.
-func (w *astWalker) foldConcat(expression ast.Expression, depth int) (string, bool) {
+func (w *astWalker) foldConcat(n *sitter.Node, depth int) (string, bool) {
 	if depth > 8 {
 		return "", false
 	}
-	switch expressed := unwrap(expression).(type) {
-	case *ast.BinaryExpression:
-		if expressed.Operator != token.PLUS {
+	n = unwrap(n)
+	switch kind(n) {
+	case "binary_expression":
+		if w.text(n.ChildByFieldName("operator")) != "+" {
 			return "", false
 		}
-		left, leftOK := w.foldConcat(expressed.Left, depth+1)
-		right, rightOK := w.foldConcat(expressed.Right, depth+1)
-		return left + right, leftOK && rightOK
-	case *ast.StringLiteral:
-		return string(expressed.Value), true
-	case *ast.Identifier:
-		if value, ok := w.constants[string(expressed.Name)]; ok {
+		left, lok := w.foldConcat(n.ChildByFieldName("left"), depth+1)
+		right, rok := w.foldConcat(n.ChildByFieldName("right"), depth+1)
+		return left + right, lok && rok
+	case "string":
+		return decodeJSString(w.text(n)), true
+	case "identifier":
+		if value, ok := w.constants[w.text(n)]; ok {
 			return value, true
 		}
 		return "{}", true
@@ -706,21 +569,20 @@ func (w *astWalker) foldConcat(expression ast.Expression, depth int) (string, bo
 	return "", false
 }
 
-// templatePlaceholder renders `…${expr}…` templates with {} placeholders so
-// parameterised endpoints still appear in reports.
-func templatePlaceholder(template *ast.TemplateLiteral) string {
-	var builder strings.Builder
-	for index, element := range template.Elements {
-		if element.Valid {
-			builder.WriteString(string(element.Parsed))
-		} else {
-			builder.WriteString(element.Literal)
-		}
-		if index < len(template.Expressions) {
-			builder.WriteString("{}")
+func (w *astWalker) templatePlaceholder(n *sitter.Node) string {
+	var result strings.Builder
+	for i := uint(0); i < n.NamedChildCount(); i++ {
+		child := n.NamedChild(i)
+		switch child.Kind() {
+		case "string_fragment":
+			result.WriteString(w.text(child))
+		case "escape_sequence":
+			result.WriteString(decodeJSEscapes(w.text(child)))
+		case "template_substitution":
+			result.WriteString("{}")
 		}
 	}
-	return builder.String()
+	return result.String()
 }
 
 func evidenceFor(raw string) string {
@@ -731,63 +593,47 @@ func evidenceFor(raw string) string {
 	return model.EvidenceStatic
 }
 
-// axiosCreateBase recognises axios.create({baseURL: ...}) and returns the
-// folded baseURL value.
-func axiosCreateBase(expression ast.Expression) (string, bool) {
-	call, ok := unwrap(expression).(*ast.CallExpression)
-	if !ok {
+func (w *astWalker) axiosCreateBase(n *sitter.Node) (string, bool) {
+	n = unwrap(n)
+	if kind(n) != "call_expression" {
 		return "", false
 	}
-	dot, ok := unwrap(call.Callee).(*ast.DotExpression)
-	if !ok || string(dot.Identifier.Name) != "create" {
+	object, property, ok := w.memberParts(unwrap(n.ChildByFieldName("function")))
+	if !ok || property != "create" || w.outermostIdentifier(object) != "axios" {
 		return "", false
 	}
-	receiver := unwrap(dot.Left)
-	name := ""
-	if identifier, ok := receiver.(*ast.Identifier); ok {
-		name = string(identifier.Name)
-	}
-	if name != "axios" {
+	args := w.arguments(n)
+	if len(args) == 0 || kind(unwrap(args[0])) != "object" {
 		return "", false
 	}
-	options, ok := arg(call.ArgumentList, 0).(*ast.ObjectLiteral)
-	if !ok {
+	value := w.objectValue(unwrap(args[0]), "baseURL")
+	if value == nil {
 		return "", false
 	}
-	for _, property := range options.Value {
-		keyed, ok := property.(*ast.PropertyKeyed)
-		if !ok || propertyName(keyed.Key) != "baseURL" {
-			continue
-		}
-		return baseURLFromExpression(keyed.Value, nil), true
-	}
-	return "", false
+	return w.baseURLFromExpression(value), true
 }
 
-// baseURLTarget reports the root identifier of assignments shaped like
-// `X.defaults.baseURL = ...` or `X.baseURL = ...`.
-func baseURLTarget(left ast.Expression) (string, bool) {
-	dot, ok := left.(*ast.DotExpression)
-	if !ok || string(dot.Identifier.Name) != "baseURL" {
+func (w *astWalker) baseURLTarget(n *sitter.Node) (string, bool) {
+	object, property, ok := w.memberParts(unwrap(n))
+	if !ok || property != "baseURL" {
 		return "", false
 	}
-	return outermostIdentifier(dot.Left)
+	name := w.outermostIdentifier(object)
+	return name, name != ""
 }
 
-// baseURLFromExpression folds a baseURL expression to a string; anything
-// unresolvable degrades to an empty value.
-func baseURLFromExpression(expression ast.Expression, constants map[string]string) string {
-	switch expressed := unwrap(expression).(type) {
-	case *ast.StringLiteral:
-		return string(expressed.Value)
-	case *ast.Identifier:
-		return constants[string(expressed.Name)]
-	case *ast.TemplateLiteral:
-		return templatePlaceholder(expressed)
-	case *ast.BinaryExpression:
-		if expressed.Operator == token.PLUS {
-			left := baseURLFromExpression(expressed.Left, constants)
-			right := baseURLFromExpression(expressed.Right, constants)
+func (w *astWalker) baseURLFromExpression(n *sitter.Node) string {
+	n = unwrap(n)
+	switch kind(n) {
+	case "string":
+		return decodeJSString(w.text(n))
+	case "identifier":
+		return w.constants[w.text(n)]
+	case "template_string":
+		return w.templatePlaceholder(n)
+	case "binary_expression":
+		if w.text(n.ChildByFieldName("operator")) == "+" {
+			left, right := w.baseURLFromExpression(n.ChildByFieldName("left")), w.baseURLFromExpression(n.ChildByFieldName("right"))
 			if left != "" && right != "" {
 				return left + right
 			}
@@ -797,25 +643,75 @@ func baseURLFromExpression(expression ast.Expression, constants map[string]strin
 	return ""
 }
 
-// outermostIdentifier walks `a.b.c` chains back to the leading identifier.
-func outermostIdentifier(expression ast.Expression) (string, bool) {
-	for {
-		switch expressed := expression.(type) {
-		case *ast.Identifier:
-			return string(expressed.Name), true
-		case *ast.DotExpression:
-			expression = expressed.Left
-		case *ast.OptionalChain:
-			expression = expressed.Expression
-		case *ast.Optional:
-			expression = expressed.Expression
-		default:
-			return "", false
+func (w *astWalker) memberParts(n *sitter.Node) (*sitter.Node, string, bool) {
+	n = unwrap(n)
+	if kind(n) == "member_expression" {
+		object, property := unwrap(n.ChildByFieldName("object")), n.ChildByFieldName("property")
+		return object, w.text(property), object != nil && property != nil
+	}
+	if kind(n) == "subscript_expression" {
+		object, index := unwrap(n.ChildByFieldName("object")), unwrap(n.ChildByFieldName("index"))
+		if kind(index) == "string" {
+			return object, decodeJSString(w.text(index)), object != nil
 		}
 	}
+	return nil, "", false
 }
 
-// joinBaseURL folds a relative endpoint under an instance baseURL.
+func (w *astWalker) outermostIdentifier(n *sitter.Node) string {
+	for n != nil {
+		n = unwrap(n)
+		switch kind(n) {
+		case "identifier":
+			return w.text(n)
+		case "member_expression", "subscript_expression":
+			n = n.ChildByFieldName("object")
+		default:
+			return ""
+		}
+	}
+	return ""
+}
+
+func (w *astWalker) objectValue(object *sitter.Node, wanted string) *sitter.Node {
+	if kind(object) != "object" {
+		return nil
+	}
+	for i := uint(0); i < object.NamedChildCount(); i++ {
+		pair := object.NamedChild(i)
+		if pair.Kind() == "pair" && w.propertyName(pair.ChildByFieldName("key")) == wanted {
+			return pair.ChildByFieldName("value")
+		}
+	}
+	return nil
+}
+
+func (w *astWalker) propertyName(n *sitter.Node) string {
+	n = unwrap(n)
+	if kind(n) == "string" {
+		return decodeJSString(w.text(n))
+	}
+	switch kind(n) {
+	case "identifier", "property_identifier", "private_property_identifier", "shorthand_property_identifier", "shorthand_property_identifier_pattern":
+		return w.text(n)
+	}
+	return ""
+}
+
+func kind(n *sitter.Node) string {
+	if n == nil {
+		return ""
+	}
+	return n.Kind()
+}
+
+func unwrap(n *sitter.Node) *sitter.Node {
+	for kind(n) == "parenthesized_expression" && n.NamedChildCount() > 0 {
+		n = n.NamedChild(0)
+	}
+	return n
+}
+
 func joinBaseURL(base, raw string) string {
 	if raw == "" || strings.Contains(raw, "://") || strings.HasPrefix(raw, "//") {
 		return ""
@@ -823,41 +719,123 @@ func joinBaseURL(base, raw string) string {
 	return strings.TrimRight(base, "/") + "/" + strings.TrimLeft(raw, "/")
 }
 
-func outermostIdentifierString(expression ast.Expression) string {
-	if name, ok := outermostIdentifier(expression); ok {
-		return name
+// Tree-sitter preserves the source spelling of strings; decode ECMAScript
+// escapes here so callers receive the same logical values as before.
+func decodeJSString(raw string) string {
+	if len(raw) >= 2 && (raw[0] == '\'' || raw[0] == '"') && raw[len(raw)-1] == raw[0] {
+		raw = raw[1 : len(raw)-1]
 	}
-	return ""
+	return decodeJSEscapes(raw)
 }
 
-func propertyName(key ast.Expression) string {
-	switch k := key.(type) {
-	case *ast.StringLiteral:
-		return string(k.Value)
-	case *ast.Identifier:
-		return string(k.Name)
-	}
-	return ""
-}
-
-// unwrap strips parens and optional-chain wrappers so callee inspection sees
-// the underlying expression.
-func unwrap(expression ast.Expression) ast.Expression {
-	for {
-		switch paren := expression.(type) {
-		case *ast.Optional:
-			expression = paren.Expression
-		case *ast.OptionalChain:
-			expression = paren.Expression
+func decodeJSEscapes(raw string) string {
+	var out strings.Builder
+	for i := 0; i < len(raw); {
+		if raw[i] != '\\' {
+			r, size := utf8.DecodeRuneInString(raw[i:])
+			if r == utf8.RuneError && size == 1 {
+				out.WriteByte(raw[i])
+				i++
+			} else {
+				out.WriteRune(r)
+				i += size
+			}
+			continue
+		}
+		i++
+		if i >= len(raw) {
+			out.WriteByte('\\')
+			break
+		}
+		switch raw[i] {
+		case 'b':
+			out.WriteByte('\b')
+			i++
+		case 'f':
+			out.WriteByte('\f')
+			i++
+		case 'n':
+			out.WriteByte('\n')
+			i++
+		case 'r':
+			out.WriteByte('\r')
+			i++
+		case 't':
+			out.WriteByte('\t')
+			i++
+		case 'v':
+			out.WriteByte('\v')
+			i++
+		case '0':
+			out.WriteByte(0)
+			i++
+		case '\n':
+			i++
+		case '\r':
+			i++
+			if i < len(raw) && raw[i] == '\n' {
+				i++
+			}
+		case 'x':
+			if value, next, ok := parseHex(raw, i+1, 2); ok {
+				out.WriteRune(rune(value))
+				i = next
+			} else {
+				out.WriteByte('x')
+				i++
+			}
+		case 'u':
+			value, next, ok := parseUnicode(raw, i)
+			if !ok {
+				out.WriteByte('u')
+				i++
+				continue
+			}
+			i = next
+			if value >= 0xD800 && value <= 0xDBFF && i+2 <= len(raw) && raw[i:i+2] == "\\u" {
+				if low, lowNext, ok := parseUnicode(raw, i+1); ok && low >= 0xDC00 && low <= 0xDFFF {
+					out.WriteRune(utf16.DecodeRune(rune(value), rune(low)))
+					i = lowNext
+					continue
+				}
+			}
+			if value <= utf8.MaxRune && !(value >= 0xD800 && value <= 0xDFFF) {
+				out.WriteRune(rune(value))
+			} else {
+				out.WriteRune(utf8.RuneError)
+			}
 		default:
-			return expression
+			out.WriteByte(raw[i])
+			i++
 		}
 	}
+	return out.String()
 }
 
-func arg(args []ast.Expression, index int) ast.Expression {
-	if index < len(args) {
-		return args[index]
+func parseUnicode(raw string, u int) (uint64, int, bool) {
+	if u >= len(raw) || raw[u] != 'u' {
+		return 0, u, false
 	}
-	return nil
+	if u+1 < len(raw) && raw[u+1] == '{' {
+		rel := strings.IndexByte(raw[u+2:], '}')
+		if rel < 0 {
+			return 0, u, false
+		}
+		end := u + 2 + rel
+		if end == u+2 {
+			return 0, u, false
+		}
+		value, err := strconv.ParseUint(raw[u+2:end], 16, 32)
+		return value, end + 1, err == nil && value <= utf8.MaxRune
+	}
+	return parseHex(raw, u+1, 4)
+}
+
+func parseHex(raw string, start, count int) (uint64, int, bool) {
+	end := start + count
+	if start < 0 || end > len(raw) {
+		return 0, start, false
+	}
+	value, err := strconv.ParseUint(raw[start:end], 16, 32)
+	return value, end, err == nil
 }

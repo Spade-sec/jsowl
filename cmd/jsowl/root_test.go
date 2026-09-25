@@ -15,12 +15,23 @@ import (
 type fakeScanner struct {
 	targets []jsowl.Target
 	result  *jsowl.Result
+	sink    chan<- jsowl.ProbeEvent
+	// beforeBatch, when set, runs after SetProbeSink and before the batch
+	// channel is produced, letting tests emit probe events.
+	beforeBatch func()
+}
+
+func (f *fakeScanner) SetProbeSink(sink chan<- jsowl.ProbeEvent) {
+	f.sink = sink
 }
 
 func (f *fakeScanner) ScanBatch(
 	_ context.Context,
 	targets []jsowl.Target,
 ) <-chan jsowl.BatchItem {
+	if f.beforeBatch != nil {
+		f.beforeBatch()
+	}
 	f.targets = append([]jsowl.Target(nil), targets...)
 	output := make(chan jsowl.BatchItem, len(targets))
 	for _, target := range targets {
@@ -65,6 +76,7 @@ func TestRootFlagsOverrideConfigAndMergeTargets(t *testing.T) {
 		"-o", t.TempDir(),
 		"-H", "Authorization: Bearer abc",
 		"-H", "X-Test: one:two",
+		"--scope", "api.example.net,.static.example",
 	})
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
@@ -81,6 +93,11 @@ func TestRootFlagsOverrideConfigAndMergeTargets(t *testing.T) {
 	if captured.Request.Headers["Authorization"] != "Bearer abc" ||
 		captured.Request.Headers["X-Test"] != "one:two" {
 		t.Fatalf("headers = %#v", captured.Request.Headers)
+	}
+	restricted := captured.Scope.RestrictDomains
+	if len(restricted) != 2 || restricted[0] != "api.example.net" ||
+		restricted[1] != ".static.example" {
+		t.Fatalf("restrict domains = %#v", restricted)
 	}
 	if len(fake.targets) != 2 {
 		t.Fatalf("targets = %#v", fake.targets)
@@ -146,6 +163,85 @@ func TestRootSilentSuppressesSuccessfulResultLines(t *testing.T) {
 	}
 	if output.Len() != 0 {
 		t.Fatalf("silent stdout = %q", output.String())
+	}
+}
+
+func TestRootPrintsProbeEventsAsTheyComplete(t *testing.T) {
+	var output bytes.Buffer
+	deps := testDependencies()
+	deps.stdout = &output
+	scanner := &fakeScanner{result: &jsowl.Result{Target: "https://example.test/"}}
+	scanner.beforeBatch = func() {
+		scanner.sink <- jsowl.ProbeEvent{
+			Target: "https://example.test/", URL: "https://example.test/api/items",
+			Method: "POST", StatusCode: 200, Evidence: "runtime",
+		}
+	}
+	deps.newScanner = func(jsowl.Config) (scanService, error) {
+		return scanner, nil
+	}
+
+	command := newRootCommand(deps)
+	command.SetArgs([]string{"-u", "https://example.test"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "[200] POST https://example.test/api/items [runtime]") {
+		t.Fatalf("probe line missing from stdout: %q", output.String())
+	}
+}
+
+func TestRootSilentSuppressesProbeEventLines(t *testing.T) {
+	var output bytes.Buffer
+	deps := testDependencies()
+	deps.stdout = &output
+	scanner := &fakeScanner{result: &jsowl.Result{Target: "https://example.test/"}}
+	scanner.beforeBatch = func() {
+		if scanner.sink != nil {
+			scanner.sink <- jsowl.ProbeEvent{
+				Target: "https://example.test/", URL: "https://example.test/api/items",
+				StatusCode: 200, Evidence: "runtime",
+			}
+		}
+	}
+	deps.newScanner = func(jsowl.Config) (scanService, error) {
+		return scanner, nil
+	}
+
+	command := newRootCommand(deps)
+	command.SetArgs([]string{"-u", "https://example.test", "--silent"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), "api/items") {
+		t.Fatalf("silent stdout leaked probe line: %q", output.String())
+	}
+}
+
+func TestRootPrintsBrowserDegradationToStderr(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	deps := testDependencies()
+	deps.stdout = &stdout
+	deps.stderr = &stderr
+	deps.newScanner = func(jsowl.Config) (scanService, error) {
+		return &fakeScanner{result: &jsowl.Result{
+			Target: "https://example.test/",
+			BrowserStatus: jsowl.BrowserStatus{
+				Attempted: true, Degraded: true,
+				Reason: "collect browser page: context deadline exceeded",
+			},
+		}}, nil
+	}
+	command := newRootCommand(deps)
+	command.SetArgs([]string{"-u", "https://example.test"})
+	if err := command.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr.String(), "browser degraded") {
+		t.Fatalf("stderr missing degradation notice: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "context deadline exceeded") {
+		t.Fatalf("stderr missing degradation reason: %q", stderr.String())
 	}
 }
 
@@ -224,6 +320,22 @@ func TestParseHeader(t *testing.T) {
 	}
 	if _, _, err := parseHeader("Bad Header: value"); err == nil {
 		t.Fatal("parseHeader() accepted invalid field name")
+	}
+}
+
+func TestParseScopeDomains(t *testing.T) {
+	got := parseScopeDomains([]string{
+		"a.example.com,b.example.com",
+		" c.example.com , ,d.example.com",
+	})
+	want := []string{"a.example.com", "b.example.com", "c.example.com", "d.example.com"}
+	if len(got) != len(want) {
+		t.Fatalf("parseScopeDomains() = %#v", got)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("parseScopeDomains() = %#v, want %#v", got, want)
+		}
 	}
 }
 

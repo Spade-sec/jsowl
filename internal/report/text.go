@@ -11,13 +11,16 @@ import (
 )
 
 // WriteTextReports writes the plain-text companion reports next to the
-// JSON/HTML reports: api路径.txt, 参数.txt and 敏感信息.txt.
+// JSON/HTML reports: api绝对路径.txt, api相对路径.txt, url.txt,
+// 参数.txt, 敏感信息.txt and 路由.txt.
 func WriteTextReports(directory string, result *model.Result) error {
 	files := []struct {
 		name string
 		data func() []byte
 	}{
-		{"api路径.txt", func() []byte { return renderAPIPaths(result) }},
+		{"api绝对路径.txt", func() []byte { return renderAPIAbsolute(result) }},
+		{"api相对路径.txt", func() []byte { return renderAPIRelative(result) }},
+		{"url.txt", func() []byte { return renderURLs(result) }},
 		{"参数.txt", func() []byte { return renderParameters(result) }},
 		{"敏感信息.txt", func() []byte { return renderSensitive(result) }},
 		{"路由.txt", func() []byte { return renderRoutes(result) }},
@@ -29,6 +32,48 @@ func WriteTextReports(directory string, result *model.Result) error {
 		}
 	}
 	return nil
+}
+
+// isFullURL reports whether the endpoint's source reference is a complete
+// http(s) URL — those belong in the URL report, not in path reports.
+func isFullURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil &&
+		(parsed.Scheme == "http" || parsed.Scheme == "https") &&
+		parsed.Host != ""
+}
+
+// renderURLs lists every full http(s) URL observed across endpoints and
+// resources, one per line, deduplicated and sorted.
+func renderURLs(result *model.Result) []byte {
+	out := textHeader("完整 URL", result.Target)
+	seen := make(map[string]struct{})
+	urls := make([]string, 0)
+	add := func(raw string) {
+		if raw == "" || !isFullURL(raw) {
+			return
+		}
+		if _, duplicate := seen[raw]; duplicate {
+			return
+		}
+		seen[raw] = struct{}{}
+		urls = append(urls, raw)
+	}
+	for _, endpoint := range result.Endpoints {
+		add(endpoint.Raw)
+		add(endpoint.URL)
+	}
+	for _, resource := range result.Resources {
+		add(resource.URL)
+	}
+	sort.Strings(urls)
+	for _, raw := range urls {
+		out = append(out, []byte(raw+"\n")...)
+	}
+	if len(urls) == 0 {
+		return append(out, []byte("（未发现完整 URL）\n")...)
+	}
+	return out
 }
 
 // sanitizeText drops invalid UTF-8 bytes from legacy-charset page bodies.
@@ -44,40 +89,53 @@ func textHeader(title, target string) []byte {
 	return []byte(b.String())
 }
 
-// renderAPIPaths lists every discovered/probed API endpoint URL, one per line.
-func renderAPIPaths(result *model.Result) []byte {
-	out := textHeader("API 路径", result.Target)
+// renderAPIAbsolute lists every absolute path ("/a/b/c?x=1"), one per line,
+// deduplicated and sorted. It uses the same classification as the API report
+// so the counts agree; full URLs live in url.txt instead.
+func renderAPIAbsolute(result *model.Result) []byte {
+	out := textHeader("API 绝对路径", result.Target)
 	seen := make(map[string]struct{}, len(result.Endpoints))
-	urls := make([]string, 0, len(result.Endpoints))
+	paths := make([]string, 0, len(result.Endpoints))
 	for _, endpoint := range result.Endpoints {
-		if endpoint.URL == "" {
+		path, kind := classifyAPIPath(endpoint)
+		if kind != apiPathAbsolute {
 			continue
 		}
-		if _, ok := seen[endpoint.URL]; ok {
+		if _, duplicate := seen[path]; duplicate {
 			continue
 		}
-		seen[endpoint.URL] = struct{}{}
-		urls = append(urls, endpoint.URL)
+		seen[path] = struct{}{}
+		paths = append(paths, path)
 	}
-	sort.Strings(urls)
-	for _, u := range urls {
-		line := u
-		if endpoint := lookupEndpoint(result, u); endpoint != nil &&
-			endpoint.Method != "" && !strings.EqualFold(endpoint.Method, "GET") {
-			line = strings.ToUpper(endpoint.Method) + " " + u
-		}
-		out = append(out, []byte(line+"\n")...)
+	sort.Strings(paths)
+	for _, path := range paths {
+		out = append(out, []byte(path+"\n")...)
 	}
 	return out
 }
 
-func lookupEndpoint(result *model.Result, rawURL string) *model.Endpoint {
-	for i := range result.Endpoints {
-		if result.Endpoints[i].URL == rawURL {
-			return &result.Endpoints[i]
+// renderAPIRelative lists every relative path ("a/b/c", "./a/b?x=1"), one per
+// line, deduplicated and sorted.
+func renderAPIRelative(result *model.Result) []byte {
+	out := textHeader("API 相对路径", result.Target)
+	seen := make(map[string]struct{}, len(result.Endpoints))
+	paths := make([]string, 0, len(result.Endpoints))
+	for _, endpoint := range result.Endpoints {
+		path, kind := classifyAPIPath(endpoint)
+		if kind != apiPathRelative || path == "" {
+			continue
 		}
+		if _, duplicate := seen[path]; duplicate {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
 	}
-	return nil
+	sort.Strings(paths)
+	for _, path := range paths {
+		out = append(out, []byte(path+"\n")...)
+	}
+	return out
 }
 
 // renderRoutes lists every framework route path, one per line.
@@ -101,15 +159,10 @@ func renderRoutes(result *model.Result) []byte {
 	return out
 }
 
-// renderParameters lists every unique query parameter name=value pair with the
-// first URL it was observed on.
+// renderParameters lists every unique query or body parameter name, one per
+// line, with no values or annotations so the file can feed tools directly.
 func renderParameters(result *model.Result) []byte {
-	out := textHeader("请求参数", result.Target)
-	type entry struct {
-		value  string
-		source string
-	}
-	params := map[string]entry{}
+	params := map[string]struct{}{}
 	collect := func(raw string) {
 		if raw == "" {
 			return
@@ -118,23 +171,17 @@ func renderParameters(result *model.Result) []byte {
 		if err != nil {
 			return
 		}
-		for key, values := range parsed.Query() {
-			if _, ok := params[key]; ok {
-				continue
-			}
-			value := ""
-			if len(values) > 0 {
-				value = values[0]
-			}
-			params[key] = entry{value: value, source: raw}
+		for key := range parsed.Query() {
+			params[key] = struct{}{}
 		}
 	}
 	for _, endpoint := range result.Endpoints {
 		collect(endpoint.URL)
 		for _, name := range endpoint.BodyParams {
-			if _, exists := params[name]; !exists {
-				params[name] = entry{value: "(body)", source: endpoint.URL}
-			}
+			params[name] = struct{}{}
+		}
+		for _, name := range endpoint.ResponseParams {
+			params[name] = struct{}{}
 		}
 	}
 	for _, resource := range result.Resources {
@@ -145,15 +192,11 @@ func renderParameters(result *model.Result) []byte {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	if len(names) == 0 {
-		return append(out, []byte("（未发现参数）\n")...)
-	}
+	var out strings.Builder
 	for _, name := range names {
-		entry := params[name]
-		line := name + "=" + entry.value + "\t" + entry.source + "\n"
-		out = append(out, []byte(line)...)
+		out.WriteString(name + "\n")
 	}
-	return out
+	return []byte(out.String())
 }
 
 // renderSensitive lists every sensitive-category finding with its severity,

@@ -28,6 +28,15 @@ type Scanner struct {
 	config         model.Config
 	analyzer       *analyze.Engine
 	browserFactory func(model.BrowserConfig) (collect.BrowserCollector, error)
+	probeSink      chan<- model.ProbeEvent
+}
+
+// SetProbeSink registers a channel that receives one event per completed API
+// probe while scans run. Events are sent non-blockingly; a slow consumer
+// drops events, and the final report always contains every probe result.
+// Pass nil to detach the sink.
+func (s *Scanner) SetProbeSink(sink chan<- ProbeEvent) {
+	s.probeSink = sink
 }
 
 // New validates configuration and constructs a reusable Scanner.
@@ -68,6 +77,9 @@ func cloneConfig(config model.Config) model.Config {
 	}
 	cloned.Scope.AllowDomains = append(
 		[]string(nil), config.Scope.AllowDomains...,
+	)
+	cloned.Scope.RestrictDomains = append(
+		[]string(nil), config.Scope.RestrictDomains...,
 	)
 	cloned.Scope.SuffixBlacklist = append(
 		[]string(nil), config.Scope.SuffixBlacklist...,
@@ -128,6 +140,7 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 	started := time.Now()
 	resourcePipeline := pipeline.New(pipeline.Options{
 		Getter: client, Analyzer: s.analyzer, Config: s.config,
+		ProbeEvents: s.probeSink,
 	})
 	var result *model.Result
 	switch s.config.Mode {
@@ -170,11 +183,68 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 		}
 	}
 	if result != nil {
+		normalizeHashRoutes(result)
+		// The browser pass merges endpoints after the pipeline already
+		// finalized its counts; refresh them so the report header matches
+		// the rows it renders.
+		pipeline.Finalize(result)
 		result.StartedAt = started
 		result.FinishedAt = time.Now()
 		result.UserAgent = userAgent
 	}
 	return result, err
+}
+
+// normalizeHashRoutes rewrites framework routes into their hash-router form
+// once any route proves the app keeps its routes after "#". Vue 2 routers
+// default to hash mode, so the router table alone ("/404") cannot tell; the
+// runtime observation can. Runs after merging so the direct pass, which
+// precedes the browser pass, is covered too.
+func normalizeHashRoutes(result *model.Result) {
+	hashMode := false
+	for _, endpoint := range result.Endpoints {
+		if endpoint.Type == "route" && strings.Contains(endpoint.URL, "#") {
+			hashMode = true
+			break
+		}
+	}
+	if !hashMode {
+		return
+	}
+	seen := make(map[string]struct{}, len(result.Endpoints))
+	kept := result.Endpoints[:0]
+	for _, endpoint := range result.Endpoints {
+		if endpoint.Type == "route" && !strings.Contains(endpoint.URL, "#") {
+			if parsed, err := url.Parse(endpoint.URL); err == nil &&
+				parsed.Host != "" {
+				rewritten := hashRouteURL(parsed)
+				endpoint.URL = rewritten
+				endpoint.Raw = rewritten
+			}
+		}
+		if _, duplicate := seen[endpoint.URL]; duplicate {
+			continue
+		}
+		seen[endpoint.URL] = struct{}{}
+		kept = append(kept, endpoint)
+	}
+	result.Endpoints = kept
+}
+
+// hashRouteURL renders a path in hash-router form: a hash-mode SPA serves one
+// document and keeps the route after "#", so "/login" is really "/#/login".
+func hashRouteURL(resolved *url.URL) string {
+	base := *resolved
+	fragment := base.Path
+	if base.RawQuery != "" {
+		fragment += "?" + base.RawQuery
+	}
+	base.Path = "/"
+	base.RawPath = ""
+	base.RawQuery = ""
+	base.Fragment = ""
+	base.RawFragment = ""
+	return base.String() + "#" + fragment
 }
 
 // ScanBatch scans targets with a fixed worker count and closes the returned
@@ -303,7 +373,9 @@ func browserSeeds(root *url.URL, rendered collect.BrowserResult) []pipeline.Seed
 		switch strings.ToLower(record.ResourceType) {
 		case "script":
 			kind = model.ResourceTypeScript
-		case "xhr", "fetch":
+		case "xhr", "fetch", "beacon", "ping", "eventsource", "websocket", "preflight":
+			// Every request the page actually issued is an interface worth
+			// recording, not just XHR and fetch.
 			kind = model.ResourceTypeAPI
 		}
 		if kind == "" && strings.Contains(
@@ -315,6 +387,11 @@ func browserSeeds(root *url.URL, rendered collect.BrowserResult) []pipeline.Seed
 			addSeed(record.URL, kind, record)
 		}
 	}
+	// Scripts the injected collector classified explicitly keep their script
+	// kind even when the URL carries no .js extension.
+	for _, raw := range rendered.Scripts {
+		addSeed(raw, model.ResourceTypeScript, collect.NetworkRecord{})
+	}
 	for _, raw := range rendered.URLs {
 		parsed, err := url.Parse(raw)
 		if err == nil && isJavaScriptExtension(parsed.Path) {
@@ -325,12 +402,15 @@ func browserSeeds(root *url.URL, rendered collect.BrowserResult) []pipeline.Seed
 		if route.Path == "" {
 			continue
 		}
-		resolved, err := url.Parse(route.Path)
+		reference, err := url.Parse(route.Path)
 		if err != nil {
 			continue
 		}
+		resolved := reference
 		if !resolved.IsAbs() {
-			resolved = root.JoinPath(route.Path)
+			// ResolveReference keeps an embedded query intact; JoinPath
+			// would percent-encode it ("?a=b" → "%3Fa=b").
+			resolved = root.ResolveReference(reference)
 		}
 		path := resolved.String()
 		if _, exists := seen[path]; exists {

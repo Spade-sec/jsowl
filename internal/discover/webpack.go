@@ -18,7 +18,7 @@ var (
 		`(?i)(?:(?:__webpack_require__|[A-Za-z_$][\w$]*)\.(?:p|u)\s*=|webpackchunk)`,
 	)
 	webpackUFunction = regexp.MustCompile(
-		`(?s)(?:__webpack_require__|[A-Za-z_$][\w$]*)\.u\s*=\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*([^;]{1,1000})`,
+		`(?s)(?:__webpack_require__|[A-Za-z_$][\w$]*)\.u\s*=\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*([^;]*)`,
 	)
 	webpackObject = regexp.MustCompile(
 		`(?s)\{(?:\s*["']?[A-Za-z0-9_-]+["']?\s*:\s*["'][^"']+["']\s*,?)+\s*\}`,
@@ -29,7 +29,19 @@ var (
 	webpackPair = regexp.MustCompile(
 		`["']?([A-Za-z0-9_-]+)["']?\s*:\s*["']([^"']+)["']`,
 	)
-	hashValue = regexp.MustCompile(`(?i)^[a-f0-9]{4,}$`)
+	// webpackInlineChunkName matches the chunk-filename expression webpack
+	// inlines into the HTML entry: a literal directory prefix, the chunk id,
+	// a dot, a {name: hash} map indexed by that same id, and ".js". Vue CLI
+	// writes it as a plain function ("function c(e){return i.p+...}") rather
+	// than __webpack_require__.u, so the .u matcher never sees it.
+	webpackInlineChunkName = regexp.MustCompile(
+		`(?s)["']([^"']*/)["'][^:;]{1,80}\+\s*["']\.["']\s*\+\s*(\{(?:\s*["']?[A-Za-z0-9_-]+["']?\s*:\s*["'][^"']+["']\s*,?)+\})\s*\[`,
+	)
+	// chunkHashToken accepts every token shape webpack uses for chunk hashes:
+	// lowercase hex, base64url fragments and short content hashes. The old
+	// hex-only check discarded whole chunk maps whenever one hash carried a
+	// letter past "f" or a "-"/"_".
+	chunkHashToken = regexp.MustCompile(`^[A-Za-z0-9_-]{2,}$`)
 )
 
 // FromWebpack extracts bounded, resolved chunk URLs from common Webpack runtimes.
@@ -37,7 +49,8 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 	if source == nil || limit <= 0 {
 		return nil
 	}
-	if !webpackEvidence.Match(body) {
+	inlineChunks := webpackInlineChunkName.FindAllSubmatch(body, -1)
+	if !webpackEvidence.Match(body) && len(inlineChunks) == 0 {
 		return nil
 	}
 	publicBase := source
@@ -73,10 +86,11 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 				continue
 			}
 			names, hashes := maps[i], maps[j]
-			if mapLooksHashed(names) && !mapLooksHashed(hashes) {
+			if hashScore(names) > hashScore(hashes) {
 				names, hashes = hashes, names
 			}
-			if mapLooksHashed(names) || !mapLooksHashed(hashes) {
+			if hashScore(hashes) < 1 || hashScore(names) >= hashScore(hashes) {
+				// Ambiguous pair: neither side is clearly the hash map.
 				continue
 			}
 			for _, id := range sortedMapKeys(names) {
@@ -92,13 +106,23 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 		}
 		for _, id := range sortedMapKeys(values) {
 			value := values[id]
-			if idHashTemplate && mapLooksHashed(values) {
+			if idHashTemplate && hashScore(values) >= 1 {
 				value = id + "." + value
 			}
 			if !strings.HasSuffix(strings.ToLower(value), ".js") {
 				value += ".js"
 			}
 			filenames = append(filenames, value)
+		}
+	}
+
+	// Inline runtimes name every chunk in one expression, so the map is
+	// already complete: emit <prefix><name>.<hash>.js for each entry.
+	for _, match := range inlineChunks {
+		prefix := string(match[1])
+		for _, pair := range webpackPair.FindAllSubmatch(match[2], -1) {
+			filenames = append(filenames,
+				prefix+string(pair[1])+"."+string(pair[2])+".js")
 		}
 	}
 
@@ -212,16 +236,26 @@ func sameMapKeys(left, right map[string]string) bool {
 	return true
 }
 
-func mapLooksHashed(values map[string]string) bool {
+// hashScore grades how much a map's values look like content hashes: the
+// fraction of values that are opaque tokens carrying at least one digit.
+// Chunk names are readable words ("users", "admin") while chunk hashes are
+// opaque and almost always carry a digit. Scoring instead of a boolean keeps
+// the two-map form unambiguous and still accepts base64url hashes that a
+// hex-only check would reject.
+func hashScore(values map[string]string) float64 {
 	if len(values) == 0 {
-		return false
+		return 0
 	}
+	scored := 0
 	for _, value := range values {
-		if !hashValue.MatchString(value) {
-			return false
+		if !chunkHashToken.MatchString(value) {
+			continue
+		}
+		if strings.ContainsAny(value, "0123456789") {
+			scored++
 		}
 	}
-	return true
+	return float64(scored) / float64(len(values))
 }
 
 func sortedMapKeys(values map[string]string) []string {

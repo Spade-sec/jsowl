@@ -84,7 +84,12 @@ func SaveJSIn(
 		if bytes.Equal(existing, body) {
 			return relativeToRoot(root, absolute)
 		}
-		return "", fmt.Errorf("script path collision at %s", absolute)
+		// Re-scanning into an existing report directory rewrites the same
+		// stable filename with fresh content. Replace it instead of failing;
+		// os.Rename cannot overwrite on Windows, so remove it first.
+		if err := os.Remove(absolute); err != nil {
+			return "", fmt.Errorf("replace existing script: %w", err)
+		}
 	} else if !errors.Is(readErr, os.ErrNotExist) {
 		return "", fmt.Errorf("inspect script destination: %w", readErr)
 	}
@@ -116,6 +121,21 @@ func SaveJSIn(
 	}
 	cleanup = false
 	return relativeToRoot(root, absolute)
+}
+
+// LoadJS reads back a script previously saved under root by its
+// slash-separated relative path, rejecting paths that escape the root.
+func LoadJS(root, relativePath string) ([]byte, error) {
+	if filepath.IsAbs(relativePath) {
+		return nil, errors.New("script path must be relative to the output root")
+	}
+	absolute := filepath.Join(root, filepath.FromSlash(relativePath))
+	relative, err := filepath.Rel(root, absolute)
+	if err != nil || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, errors.New("script path escaped output root")
+	}
+	return os.ReadFile(absolute)
 }
 
 func sanitizeComponent(value string) string {

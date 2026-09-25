@@ -3,6 +3,7 @@ package discover
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -92,6 +93,21 @@ function load(id) { return __webpack_require__.p+chunkMap[id]+".js"; }
 		"https://example.test/assets/users.a1b2.js" {
 		t.Fatalf("runtime candidates = %#v", got)
 	}
+}
+
+// The old hex-only hash check and the 1000-character ".u" capture cap both
+// dropped whole chunk maps. Base64url hashes and long templates must survive.
+func TestFromWebpackAcceptsBase64URLHashesAndLongTemplates(t *testing.T) {
+	padding := strings.Repeat("x", 1500)
+	body := []byte(`__webpack_require__.p="/assets/";
+__webpack_require__.u=id=>"` + padding + `"+id+"."+{1:"Xk9_-qA",2:"Zz0_bY"}[id]+".js";
+`)
+	source := mustParseURL(t, "https://example.test/runtime.js")
+
+	got := FromWebpack(source, body, 100)
+
+	assertCandidate(t, got, "https://example.test/assets/1.Xk9_-qA.js", KindChunk)
+	assertCandidate(t, got, "https://example.test/assets/2.Zz0_bY.js", KindChunk)
 }
 
 func readDiscoverFixture(t *testing.T, name string) []byte {

@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"mime"
 	"net/http"
@@ -25,6 +26,9 @@ type Options struct {
 	Getter   collect.Getter
 	Analyzer *analyze.Engine
 	Config   model.Config
+	// ProbeEvents, when non-nil, receives one event per completed API probe.
+	// The pipeline never blocks on it; consumers must keep up or drop events.
+	ProbeEvents chan<- model.ProbeEvent
 }
 
 // Pipeline recursively collects and analyzes one target within configured bounds.
@@ -54,6 +58,8 @@ type outcome struct {
 	findings   []model.Finding
 	candidates []discover.Candidate
 	spa        discover.SPAEvidence
+	// vendor marks the body as a third-party library bundle.
+	vendor bool
 }
 
 // runState carries the mutable state shared by the collection drains and the
@@ -69,14 +75,33 @@ type runState struct {
 	targetScope    *scope.Scope
 	root           *url.URL
 	resolutionBase *url.URL
+	probeEvents    chan<- model.ProbeEvent
+}
+
+// emitProbe publishes one completed API probe without ever blocking the scan:
+// when no consumer is attached or the consumer is slower than the producers,
+// the event is dropped. Probes are recorded in the final report regardless.
+func (state *runState) emitProbe(event model.ProbeEvent) {
+	if state.probeEvents == nil {
+		return
+	}
+	select {
+	case state.probeEvents <- event:
+	default:
+	}
 }
 
 // deferredJS is one downloaded script or chunk waiting for the regex and AST
-// analysis pass that runs after collection completes.
+// analysis pass that runs after collection completes. Fetch-first mode
+// persists the body to disk first and analyzes from the saved file; when the
+// save is skipped or fails (truncated body, storage error) the in-memory
+// body is carried as a fallback so no resource is ever dropped.
 type deferredJS struct {
 	source *url.URL
+	path   string
 	body   []byte
 	depth  int
+	vendor bool
 }
 
 // New constructs a direct resource pipeline.
@@ -92,6 +117,119 @@ func (p *Pipeline) Run(
 ) (*model.Result, error) {
 	result, _, err := p.RunDetailed(ctx, target, headers, nil, nil, nil)
 	return result, err
+}
+
+// maxDiscoveryCandidates bounds one webpack/RequireJS discovery pass when no
+// resource cap is configured; those extractors need a positive limit.
+const maxDiscoveryCandidates = 200000
+
+// candidateLimit is the per-pass discovery ceiling. A zero resource cap means
+// "no limit", so discovery gets a large ceiling instead of returning nothing.
+func (p *Pipeline) candidateLimit() int {
+	if limit := p.options.Config.Limits.MaxResources; limit > 0 {
+		return limit
+	}
+	return maxDiscoveryCandidates
+}
+
+// sourceMapAllowed reports whether a map URL may be fetched: the feature must
+// be enabled and the path must not match the library blacklist.
+func (p *Pipeline) sourceMapAllowed(candidate *url.URL) bool {
+	if !p.options.Config.Scope.ProbeSourceMaps || candidate == nil {
+		return false
+	}
+	path := strings.ToLower(candidate.Path)
+	for _, fragment := range p.options.Config.Scope.SourceMapBlacklist {
+		fragment = strings.ToLower(strings.TrimSpace(fragment))
+		if fragment != "" && strings.Contains(path, fragment) {
+			return false
+		}
+	}
+	return true
+}
+
+// markVendor labels everything extracted from one body between the two marks
+// as vendor code, so the report can separate library noise from application
+// results when skip_library_bundles is disabled.
+func markVendor(result *outcome, vendor bool, candidatesFrom, findingsFrom int) {
+	if !vendor {
+		return
+	}
+	for index := candidatesFrom; index < len(result.candidates); index++ {
+		result.candidates[index].Vendor = true
+	}
+	for index := findingsFrom; index < len(result.findings); index++ {
+		result.findings[index].Vendor = true
+	}
+}
+
+// absorbSourceMap queues the map a bundle points at through sourceMappingURL,
+// or analyzes an inline map immediately since it needs no extra request.
+func (p *Pipeline) absorbSourceMap(
+	result *outcome,
+	source *url.URL,
+	base *url.URL,
+	body []byte,
+) {
+	if !p.options.Config.Scope.ProbeSourceMaps {
+		return
+	}
+	content, reference, ok := discover.SourceMapReference(body)
+	if !ok {
+		return
+	}
+	if len(content) > 0 {
+		absorbRecoveredSources(result, base, content, p.options.Analyzer, p.options.Config.Scope.SkipLibraryBundles)
+		return
+	}
+	if reference == "" {
+		return
+	}
+	parsed, err := url.Parse(reference)
+	if err != nil {
+		return
+	}
+	resolved := base.ResolveReference(parsed)
+	if !p.sourceMapAllowed(resolved) {
+		return
+	}
+	result.candidates = append(result.candidates, discover.Candidate{
+		Raw: resolved.String(), Kind: discover.KindSourceMap,
+		SourceURL: source.String(), Source: "sourcemap",
+	})
+}
+
+// absorbRecoveredSources runs the extractors over every original embedded in a
+// map, so recovered sources contribute paths, parameters and findings that the
+// minified bundle hid. This mirrors shuji's sources recovery.
+func absorbRecoveredSources(
+	result *outcome,
+	origin *url.URL,
+	body []byte,
+	engine *analyze.Engine,
+	skipLibraries bool,
+) {
+	for _, file := range discover.ParseSourceMap(body) {
+		source := origin
+		if fileURL, err := url.Parse(file.Name); err == nil {
+			source = origin.ResolveReference(fileURL)
+		}
+		content := []byte(file.Content)
+		isVendor := discover.IsThirdPartyBundle(content)
+		if skipLibraries && isVendor {
+			// The recovered original is a library file; skip it the same way
+			// a bundled library script is skipped.
+			continue
+		}
+		candidatesFrom, findingsFrom := len(result.candidates), len(result.findings)
+		textResult := discover.FromJavaScript(source, content, engine)
+		result.findings = append(result.findings, textResult.Findings...)
+		result.candidates = append(result.candidates, textResult.Candidates...)
+		result.candidates = append(
+			result.candidates, discover.APIFromAST(source, content)...,
+		)
+		markVendor(result, isVendor, candidatesFrom, findingsFrom)
+	}
 }
 
 // RunDetailed runs the shared pipeline with optional browser-rendered entry
@@ -143,6 +281,9 @@ func (p *Pipeline) RunDetailed(
 		URL: scope.Canonical(root), Kind: model.ResourceTypeDocument,
 	})
 	queue.MarkSeen(previouslySeen)
+	// A runtime route that carries a fragment proves the app is a hash-mode
+	// router; static routes are then reported in the same "/#/x" form.
+	var spa discover.SPAEvidence
 	for _, seed := range seeds {
 		seedURL, parseErr := url.Parse(seed.URL)
 		if parseErr != nil {
@@ -158,7 +299,12 @@ func (p *Pipeline) RunDetailed(
 		}
 		if seed.Kind == model.ResourceTypeRoute {
 			// Runtime-observed framework routes are recorded but never probed.
-			canonical := scope.Canonical(seedURL)
+			// Hash-router routes keep their fragment ("#/admin"); stripping it
+			// would collapse every hash route into the index URL.
+			if seedURL.Fragment != "" {
+				spa.HashRouting = true
+			}
+			canonical := routeCanonical(seedURL)
 			if _, exists := endpointIndex[canonical]; !exists {
 				endpointIndex[canonical] = len(result.Endpoints)
 				result.Endpoints = append(result.Endpoints, model.Endpoint{
@@ -216,7 +362,6 @@ func (p *Pipeline) RunDetailed(
 		}
 	}
 
-	var spa discover.SPAEvidence
 	state := &runState{
 		result:         result,
 		queue:          queue,
@@ -227,19 +372,23 @@ func (p *Pipeline) RunDetailed(
 		targetScope:    targetScope,
 		root:           root,
 		resolutionBase: resolutionBase,
+		probeEvents:    p.options.ProbeEvents,
 	}
 	if err := p.drain(ctx, state, headers, entry); err != nil {
 		return result, spa, err
 	}
 	// Fetch-first mode: every script and chunk has been downloaded (and saved)
-	// before the regex engine and AST extractor run over the downloaded
-	// bodies. Endpoint candidates discovered here may enqueue fresh API
-	// probes, so the queue is drained again until nothing new is pending.
+	// before the regex engine and AST extractor run over the saved files.
+	// Endpoint candidates discovered here may enqueue fresh API probes, so the
+	// queue is drained again until nothing new is pending.
 	for len(state.pending) > 0 {
+		if err := ctx.Err(); err != nil {
+			return result, spa, err
+		}
 		batch := state.pending
 		state.pending = nil
-		for _, item := range batch {
-			p.analyzeDeferred(state, item)
+		for _, analysis := range p.computeBatch(batch) {
+			p.mergeDeferred(state, analysis)
 		}
 		if err := p.drain(ctx, state, headers, entry); err != nil {
 			return result, spa, err
@@ -326,47 +475,62 @@ func (p *Pipeline) processOutcome(state *runState, collected outcome) error {
 			Message: "response exceeded max_body_size",
 		})
 	}
-	if state.deferJS &&
-		(resource.Type == model.ResourceTypeScript ||
-			resource.Type == model.ResourceTypeChunk) {
+	isJS := resource.Type == model.ResourceTypeScript ||
+		resource.Type == model.ResourceTypeChunk
+	if state.deferJS && isJS {
 		if source, parseErr := url.Parse(collected.response.URL); parseErr == nil {
-			state.pending = append(state.pending, deferredJS{
-				source: source,
-				body:   collected.response.Body,
-				depth:  collected.item.Depth,
-			})
-		}
-	}
-	if p.options.Config.Output.DownloadJS &&
-		(resource.Type == model.ResourceTypeScript ||
-			resource.Type == model.ResourceTypeChunk) {
-		if collected.response.Truncated {
-			result.Issues = append(result.Issues, model.Issue{
-				Code: "js_not_saved", Stage: "storage", URL: resource.URL,
-				Message: "truncated JavaScript body was not persisted",
-			})
-		} else {
-			localPath, saveErr := storage.SaveJSIn(
-				p.options.Config.Output.Directory,
-				state.root,
-				p.options.Config.Output.JSDirectory,
-				resource,
-				collected.response.Body,
-			)
-			if saveErr != nil {
+			deferred := deferredJS{source: source, depth: collected.item.Depth, vendor: collected.vendor}
+			switch {
+			case collected.response.Truncated:
+				// Truncated bodies are never persisted; analyze from memory.
 				result.Issues = append(result.Issues, model.Issue{
-					Code: "js_save_failed", Stage: "storage", URL: resource.URL,
-					Message: saveErr.Error(),
+					Code: "js_not_saved", Stage: "storage", URL: resource.URL,
+					Message: "truncated JavaScript body was not persisted",
 				})
-			} else {
-				resource.LocalPath = localPath
+				deferred.body = collected.response.Body
+			default:
+				localPath, saveErr := storage.SaveJSIn(
+					p.options.Config.Output.Directory,
+					state.root,
+					p.options.Config.Output.JSDirectory,
+					resource,
+					collected.response.Body,
+				)
+				if saveErr != nil {
+					// Saving failed; analyze from memory so endpoints are not lost.
+					deferred.body = collected.response.Body
+					result.Issues = append(result.Issues, model.Issue{
+						Code: "js_save_failed", Stage: "storage", URL: resource.URL,
+						Message: saveErr.Error(),
+					})
+				} else {
+					resource.LocalPath = localPath
+					deferred.path = localPath
+				}
 			}
+			state.pending = append(state.pending, deferred)
 		}
 	}
 	result.Resources = append(result.Resources, resource)
 	if collected.item.Kind == model.ResourceTypeAPI {
 		if index, exists := state.endpointIndex[collected.item.URL]; exists {
 			result.Endpoints[index].StatusCode = collected.response.StatusCode
+			if len(result.Endpoints[index].ResponseParams) == 0 &&
+				strings.Contains(
+					strings.ToLower(collected.response.Header.Get("Content-Type")),
+					"json",
+				) {
+				// Keep only the field names, never the body itself.
+				result.Endpoints[index].ResponseParams =
+					discover.JSONFieldNames(collected.response.Body)
+			}
+			state.emitProbe(model.ProbeEvent{
+				Target:     scope.Canonical(state.root),
+				URL:        result.Endpoints[index].URL,
+				Method:     result.Endpoints[index].Method,
+				StatusCode: collected.response.StatusCode,
+				Evidence:   result.Endpoints[index].Evidence,
+			})
 		}
 	}
 
@@ -429,7 +593,22 @@ func (p *Pipeline) processCandidates(
 					SourceURL: sourceURL, Depth: nextDepth,
 				})
 			}
+		case discover.KindSourceMap:
+			// A leaked map usually restores the whole app, so it is fetched
+			// like a script; library maps are skipped via the blacklist.
+			if p.sourceMapAllowed(resolved) &&
+				state.targetScope.CanFetchScript(resolved) {
+				state.queue.Add(scheduler.Item{
+					URL: canonical, Kind: model.ResourceTypeSourceMap,
+					SourceURL: sourceURL, Depth: nextDepth,
+				})
+			}
 		case discover.KindEndpoint:
+			if discover.IsStaticAssetPath(resolved.Path) {
+				// A quoted "/a/b.png" or "/bundle.js" is a resource
+				// reference, not an API endpoint.
+				continue
+			}
 			authorized := state.targetScope.CanProbe(resolved)
 			if index, exists := state.endpointIndex[canonical]; exists {
 				enrichEndpoint(
@@ -441,11 +620,12 @@ func (p *Pipeline) processCandidates(
 				result.Endpoints = append(result.Endpoints, model.Endpoint{
 					Raw: candidate.Raw, URL: canonical,
 					SourceURL: sourceURL, Authorized: authorized,
-					Method:   candidate.Method,
-					Evidence: candidateEvidence(candidate, resolved),
-					Line:     candidate.Line,
-					Column:   candidate.Column,
+					Method:       candidate.Method,
+					Evidence:     candidateEvidence(candidate, resolved),
+					Line:         candidate.Line,
+					Column:       candidate.Column,
 					ContextLines: candidate.ContextLines,
+					Vendor:       candidate.Vendor,
 					BodyParams:   candidate.BodyParams,
 					Source:       candidate.Source,
 					Type:         "api",
@@ -458,14 +638,25 @@ func (p *Pipeline) processCandidates(
 				})
 			}
 		case discover.KindRoute:
-			if _, exists := state.endpointIndex[canonical]; !exists {
+			if state.spa.HashRouting && resolved.Fragment == "" &&
+				isRelativeReference(candidate.Raw) {
+				// A hash-mode SPA serves one document and keeps the route
+				// after "#": report "/#/admin", not a bogus "/admin".
+				canonical = asHashRoute(resolved)
+			}
+			if index, exists := state.endpointIndex[canonical]; exists {
+				enrichEndpoint(&result.Endpoints[index], candidate, "")
+			} else {
 				state.endpointIndex[canonical] = len(result.Endpoints)
 				result.Endpoints = append(result.Endpoints, model.Endpoint{
 					Raw: candidate.Raw, URL: canonical,
-					SourceURL:  sourceURL,
-					Authorized: state.targetScope.CanProbe(resolved),
-					Type:       routeType(candidate),
-					Source:     candidate.Source,
+					SourceURL:    sourceURL,
+					Authorized:   state.targetScope.CanProbe(resolved),
+					Type:         routeType(candidate),
+					Source:       candidate.Source,
+					Line:         candidate.Line,
+					Column:       candidate.Column,
+					ContextLines: candidate.ContextLines,
 				})
 			}
 		}
@@ -481,6 +672,11 @@ func enrichEndpoint(
 	candidate discover.Candidate,
 	evidence string,
 ) {
+	if !candidate.Vendor {
+		// Application code references this endpoint too, so it is not
+		// vendor-only and must not be filtered as library noise.
+		endpoint.Vendor = false
+	}
 	if len(endpoint.BodyParams) == 0 && len(candidate.BodyParams) > 0 {
 		endpoint.BodyParams = candidate.BodyParams
 	}
@@ -514,13 +710,77 @@ func evidenceRank(evidence string) int {
 	}
 }
 
-// analyzeDeferred runs the regex engine and AST extractor over one downloaded
-// script or chunk, merging findings and endpoint candidates into the result.
-// Follow-up resources enqueued here (API probes) are drained by the caller.
-func (p *Pipeline) analyzeDeferred(state *runState, item deferredJS) {
-	jsResult := discover.FromJavaScript(item.source, item.body, p.options.Analyzer)
-	mergeSPAEvidence(state.spa, jsResult.SPA)
-	for _, finding := range jsResult.Findings {
+// deferredAnalysis is the analysis output for one deferred JavaScript item,
+// kept positionally aligned with its batch so merging stays deterministic.
+type deferredAnalysis struct {
+	vendor     bool
+	item       deferredJS
+	findings   []model.Finding
+	candidates []discover.Candidate
+	spa        discover.SPAEvidence
+	readErr    error
+}
+
+// computeBatch loads and analyzes deferred JavaScript bodies in parallel.
+// Items with a saved file are read from disk (dropping the in-memory copy
+// after the save); items with a fallback body are analyzed from memory.
+// The caller merges results sequentially so endpoint ordering stays stable.
+func (p *Pipeline) computeBatch(batch []deferredJS) []deferredAnalysis {
+	analyses := make([]deferredAnalysis, len(batch))
+	var wait sync.WaitGroup
+	wait.Add(len(batch))
+	for index := range batch {
+		item := batch[index]
+		go func() {
+			defer wait.Done()
+			analysis := deferredAnalysis{item: item, vendor: item.vendor}
+			body := item.body
+			if item.path != "" {
+				loaded, readErr := storage.LoadJS(
+					p.options.Config.Output.Directory, item.path,
+				)
+				if readErr != nil {
+					analysis.readErr = readErr
+					analyses[index] = analysis
+					return
+				}
+				body = loaded
+			}
+			if body == nil {
+				analysis.readErr = errors.New("no saved file or in-memory body to analyze")
+				analyses[index] = analysis
+				return
+			}
+			jsResult := discover.FromJavaScript(item.source, body, p.options.Analyzer)
+			analysis.findings = jsResult.Findings
+			analysis.spa = jsResult.SPA
+			analysis.candidates = discover.APIFromAST(item.source, body)
+			analyses[index] = analysis
+		}()
+	}
+	wait.Wait()
+	return analyses
+}
+
+// mergeDeferred folds one analysis result into the run state.
+func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
+	if analysis.readErr != nil {
+		state.result.Issues = append(state.result.Issues, model.Issue{
+			Code: "js_analysis_failed", Stage: "analyze", URL: analysis.item.source.String(),
+			Message: analysis.readErr.Error(),
+		})
+		return
+	}
+	mergeSPAEvidence(state.spa, analysis.spa)
+	if analysis.vendor {
+		for index := range analysis.findings {
+			analysis.findings[index].Vendor = true
+		}
+		for index := range analysis.candidates {
+			analysis.candidates[index].Vendor = true
+		}
+	}
+	for _, finding := range analysis.findings {
 		key := finding.RuleID + "\x00" + finding.SourceURL + "\x00" + finding.Value
 		if _, duplicate := state.findingSeen[key]; duplicate {
 			continue
@@ -530,9 +790,9 @@ func (p *Pipeline) analyzeDeferred(state *runState, item deferredJS) {
 	}
 	p.processCandidates(
 		state,
-		item.source.String(),
-		discover.APIFromAST(item.source, item.body),
-		item.depth,
+		analysis.item.source.String(),
+		analysis.candidates,
+		analysis.item.depth,
 	)
 }
 
@@ -606,6 +866,11 @@ func (p *Pipeline) collectOne(
 		htmlResult := discover.FromHTML(discoveryBase, response.Body)
 		mergeSPAEvidence(&result.spa, htmlResult.SPA)
 		result.candidates = append(result.candidates, htmlResult.Candidates...)
+		// Vue CLI inlines the webpack runtime into the HTML entry, so the
+		// chunk map may only exist in the document body.
+		result.candidates = append(result.candidates, discover.FromWebpack(
+			discoveryBase, response.Body, p.candidateLimit(),
+		)...)
 		result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, textResult.SPA)
@@ -623,6 +888,21 @@ func (p *Pipeline) collectOne(
 		}
 	case item.Kind == model.ResourceTypeScript || item.Kind == model.ResourceTypeChunk ||
 		strings.Contains(contentType, "javascript"):
+		vendor := discover.IsThirdPartyBundle(response.Body)
+		if vendor && p.options.Config.Scope.SkipLibraryBundles {
+			// Its license banner identifies a third-party library, so the
+			// regex and AST pass would only add vendor noise. The resource is
+			// still recorded.
+			break
+		}
+		// With the skip disabled the bundle is still parsed, but everything it
+		// yields is labelled so the report can separate library noise from
+		// application results.
+		result.vendor = vendor
+		vendorCandidates, vendorFindings := len(result.candidates), len(result.findings)
+		defer func() {
+			markVendor(&result, vendor, vendorCandidates, vendorFindings)
+		}()
 		if !deferJS {
 			result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
 		}
@@ -642,7 +922,7 @@ func (p *Pipeline) collectOne(
 			discover.FromWebpack(
 				discoveryBase,
 				response.Body,
-				p.options.Config.Limits.MaxResources,
+				p.candidateLimit(),
 			)...,
 		)
 		result.candidates = append(
@@ -650,9 +930,15 @@ func (p *Pipeline) collectOne(
 			discover.FromRequireJS(
 				discoveryBase,
 				response.Body,
-				p.options.Config.Limits.MaxResources,
+				p.candidateLimit(),
 			)...,
 		)
+		p.absorbSourceMap(&result, source, discoveryBase, response.Body)
+	case item.Kind == model.ResourceTypeSourceMap ||
+		strings.HasSuffix(strings.ToLower(source.Path), ".map"):
+		// A map embeds the unminified originals; run the same extractors over
+		// each of them, the way shuji restores sources.
+		absorbRecoveredSources(&result, source, response.Body, p.options.Analyzer, p.options.Config.Scope.SkipLibraryBundles)
 	case isTextualContentType(contentType):
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, textResult.SPA)
@@ -681,6 +967,11 @@ func (p *Pipeline) probeRoutes(
 		}
 		target, err := url.Parse(endpoint.URL)
 		if err != nil || target.Host != root.Host || probed >= maxRouteProbes {
+			continue
+		}
+		if target.Fragment != "" {
+			// Hash routes are client-side only: a GET would just fetch the
+			// index page again.
 			continue
 		}
 		probed++
@@ -715,6 +1006,34 @@ func (p *Pipeline) routeBodyHash(
 		return empty, false
 	}
 	return sha256.Sum256(response.Body), true
+}
+
+// routeCanonical returns the dedup and display URL for a route. Hash-router
+// routes keep their fragment so "/#/admin" stays distinct from the index URL.
+func routeCanonical(candidate *url.URL) string {
+	canonical := scope.Canonical(candidate)
+	if candidate.Fragment != "" {
+		canonical += "#" + candidate.EscapedFragment()
+	}
+	return canonical
+}
+
+// asHashRoute rewrites a path into its hash-router form: a hash-mode SPA
+// serves one document and keeps the route after "#", so "/login" is really
+// "/#/login". The fragment is appended verbatim so an embedded query keeps
+// its original escaping.
+func asHashRoute(resolved *url.URL) string {
+	base := *resolved
+	fragment := base.Path
+	if base.RawQuery != "" {
+		fragment += "?" + base.RawQuery
+	}
+	base.Path = "/"
+	base.RawPath = ""
+	base.RawQuery = ""
+	base.Fragment = ""
+	base.RawFragment = ""
+	return base.String() + "#" + fragment
 }
 
 func isRelativeReference(raw string) bool {
@@ -767,10 +1086,18 @@ func mergeSPAEvidence(target *discover.SPAEvidence, source discover.SPAEvidence)
 	target.RootNode = target.RootNode || source.RootNode
 	target.DynamicImport = target.DynamicImport || source.DynamicImport
 	target.HistoryRouting = target.HistoryRouting || source.HistoryRouting
+	target.HashRouting = target.HashRouting || source.HashRouting
 	target.DynamicScript = target.DynamicScript || source.DynamicScript
 	target.Webpack = target.Webpack || source.Webpack
 	target.RequireJS = target.RequireJS || source.RequireJS
 	target.LargeBundle = target.LargeBundle || source.LargeBundle
+}
+
+// Finalize sorts the result and recomputes its statistics. It is idempotent,
+// so callers that merge results from a second pass can refresh the counts the
+// report header shows.
+func Finalize(result *model.Result) {
+	finalize(result)
 }
 
 func finalize(result *model.Result) {
@@ -793,15 +1120,18 @@ func finalize(result *model.Result) {
 		return result.Findings[i].RuleID < result.Findings[j].RuleID
 	})
 
-	result.Statistics.Resources = len(result.Resources)
-	result.Statistics.Endpoints = len(result.Endpoints)
-	result.Statistics.Findings = len(result.Findings)
+	scripts, chunks := 0, 0
 	for _, resource := range result.Resources {
 		switch resource.Type {
 		case model.ResourceTypeScript:
-			result.Statistics.Scripts++
+			scripts++
 		case model.ResourceTypeChunk:
-			result.Statistics.Chunks++
+			chunks++
 		}
 	}
+	result.Statistics.Resources = len(result.Resources)
+	result.Statistics.Scripts = scripts
+	result.Statistics.Chunks = chunks
+	result.Statistics.Endpoints = len(result.Endpoints)
+	result.Statistics.Findings = len(result.Findings)
 }

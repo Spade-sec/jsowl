@@ -6,11 +6,12 @@ import "github.com/youmulijiang/jsowl/internal/model"
 type Kind string
 
 const (
-	KindScript   Kind = "script"
-	KindChunk    Kind = "chunk"
-	KindEndpoint Kind = "endpoint"
-	KindRoute    Kind = "route"
-	KindAsset    Kind = "asset"
+	KindScript    Kind = "script"
+	KindChunk     Kind = "chunk"
+	KindEndpoint  Kind = "endpoint"
+	KindRoute     Kind = "route"
+	KindAsset     Kind = "asset"
+	KindSourceMap Kind = "sourcemap"
 )
 
 // Candidate describes a URL-like value and the resource that exposed it.
@@ -30,6 +31,8 @@ type Candidate struct {
 	ContextLines []model.ContextLine
 	// BodyParams lists request-body field names for write methods.
 	BodyParams []string
+	// Vendor marks a candidate extracted from a third-party library bundle.
+	Vendor bool
 	// Source records the extractor that produced this candidate: ast or regex.
 	Source string
 	// RuleID is the regex rule that matched, when extraction came from rules.
@@ -41,10 +44,13 @@ type SPAEvidence struct {
 	RootNode       bool
 	DynamicImport  bool
 	HistoryRouting bool
-	DynamicScript  bool
-	Webpack        bool
-	RequireJS      bool
-	LargeBundle    bool
+	// HashRouting marks hash-mode routers (createWebHashHistory, mode:"hash"):
+	// the SPA serves one document and keeps the route after "#".
+	HashRouting   bool
+	DynamicScript bool
+	Webpack       bool
+	RequireJS     bool
+	LargeBundle   bool
 }
 
 // HTMLResult contains resources, inline scripts, and SPA signals extracted from HTML.

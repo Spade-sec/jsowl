@@ -34,7 +34,7 @@ if [[ -z "$VERSION" ]]; then
     fi
 fi
 
-LDFLAGS="-X main.version=${VERSION}"
+LDFLAGS="-X main.version=${VERSION} -s -w"
 mkdir -p bin
 
 echo "== JsOwl build: version ${VERSION} =="

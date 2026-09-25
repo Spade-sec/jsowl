@@ -25,14 +25,27 @@ type splitReport struct {
 func WriteSplitReports(directory string, result *model.Result) error {
 	reports := []splitReport{
 		{"API报告.html", "API 端点报告", renderAPIReport},
+		{"URL报告.html", "完整 URL 报告", renderURLReport},
 		{"敏感信息报告.html", "敏感信息报告", renderSensitiveReport},
 		{"参数报告.html", "请求参数报告", renderParameterReport},
 		{"路由报告.html", "路由探测报告", renderRouteReport},
 		{"资源报告.html", "资源报告", renderResourceReport},
 	}
+	// Build the full navigation first so every page shares the same nav bar.
 	links := []linkItem{
 		{File: "report.html", Name: "主报告", Desc: "交互式总览"},
 	}
+	for _, report := range reports {
+		links = append(links, linkItem{File: report.file, Name: report.title})
+	}
+	links = append(links,
+		linkItem{File: "api绝对路径.txt", Name: "API 绝对路径", Desc: "纯文本 /a/b/c 路径列表"},
+		linkItem{File: "api相对路径.txt", Name: "API 相对路径", Desc: "纯文本 a/b/c 路径列表"},
+		linkItem{File: "url.txt", Name: "完整 URL", Desc: "纯文本 http(s) URL 列表"},
+		linkItem{File: "路由.txt", Name: "路由", Desc: "纯文本路由列表"},
+		linkItem{File: "参数.txt", Name: "请求参数", Desc: "纯文本参数名列表"},
+		linkItem{File: "敏感信息.txt", Name: "敏感信息", Desc: "纯文本命中列表"},
+	)
 	for _, report := range reports {
 		count, body, err := report.render(result)
 		if err != nil {
@@ -45,19 +58,11 @@ func WriteSplitReports(directory string, result *model.Result) error {
 		if err := writeAtomic(filepath.Join(directory, report.file), []byte(page)); err != nil {
 			return err
 		}
-		links = append(links, linkItem{File: report.file, Name: report.title})
 	}
-	links = append(links,
-		linkItem{File: "api路径.txt", Name: "API 路径", Desc: "纯文本端点列表"},
-		linkItem{File: "路由.txt", Name: "路由", Desc: "纯文本路由列表"},
-		linkItem{File: "参数.txt", Name: "请求参数", Desc: "参数名=值 与来源"},
-		linkItem{File: "敏感信息.txt", Name: "敏感信息", Desc: "纯文本命中列表"},
-	)
-	index, err := renderIndex(result, links)
-	if err != nil {
-		return err
-	}
-	return writeAtomic(filepath.Join(directory, "报告导航.html"), []byte(index))
+	// No separate navigation page: the main report.html links to every
+	// split page and txt file (see splitLinks in assets/report.html), and
+	// each split page links back through its own nav bar.
+	return nil
 }
 
 type linkItem struct {
@@ -86,42 +91,54 @@ const splitBase = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{.Title}} · JsOwl</title>
 <style>
-:root{color-scheme:dark;--bg:#0b1020;--panel:#151c31;--line:#29334f;--text:#e8edf8;--muted:#9aa8c7;--accent:#79d7ff;--warn:#ffcb6b;--danger:#ff6b6b}
+:root{color-scheme:light;--bg:#f5f6f8;--panel:#ffffff;--line:#e4e7ec;--text:#1f2329;--muted:#8a919c;--accent:#2f6fed;--accent-soft:#eaf1fe;--warn:#b7791f;--danger:#d64545;--success:#2f9e6e}
 *{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 system-ui,sans-serif}
-header{padding:16px 24px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:10px;align-items:baseline}
-h1{margin:0;font-size:18px}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif}
+header{padding:16px 24px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;background:var(--panel)}
+h1{margin:0;font-size:18px;font-weight:600}
 .target{color:var(--muted);font-size:13px;word-break:break-all}
-nav{display:flex;flex-wrap:wrap;gap:8px;padding:12px 24px;border-bottom:1px solid var(--line);background:var(--panel)}
-nav a{color:var(--muted);text-decoration:none;padding:4px 12px;border:1px solid var(--line);border-radius:8px;font-size:13px}
+nav{display:flex;flex-wrap:wrap;gap:8px;padding:10px 24px;border-bottom:1px solid var(--line);background:var(--panel);position:sticky;top:0;z-index:10}
+nav a{color:var(--muted);text-decoration:none;padding:4px 12px;border:1px solid var(--line);border-radius:999px;font-size:13px;background:var(--panel)}
 nav a:hover{color:var(--accent);border-color:var(--accent)}
-nav a.active{color:var(--bg);background:var(--accent);border-color:var(--accent);font-weight:600}
+nav a.active{color:#fff;background:var(--accent);border-color:var(--accent);font-weight:600}
 main{padding:16px 24px}
 .count{color:var(--muted);font-size:13px;margin:0 0 10px}
-table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+table{width:100%;border-collapse:separate;border-spacing:0;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
 th,td{padding:8px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;font-size:13px}
-th{background:rgba(11,16,32,.7);color:var(--muted);font-size:12px;position:sticky;top:0}
+th{background:#fafbfc;color:var(--muted);font-size:12px;font-weight:500;position:sticky;top:0}
 tr:last-child td{border-bottom:none}
-code{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(--bg);padding:1px 6px;border-radius:4px;word-break:break-all}
-.sev{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;text-transform:uppercase}
-.sev.critical,.sev.high{background:rgba(255,107,107,.16);color:var(--danger)}
-.sev.medium{background:rgba(255,203,107,.15);color:var(--warn)}
-.sev.low{background:rgba(121,215,255,.15);color:var(--accent)}
-.sev.info,.sev.static{background:rgba(158,168,199,.15);color:var(--muted)}
-.sev.runtime{background:rgba(126,231,135,.16);color:#7ee787}
-.sev.full-url{background:rgba(255,203,107,.15);color:var(--warn)}
+tr:hover td{background:#f8f9fb}
+code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;background:var(--bg);padding:1px 6px;border-radius:4px;word-break:break-all}
+.sev{display:inline-block;padding:1px 8px;border-radius:999px;font-size:11px;font-weight:600;text-transform:uppercase;white-space:nowrap}
+.sev.critical{background:#fdecec;color:var(--danger)}
+.sev.high{background:#fdecec;color:var(--danger)}
+.sev.medium{background:#fdf3e3;color:var(--warn)}
+.sev.low{background:var(--accent-soft);color:var(--accent)}
+.sev.info,.sev.static{background:#f0f1f3;color:var(--muted)}
+.sev.runtime{background:#e6f6ef;color:var(--success)}
+.sev.full-url{background:#fdf3e3;color:var(--warn)}
+.sev.vendor{background:#f0f1f3;color:var(--muted);border:1px dashed var(--line)}
 .muted{color:var(--muted);font-size:12px}
-.section-title{margin:18px 0 10px;font-size:15px;color:var(--accent)}
-.copy-btn{background:var(--bg);border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:1px 8px;font-size:11px;cursor:pointer;margin-left:8px;vertical-align:middle}
+.section-title{margin:18px 0 10px;font-size:15px;color:var(--text);font-weight:600}
+.copy-btn{background:var(--panel);border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:1px 8px;font-size:11px;cursor:pointer;margin-left:8px;vertical-align:middle}
 .copy-btn:hover{color:var(--accent);border-color:var(--accent)}
 .filterbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px}
 .filterbar label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
-.filterbar select,.filterbar input[type="search"]{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:5px 10px;font-size:13px}
+.filterbar select,.filterbar input[type="search"]{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:13px}
 details.ctx{margin-top:6px}
 details.ctx summary{cursor:pointer;color:var(--accent);font-size:12px;user-select:none}
-details.ctx pre{margin:6px 0 0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto}
+details.ctx pre{margin:6px 0 0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto}
+tr.ctx-row{display:none}
+tr.ctx-row.open{display:table-row}
+tr.ctx-row>td{padding:0 12px 12px;border-bottom:1px solid var(--line)}
+.ctx-block pre.ctx-pre{margin:0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto}
+.ctx-pre mark{background:#fdeea8;color:#7a5d00;border-radius:3px;padding:0 2px}
+.pager{display:flex;gap:8px;align-items:center;justify-content:center;padding:10px 0}
+.pager button{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:5px 12px;border-radius:8px;font-size:12px;cursor:pointer}
+.pager button:disabled{opacity:.4;cursor:not-allowed}
+.pager .page-info{font-size:12px;color:var(--muted);min-width:110px;text-align:center}
 td{word-break:break-all}
-footer{padding:12px 24px;color:var(--muted);font-size:12px;border-top:1px solid var(--line)}
+footer{padding:12px 24px;color:var(--muted);font-size:12px;border-top:1px solid var(--line);background:var(--panel)}
 </style>
 </head>
 <body>
@@ -132,6 +149,86 @@ footer{padding:12px 24px;color:var(--muted);font-size:12px;border-top:1px solid 
 {{.Body}}
 </main>
 <footer>JsOwl 安全信息收集报告 · 敏感数据，请妥善保管</footer>
+<script>
+(function(){
+  // Table pagination: every table.paginated shows data-page-size rows per
+  // page with a prev/next pager appended after it.
+  document.querySelectorAll('table.paginated').forEach(function(table){
+    var pageSize = parseInt(table.getAttribute('data-page-size') || '50', 10);
+    var tbody = table.tBodies[0];
+    if (!tbody) return;
+    // Data rows only: full-width context rows ride along with their
+    // endpoint row and must not consume page slots.
+    var rows = Array.prototype.slice.call(tbody.rows).filter(function(row){
+      return row.className.indexOf('ctx-row') === -1;
+    });
+    var totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    var page = 1;
+    var pager = document.createElement('div');
+    pager.className = 'pager';
+    table.parentNode.insertBefore(pager, table.nextSibling);
+    function apply(){
+      var first = (page - 1) * pageSize;
+      rows.forEach(function(row, index){
+        var visible = index >= first && index < first + pageSize;
+        row.style.display = visible ? '' : 'none';
+        var ctxRow = row.nextElementSibling;
+        if (ctxRow && ctxRow.className.indexOf('ctx-row') !== -1) {
+          ctxRow.style.display = visible && ctxRow.className.indexOf(' open') !== -1 ? '' : 'none';
+        }
+      });
+      var start = rows.length === 0 ? 0 : first + 1;
+      var end = Math.min(first + pageSize, rows.length);
+      pager.innerHTML = totalPages <= 1 ? '' :
+        '<button data-go="prev"' + (page <= 1 ? ' disabled' : '') + '>上一页</button>' +
+        '<span class="page-info">' + start + '-' + end + ' / ' + rows.length + '</span>' +
+        '<button data-go="next"' + (page >= totalPages ? ' disabled' : '') + '>下一页</button>';
+    }
+    pager.addEventListener('click', function(event){
+      var go = event.target.getAttribute && event.target.getAttribute('data-go');
+      if (go === 'prev' && page > 1) { page--; apply(); }
+      if (go === 'next' && page < totalPages) { page++; apply(); }
+    });
+    apply();
+  });
+
+  // Context toggle: the button sits in the endpoint row; the pre block lives
+  // in the full-width ctx-row right below it.
+  document.addEventListener('click', function(event){
+    var button = event.target.closest ? event.target.closest('.ctx-toggle') : null;
+    if (!button) return;
+    var row = button.closest('tr');
+    var ctxRow = row.nextElementSibling;
+    if (!ctxRow || ctxRow.className.indexOf('ctx-row') === -1) return;
+    var open = ctxRow.className.indexOf(' open') === -1;
+    ctxRow.className = open ? ctxRow.className + ' open' : ctxRow.className.replace(' open', '');
+    if (open && row.style.display !== 'none') ctxRow.style.display = '';
+    else ctxRow.style.display = 'none';
+    button.textContent = open ? '收起上下文' : '上下文';
+  });
+
+  document.addEventListener('click', function(event){
+    var button = event.target.closest('[data-copy]');
+    if (!button) return;
+    var text = button.getAttribute('data-copy');
+    var done = function(){ button.textContent = '已复制'; setTimeout(function(){ button.textContent = '复制'; }, 1200); };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, function(){ fallbackCopy(text, done); });
+    } else {
+      fallbackCopy(text, done);
+    }
+  });
+  function fallbackCopy(text, done){
+    var area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed'; area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); done(); } catch (e) {}
+    document.body.removeChild(area);
+  }
+})();
+</script>
 </body>
 </html>
 `
@@ -159,52 +256,58 @@ func renderAPIReport(result *model.Result) (int, string, error) {
 		return apiPath(endpoints[i]) < apiPath(endpoints[j])
 	})
 
-	relative, absolute := 0, 0
+	relative, absolute, full := 0, 0, 0
 	relativeRows, absoluteRows := &strings.Builder{}, &strings.Builder{}
 	for _, endpoint := range endpoints {
-		if isRelativeRaw(apiPath(endpoint)) {
+		switch _, kind := classifyAPIPath(endpoint); kind {
+		case apiPathURL:
+			// Full http(s) URLs live in the URL report, not the path report.
+			full++
+		case apiPathRelative:
 			renderAPIRow(relativeRows, endpoint)
 			relative++
-		} else {
+		default:
 			renderAPIRow(absoluteRows, endpoint)
 			absolute++
 		}
 	}
 
 	var b strings.Builder
-	b.WriteString(`<div class="filterbar"><span class="muted">点击路径旁的“复制”按钮复制纯路径；每条路径可展开查看 JS 上下文（路径已高亮）。</span></div>`)
+	b.WriteString(`<div class="filterbar"><span class="muted">点击路径旁的“复制”按钮复制纯路径；每条路径可展开查看 JS 上下文（路径已高亮）。完整 http(s) URL 见“完整 URL 报告”。</span></div>`)
 	writeAPISection := func(title string, rows *strings.Builder, count int) {
-		if count == 0 {
-			return
-		}
-		fmt.Fprintf(&b, `<h2 class="section-title">%s（%d）</h2><table><thead><tr><th>路径</th><th style="width:70px">方法</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:60px">状态</th></tr></thead><tbody>%s</tbody></table>`,
+		fmt.Fprintf(&b, `<h2 class="section-title">%s（%d）</h2><table class="paginated" data-page-size="50"><thead><tr><th>路径</th><th style="width:70px">方法</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:60px">状态</th></tr></thead><tbody>%s</tbody></table>`,
 			htmlEscape(title), count, rows.String())
 	}
 	writeAPISection("相对路径", relativeRows, relative)
 	writeAPISection("绝对路径", absoluteRows, absolute)
-	b.WriteString(`<script>
-	document.addEventListener('click', function(event){
-	  var button = event.target.closest('[data-copy]');
-	  if (!button) return;
-	  var text = button.getAttribute('data-copy');
-	  var done = function(){ button.textContent = '已复制'; setTimeout(function(){ button.textContent = '复制'; }, 1200); };
-	  if (navigator.clipboard && window.isSecureContext) {
-	    navigator.clipboard.writeText(text).then(done, function(){ fallbackCopy(text, done); });
-	  } else {
-	    fallbackCopy(text, done);
-	  }
-	});
-	function fallbackCopy(text, done){
-	  var area = document.createElement('textarea');
-	  area.value = text;
-	  area.style.position = 'fixed'; area.style.opacity = '0';
-	  document.body.appendChild(area);
-	  area.select();
-	  try { document.execCommand('copy'); done(); } catch (e) {}
-	  document.body.removeChild(area);
+	if full > 0 {
+		fmt.Fprintf(&b, `<h2 class="section-title">完整 URL（%d）</h2><p class="muted">已移至 <a href="URL报告.html">完整 URL 报告</a>。</p>`, full)
 	}
-	</script>`)
-	return len(endpoints), b.String(), nil
+	return relative + absolute, b.String(), nil
+}
+
+// apiPathKind classifies one endpoint reference for the path reports. The
+// HTML sections and the txt files must agree on this split, otherwise their
+// counts never line up.
+type apiPathKind int
+
+const (
+	apiPathRelative apiPathKind = iota
+	apiPathAbsolute
+	apiPathURL
+)
+
+// classifyAPIPath returns the reference as written in the source plus its
+// kind. A complete http(s) URL is never a path.
+func classifyAPIPath(endpoint model.Endpoint) (string, apiPathKind) {
+	path := apiPath(endpoint)
+	if isFullURL(path) {
+		return path, apiPathURL
+	}
+	if isRelativeRaw(path) {
+		return path, apiPathRelative
+	}
+	return path, apiPathAbsolute
 }
 
 // apiPath returns the path as written in the source, without folding it
@@ -234,25 +337,39 @@ func renderAPIRow(b *strings.Builder, endpoint model.Endpoint) {
 	if len(endpoint.BodyParams) > 0 {
 		bodyNote = `<div class="muted">body: ` + htmlEscape(strings.Join(endpoint.BodyParams, ", ")) + `</div>`
 	}
-	context := renderContextBlock(endpoint.ContextLines, endpoint.Raw, endpoint.URL)
+	// Context expands in its own full-width row: a pre block inside the
+	// narrow path cell would wrap at the column width, not the table width.
+	contextToggle := ""
+	if len(endpoint.ContextLines) > 0 {
+		contextToggle = `<button class="copy-btn ctx-toggle">上下文</button>`
+	}
+	if endpoint.Vendor {
+		contextToggle = `<span class="sev vendor">vendor</span>` + contextToggle
+	}
 	fmt.Fprintf(b,
 		"<tr><td><code>%s</code><button class=\"copy-btn\" data-copy=\"%s\">复制</button>%s%s</td>"+
 			"<td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td>"+
 			"<td><code>%s</code></td><td>%d</td></tr>",
-		htmlEscape(path), htmlEscape(path), bodyNote, context,
+		htmlEscape(path), htmlEscape(path), bodyNote, contextToggle,
 		htmlEscape(method), evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
 		htmlEscape(location), endpoint.StatusCode)
+	if len(endpoint.ContextLines) > 0 {
+		fmt.Fprintf(b,
+			`<tr class="ctx-row"><td colspan="5">%s</td></tr>`,
+			renderContextBlock(endpoint.ContextLines, endpoint.Raw, endpoint.URL))
+	}
 }
 
-// renderContextBlock formats endpoint context lines as an expandable pre
-// block; the extracted path fragments are highlighted inside the matched
-// line so the context can be pasted straight into an LLM prompt.
+// renderContextBlock formats endpoint context lines as a hidden pre block
+// spanning the full table width; the extracted path fragments are
+// highlighted inside the matched line so the context can be pasted straight
+// into an LLM prompt.
 func renderContextBlock(lines []model.ContextLine, raw, resolved string) string {
 	if len(lines) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString(`<details class="ctx"><summary>上下文</summary><pre>`)
+	b.WriteString(`<div class="ctx-block"><pre class="ctx-pre">`)
 	for _, line := range lines {
 		marker := " "
 		content := htmlEscape(line.Content)
@@ -260,9 +377,15 @@ func renderContextBlock(lines []model.ContextLine, raw, resolved string) string 
 			marker = ">"
 			content = highlightFragments(line.Content, pathFragments(raw, resolved))
 		}
+		// Defense in depth: discover already trims minified lines, but
+		// results loaded from older JSON or external files may still carry
+		// whole-bundle lines; cap them so one row cannot blow up the page.
+		if len(content) > 2000 {
+			content = content[:2000] + "…"
+		}
 		fmt.Fprintf(&b, "%s %4d | %s\n", marker, line.LineNumber, content)
 	}
-	b.WriteString("</pre></details>")
+	b.WriteString("</pre></div>")
 	return b.String()
 }
 
@@ -304,6 +427,66 @@ func highlightFragments(content string, fragments []string) string {
 	return escaped
 }
 
+// renderURLReport lists every full http(s) URL with its host and source.
+func renderURLReport(result *model.Result) (int, string, error) {
+	seen := make(map[string]struct{})
+	urls := make([]model.Endpoint, 0)
+	for _, endpoint := range result.Endpoints {
+		raw := endpoint.Raw
+		if raw == "" {
+			raw = endpoint.URL
+		}
+		if !isFullURL(raw) {
+			continue
+		}
+		if _, duplicate := seen[raw]; duplicate {
+			continue
+		}
+		seen[raw] = struct{}{}
+		urls = append(urls, endpoint)
+	}
+	resourceSeen := make(map[string]struct{})
+	for raw := range seen {
+		resourceSeen[raw] = struct{}{}
+	}
+	for _, resource := range result.Resources {
+		if !isFullURL(resource.URL) {
+			continue
+		}
+		if _, duplicate := resourceSeen[resource.URL]; duplicate {
+			continue
+		}
+		resourceSeen[resource.URL] = struct{}{}
+		seen[resource.URL] = struct{}{}
+		urls = append(urls, model.Endpoint{Raw: resource.URL, URL: resource.URL})
+	}
+	sort.SliceStable(urls, func(i, j int) bool { return urls[i].Raw < urls[j].Raw })
+
+	var b strings.Builder
+	b.WriteString(`<div class="filterbar"><span class="muted">API 端点与资源中出现的完整 http(s) URL，去重后的全集；纯路径见 API 报告。纯文本版本见 url.txt。</span></div>`)
+	fmt.Fprintf(&b, `<table class="paginated" data-page-size="50"><thead><tr><th>URL</th><th style="width:140px">方法</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:60px">状态</th></tr></thead><tbody>`)
+	for _, endpoint := range urls {
+		method := endpoint.Method
+		if method == "" {
+			method = "—"
+		}
+		source := endpoint.SourceURL
+		if source == "" {
+			source = "—"
+		}
+		fmt.Fprintf(&b,
+			"<tr><td><code>%s</code><button class=\"copy-btn\" data-copy=\"%s\">复制</button></td>"+
+				"<td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td>"+
+				"<td><code>%s</code></td><td>%d</td></tr>",
+			htmlEscape(endpoint.Raw), htmlEscape(endpoint.Raw),
+			htmlEscape(method),
+			evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
+			htmlEscape(source), endpoint.StatusCode)
+	}
+	b.WriteString(`</tbody></table>`)
+	return len(urls), b.String(), nil
+}
+
 func renderSensitiveReport(result *model.Result) (int, string, error) {
 	findings := make([]model.Finding, 0, len(result.Findings))
 	for _, finding := range result.Findings {
@@ -314,10 +497,14 @@ func renderSensitiveReport(result *model.Result) (int, string, error) {
 	var b strings.Builder
 	b.WriteString(`<table><thead><tr><th style="width:90px">严重性</th><th style="width:200px">规则</th><th>完整值</th><th style="width:280px">来源</th></tr></thead><tbody>`)
 	for _, finding := range findings {
+		vendorMark := ""
+		if finding.Vendor {
+			vendorMark = ` <span class="sev vendor">vendor</span>`
+		}
 		fmt.Fprintf(&b,
-			"<tr><td><span class=\"sev %s\">%s</span></td><td>%s<div class=\"muted\">%s</div></td><td><code>%s</code></td><td><code>%s</code><div class=\"muted\">行 %d 列 %d</div></td></tr>",
+			"<tr><td><span class=\"sev %s\">%s</span></td><td>%s%s<div class=\"muted\">%s</div></td><td><code>%s</code></td><td><code>%s</code><div class=\"muted\">行 %d 列 %d</div></td></tr>",
 			htmlEscape(string(finding.Severity)), htmlEscape(string(finding.Severity)),
-			htmlEscape(finding.RuleName), htmlEscape(finding.RuleID),
+			htmlEscape(finding.RuleName), vendorMark, htmlEscape(finding.RuleID),
 			htmlEscape(finding.Value), htmlEscape(finding.SourceURL),
 			finding.Line, finding.Column)
 	}
@@ -382,6 +569,7 @@ type parameterStat struct {
 	Example   string
 	FirstSeen string
 	Body      bool
+	Response  bool
 }
 
 // collectParameterStats merges URL query parameters and AST body parameters
@@ -394,9 +582,10 @@ func collectParameterStats(result *model.Result) []parameterStat {
 		example   string
 		firstSeen string
 		body      bool
+		response  bool
 	}
 	stats := map[string]*entry{}
-	add := func(name, value, sourceURL, extractor string, isBody bool) {
+	add := func(name, value, sourceURL, extractor string, isBody, isResponse bool) {
 		stat, exists := stats[name]
 		if !exists {
 			stat = &entry{
@@ -408,6 +597,9 @@ func collectParameterStats(result *model.Result) []parameterStat {
 		stat.count++
 		if isBody {
 			stat.body = true
+		}
+		if isResponse {
+			stat.response = true
 		}
 		if sourceURL != "" {
 			if parsed, err := url.Parse(sourceURL); err == nil && parsed.Host != "" {
@@ -439,11 +631,14 @@ func collectParameterStats(result *model.Result) []parameterStat {
 				if len(values) > 0 {
 					value = values[0]
 				}
-				add(key, value, endpoint.URL, extractor, false)
+				add(key, value, endpoint.URL, extractor, false, false)
 			}
 		}
 		for _, name := range endpoint.BodyParams {
-			add(name, "(body)", endpoint.URL, extractor, true)
+			add(name, "(body)", endpoint.URL, extractor, true, false)
+		}
+		for _, name := range endpoint.ResponseParams {
+			add(name, "(response)", endpoint.URL, extractor, false, true)
 		}
 	}
 	for _, resource := range result.Resources {
@@ -456,7 +651,7 @@ func collectParameterStats(result *model.Result) []parameterStat {
 			if len(values) > 0 {
 				value = values[0]
 			}
-			add(key, value, resource.URL, "url", false)
+			add(key, value, resource.URL, "url", false, false)
 		}
 	}
 
@@ -470,7 +665,8 @@ func collectParameterStats(result *model.Result) []parameterStat {
 		stat := stats[name]
 		row := parameterStat{
 			Name: name, Count: stat.count,
-			Example: stat.example, FirstSeen: stat.firstSeen, Body: stat.body,
+			Example: stat.example, FirstSeen: stat.firstSeen,
+			Body: stat.body, Response: stat.response,
 		}
 		for host := range stat.hosts {
 			row.Hosts = append(row.Hosts, host)
@@ -515,6 +711,9 @@ func renderParameterReport(result *model.Result) (int, string, error) {
 		markers := ""
 		if row.Body {
 			markers = ` <span class="sev full-url">body</span>`
+		}
+		if row.Response {
+			markers += ` <span class="sev runtime">response</span>`
 		}
 		fmt.Fprintf(&b,
 			"<tr data-hosts=%q><td><code>%s</code>%s</td><td>%d</td><td class=\"muted\">%s</td><td>%s</td><td><code>%s</code></td><td><code>%s</code></td></tr>",
@@ -631,18 +830,6 @@ func renderResourceReport(result *model.Result) (int, string, error) {
 	return len(resources), b.String(), nil
 }
 
-func renderIndex(result *model.Result, links []linkItem) (string, error) {
-	body := fmt.Sprintf(`<table><tbody>
-<tr><td style="width:120px">资源</td><td>%d</td></tr>
-<tr><td>端点</td><td>%d</td></tr>
-<tr><td>发现</td><td>%d</td></tr>
-</tbody></table>
-<p class="count" style="margin-top:14px">从上方导航进入各分项报告；纯文本结果适合直接喂给其他工具。</p>`,
-		len(result.Resources), len(result.Endpoints), len(result.Findings))
-	return renderSplitPage(result, "报告导航", links,
-		len(result.Resources)+len(result.Endpoints)+len(result.Findings), body)
-}
-
 func evidenceClass(evidence string) string {
 	switch evidence {
 	case model.EvidenceRuntime, model.EvidenceFullURL:
@@ -660,10 +847,13 @@ func evidenceLabel(evidence string) string {
 }
 
 // isRelativeRaw reports whether the pre-resolution endpoint reference was
-// a relative path.
+// a relative path such as "a/b" or "./a"; "/a/b" counts as absolute.
 func isRelativeRaw(raw string) bool {
 	parsed, err := url.Parse(raw)
-	return err == nil && parsed.Scheme == "" && parsed.Host == ""
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" {
+		return false
+	}
+	return !strings.HasPrefix(raw, "/")
 }
 
 func htmlEscape(value string) string {
