@@ -50,3 +50,20 @@ type DefaultTaintEnricher struct{}
 func (DefaultTaintEnricher) EnrichTaint(result *model.Result) *model.Result {
 	return result
 }
+
+// FindingEnricher is the reserved extension point for AI-assisted sensitive
+// finding triage: rating how exploitable each finding actually is, so the
+// report separates real credentials from placeholder-looking junk.
+type FindingEnricher interface {
+	// EnrichFindings may attach model.AIAssessment to findings; it must not
+	// modify values or drop findings.
+	EnrichFindings(result *model.Result) *model.Result
+}
+
+// DefaultFindingEnricher is the no-op used until an AI implementation exists.
+type DefaultFindingEnricher struct{}
+
+// EnrichFindings returns the result unchanged.
+func (DefaultFindingEnricher) EnrichFindings(result *model.Result) *model.Result {
+	return result
+}

@@ -35,6 +35,7 @@ type options struct {
 	check           bool
 	autoFormFill    bool
 	maxInteractions int
+	ai              bool
 }
 
 // register binds all flags. The declaration order is the --help order.
@@ -60,6 +61,8 @@ func (o *options) register(flags *pflag.FlagSet) {
 		"automatic form fill: fill and submit page forms AND click interactive elements at runtime (katana-style, may trigger write paths); enables browser.auto_form and browser.trigger_events together")
 	flags.IntVar(&o.maxInteractions, "max-interactions", 0,
 		"cap form submits plus event clicks per page (default 20)")
+	flags.BoolVar(&o.ai, "ai", false,
+		"enable AI-assisted analysis (needs ai.api_key in config): parameter completeness/authenticity review, unknown-taint origin inference, sensitive-finding value rating")
 }
 
 // applyOverrides folds the flags the user passed into the layered
@@ -83,6 +86,9 @@ func (o *options) applyOverrides(command *cobra.Command, config *jsowl.Config) e
 	if command.Flags().Changed("aff") {
 		config.Browser.AutoForm = o.autoFormFill
 		config.Browser.TriggerEvents = o.autoFormFill
+	}
+	if command.Flags().Changed("ai") {
+		config.AI.Enabled = o.ai
 	}
 	if command.Flags().Changed("max-interactions") {
 		config.Browser.MaxInteractions = o.maxInteractions

@@ -263,6 +263,30 @@ type Config struct {
 	Output      OutputConfig      `yaml:"output" json:"output"`
 	RulesFile   string            `yaml:"rules_file" json:"rules_file,omitempty"`
 	Rules       RulesConfig       `yaml:"-" json:"rules"`
+	// AI configures the optional AI-assist layer (-ai): an OpenAI-compatible
+	// chat endpoint plus budget bounds. Credentials never serialize into
+	// scan results — results reference AI verdicts, not the key.
+	AI AIConfig `yaml:"ai" json:"ai"`
+}
+
+// AIConfig points at an OpenAI-compatible chat completions endpoint. Any
+// provider exposing that protocol works (GLM, one-api proxies, vLLM, ...).
+type AIConfig struct {
+	// Enabled is flipped by the -ai CLI flag; scans run the AI enrichers
+	// only when set.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// APIKey authenticates as a Bearer token.
+	APIKey string `yaml:"api_key" json:"-"`
+	// BaseURL is the provider root, e.g. https://open.bigmodel.cn/api/paas/v4.
+	BaseURL string `yaml:"base_url" json:"-"`
+	// Path is the chat completions route appended to BaseURL
+	// (default /chat/completions).
+	Path string `yaml:"path" json:"-"`
+	// Model is the model id requested in the payload.
+	Model string `yaml:"model" json:"model"`
+	// MaxRequests caps AI calls per scan (default 20) so a large target
+	// cannot run away with the budget.
+	MaxRequests int `yaml:"max_requests" json:"max_requests"`
 }
 
 // Target describes one isolated scan target and its request state.
@@ -428,6 +452,23 @@ type RequestTemplate struct {
 	// Notes carry caveats that would break the packet if ignored (e.g. the
 	// site likely hashes passwords before sending).
 	Notes []string `json:"notes,omitempty"`
+	// AI is the optional AI review of this packet (parameter completeness
+	// and authenticity); present only when -ai is enabled and the model
+	// responded for this endpoint.
+	AI *AIReview `json:"ai,omitempty"`
+}
+
+// AIReview is the AI layer's verdict on one reconstructed request packet.
+type AIReview struct {
+	// Completeness classifies the parameter set: complete, missing-fields,
+	// or uncertain.
+	Completeness string `json:"completeness,omitempty"`
+	// Assessment is a short human-readable authenticity judgement.
+	Assessment string `json:"assessment,omitempty"`
+	// SuggestedParams lists field names the AI believes the call probably
+	// needs but the static layer could not recover — advisory, never merged
+	// into the body itself.
+	SuggestedParams []string `json:"suggested_params,omitempty"`
 }
 
 // HeaderTpl is one reconstructed header line; Evidence distinguishes headers
@@ -460,6 +501,20 @@ type Finding struct {
 	Line         int           `json:"line"`
 	Column       int           `json:"column"`
 	ContextLines []ContextLine `json:"context_lines"`
+	// AI is the optional AI assessment of how exploitable/valuable this
+	// sensitive finding is; present only when -ai is enabled.
+	AI *AIAssessment `json:"ai,omitempty"`
+}
+
+// AIAssessment is the AI layer's value rating for one finding.
+type AIAssessment struct {
+	// Rating: high / medium / low / invalid.
+	Rating string `json:"rating"`
+	// Reason justifies the rating in one sentence.
+	Reason string `json:"reason,omitempty"`
+	// Suggestion names the next test the finding enables (e.g. try the key
+	// against the admin API).
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 // Issue records a non-fatal resource error or diagnostic event.

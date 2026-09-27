@@ -151,6 +151,16 @@ output:
   # 其余参数生成 {{fuzz:...}} 占位符，可直接复制进 burp/yakit 重放。
   request_template: true
 
+# AI 辅助分析（配合 -ai 开关）：基于静态提取的证据做参数完整性/真实性判断、
+# 未知污点来源推理、敏感信息价值评级。使用 OpenAI 兼容协议，GLM/one-api/vLLM 均可。
+# 必须设置 api_key 和 base_url 后 -ai 才能生效。
+ai:
+  # api_key: "your-api-key"
+  # base_url: "https://open.bigmodel.cn/api/paas/v4"
+  # path: "/chat/completions"        # OpenAI 兼容路径
+  # model: "glm-4-flash"
+  # max_requests: 20                 # 单次扫描 AI 请求上限
+
 # 相对路径以本配置文件所在目录为基准。
 # 不设置 rules_file 时，默认加载用户级 ~/.jsowl/rules.yaml（首次运行自动生成）。
 rules_file: ./rules.yml

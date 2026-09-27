@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/youmulijiang/jsowl/internal/analyze"
+	"github.com/youmulijiang/jsowl/internal/aiclient"
 	"github.com/youmulijiang/jsowl/internal/collect"
 	"github.com/youmulijiang/jsowl/internal/collect/browser"
 	"github.com/youmulijiang/jsowl/internal/collect/direct"
@@ -142,6 +143,15 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 		Getter: client, Analyzer: s.analyzer, Config: s.config,
 		ProbeEvents: s.probeSink,
 	})
+	// AI assist layer (-ai): the three enrichers share one client and one
+	// request budget. Without -ai they stay nil and the pipeline no-ops.
+	if s.config.AI.Enabled {
+		aiClient := aiclient.New(
+			s.config.AI.BaseURL, s.config.AI.APIKey, s.config.AI.Model, s.config.AI.Path,
+		)
+		templateAI, taintAI, findingAI := analyze.NewAIThird(aiClient, s.config.AI.MaxRequests)
+		resourcePipeline.SetEnrichers(templateAI, taintAI, findingAI)
+	}
 	var result *model.Result
 	switch s.config.Mode {
 	case ModeDirect:

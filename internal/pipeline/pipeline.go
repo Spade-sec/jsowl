@@ -30,6 +30,12 @@ type Options struct {
 	// ProbeEvents, when non-nil, receives one event per completed API probe.
 	// The pipeline never blocks on it; consumers must keep up or drop events.
 	ProbeEvents chan<- model.ProbeEvent
+	// TemplateEnricher / TaintEnricher / FindingEnricher are the optional AI
+	// refinement hooks; nil falls back to the no-op defaults so scans without
+	// -ai keep byte-identical behavior.
+	TemplateEnricher analyze.TemplateEnricher
+	TaintEnricher    analyze.TaintEnricher
+	FindingEnricher  analyze.FindingEnricher
 }
 
 // Pipeline recursively collects and analyzes one target within configured bounds.
@@ -111,6 +117,25 @@ type deferredJS struct {
 // New constructs a direct resource pipeline.
 func New(options Options) *Pipeline {
 	return &Pipeline{options: options}
+}
+
+// SetEnrichers injects the optional AI refinement hooks after construction
+// (the scanner builds them once the -ai configuration is known). Nil entries
+// keep the no-op defaults resolved at call time.
+func (p *Pipeline) SetEnrichers(
+	templateEnricher analyze.TemplateEnricher,
+	taintEnricher analyze.TaintEnricher,
+	findingEnricher analyze.FindingEnricher,
+) {
+	if templateEnricher != nil {
+		p.options.TemplateEnricher = templateEnricher
+	}
+	if taintEnricher != nil {
+		p.options.TaintEnricher = taintEnricher
+	}
+	if findingEnricher != nil {
+		p.options.FindingEnricher = findingEnricher
+	}
 }
 
 // Run collects the entry document and all authorized resources discovered from it.
@@ -413,7 +438,11 @@ func (p *Pipeline) RunDetailed(
 		}
 		// Optional AI enrichment point: the default enricher is a no-op and
 		// returns the deterministic templates unchanged.
-		refined := analyze.DefaultEnricher{}.Enrich(templates, endpoints)
+		templateEnricher := p.options.TemplateEnricher
+		if templateEnricher == nil {
+			templateEnricher = analyze.DefaultEnricher{}
+		}
+		refined := templateEnricher.Enrich(templates, endpoints)
 		for i := range result.Endpoints {
 			if refined != nil && i < len(refined) && refined[i] != nil {
 				result.Endpoints[i].Template = refined[i]
@@ -422,7 +451,16 @@ func (p *Pipeline) RunDetailed(
 	}
 	// Optional AI taint refinement point: deterministic kernel annotations
 	// pass through the default no-op unchanged.
-	result = analyze.DefaultTaintEnricher{}.EnrichTaint(result)
+	taintEnricher := p.options.TaintEnricher
+	if taintEnricher == nil {
+		taintEnricher = analyze.DefaultTaintEnricher{}
+	}
+	result = taintEnricher.EnrichTaint(result)
+	findingEnricher := p.options.FindingEnricher
+	if findingEnricher == nil {
+		findingEnricher = analyze.DefaultFindingEnricher{}
+	}
+	result = findingEnricher.EnrichFindings(result)
 	if spa.RootNode || spa.DynamicImport || spa.HistoryRouting || spa.DynamicScript {
 		result.Technologies = append(result.Technologies, "spa")
 	}

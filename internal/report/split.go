@@ -131,6 +131,7 @@ code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;b
 .pkt-ph{color:#e6a23c;font-weight:600}
 .pkt-note{color:var(--muted)}
 .pkt-legend{margin-top:4px;font-size:11px}
+.sev.ai{background:linear-gradient(90deg,#7c5cff,#4a9eff);color:#fff}
 .filterbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px}
 .filterbar label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
 .filterbar select,.filterbar input[type="search"]{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:13px}
@@ -429,6 +430,11 @@ func renderAPIDetail(endpoint model.Endpoint) string {
 			`<div class="detail-section"><div class="detail-k">请求包复原</div>`+packet+`</div>`)
 	}
 
+	if ai := renderTemplateAI(endpoint.Template); ai != "" {
+		sections = append(sections,
+			`<div class="detail-section"><div class="detail-k">AI 分析 <span class="sev ai">AI</span></div>`+ai+`</div>`)
+	}
+
 	if context := renderContextBlock(endpoint.ContextLines, endpoint.Raw, endpoint.URL); context != "" {
 		sections = append(sections,
 			`<div><div class="detail-k">匹配上下文（路径已高亮）</div>`+context+`</div>`)
@@ -472,6 +478,38 @@ func renderRequestPacket(t *model.RequestTemplate) string {
 	return `<div class="pkt-wrap"><pre class="pkt-pre">` + body + `</pre>` +
 		`<button class="copy-btn" data-copy="` + htmlEscape(packet) + `">复制请求包</button>` +
 		`<div class="muted pkt-legend">{{fuzz:}} = 需构造测试值；{{cookie:}} = 需会话 cookie；# 开头为注意事项</div></div>`
+}
+
+// renderTemplateAI formats the AI review of one packet: completeness badge,
+// authenticity assessment and suggested (not injected) parameters. Empty
+// when no AI review exists.
+func renderTemplateAI(t *model.RequestTemplate) string {
+	if t == nil || t.AI == nil {
+		return ""
+	}
+	var b strings.Builder
+	if t.AI.Completeness != "" {
+		class := "low"
+		switch t.AI.Completeness {
+		case "complete":
+			class = "runtime"
+		case "missing-fields":
+			class = "high"
+		}
+		b.WriteString(`<div style="margin-bottom:6px"><span class="sev ` + class + `">` +
+			htmlEscape(t.AI.Completeness) + `</span></div>`)
+	}
+	if t.AI.Assessment != "" {
+		b.WriteString(`<div>` + htmlEscape(t.AI.Assessment) + `</div>`)
+	}
+	if len(t.AI.SuggestedParams) > 0 {
+		b.WriteString(`<div class="muted">AI 建议关注的参数: ` +
+			htmlEscape(strings.Join(t.AI.SuggestedParams, ", ")) + `</div>`)
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return b.String()
 }
 
 // highlightPlaceholders wraps {{...}} tokens in a colored span so fuzzer
@@ -797,18 +835,36 @@ func renderSensitiveReport(result *model.Result) (int, string, error) {
 		}
 	}
 	var b strings.Builder
-	b.WriteString(`<table><thead><tr><th style="width:90px">严重性</th><th style="width:200px">规则</th><th>完整值</th><th style="width:280px">来源</th></tr></thead><tbody>`)
+	b.WriteString(`<table><thead><tr><th style="width:90px">严重性</th><th style="width:200px">规则</th><th>完整值</th><th style="width:280px">来源</th><th style="width:220px">AI 评估</th></tr></thead><tbody>`)
 	for _, finding := range findings {
 		vendorMark := ""
 		if finding.Vendor {
 			vendorMark = ` <span class="sev vendor">vendor</span>`
 		}
+		aiCell := ""
+		if ai := finding.AI; ai != nil {
+			class := "low"
+			switch ai.Rating {
+			case "high":
+				class = "high"
+			case "medium":
+				class = "full-url"
+			}
+			aiCell = `<span class="sev ` + class + `">` + htmlEscape(ai.Rating) + `</span>`
+			if ai.Reason != "" {
+				aiCell += `<div class="muted">` + htmlEscape(ai.Reason) + `</div>`
+			}
+			if ai.Suggestion != "" {
+				aiCell += `<div class="muted">建议: ` + htmlEscape(ai.Suggestion) + `</div>`
+			}
+			aiCell += ` <span class="sev vendor">AI</span>`
+		}
 		fmt.Fprintf(&b,
-			"<tr><td><span class=\"sev %s\">%s</span></td><td>%s%s<div class=\"muted\">%s</div></td><td><code>%s</code></td><td><code>%s</code><div class=\"muted\">行 %d 列 %d</div></td></tr>",
+			"<tr><td><span class=\"sev %s\">%s</span></td><td>%s%s<div class=\"muted\">%s</div></td><td><code>%s</code></td><td><code>%s</code><div class=\"muted\">行 %d 列 %d</div></td><td>%s</td></tr>",
 			htmlEscape(string(finding.Severity)), htmlEscape(string(finding.Severity)),
 			htmlEscape(finding.RuleName), vendorMark, htmlEscape(finding.RuleID),
 			htmlEscape(finding.Value), htmlEscape(finding.SourceURL),
-			finding.Line, finding.Column)
+			finding.Line, finding.Column, aiCell)
 	}
 	b.WriteString("</tbody></table>")
 	return len(findings), b.String(), nil

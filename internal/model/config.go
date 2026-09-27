@@ -255,6 +255,17 @@ func (c Config) Validate() error {
 	if c.Concurrency.Targets <= 0 || c.Concurrency.ResourcesPerTarget <= 0 {
 		return errors.New("concurrency values must be positive")
 	}
+	if c.AI.Enabled {
+		if strings.TrimSpace(c.AI.APIKey) == "" {
+			return errors.New("启用 -ai 需要先在配置文件的 ai.api_key 中设置模型 API Key")
+		}
+		if strings.TrimSpace(c.AI.BaseURL) == "" {
+			return errors.New("启用 -ai 需要设置 ai.base_url（OpenAI 兼容接口地址）")
+		}
+		if c.AI.MaxRequests < 0 {
+			return errors.New("ai.max_requests must not be negative")
+		}
+	}
 	// MaxResources accepts 0 for "no cap"; MaxBodySize accepts 0 for
 	// "download in full"; negative values are rejected.
 	if c.Limits.MaxDepth < 0 || c.Limits.MaxResources < 0 || c.Limits.MaxBodySize < 0 {
