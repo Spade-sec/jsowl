@@ -15,9 +15,10 @@ const contextSpanLines = 2
 const maxContextLineRunes = 400
 
 // extractContext returns the source line at the byte offset plus span lines
-// on each side. The matched line is marked; coordinates stay unset (-1) so
-// callers only get line-level highlighting.
-func extractContext(body []byte, offset, span int) []model.ContextLine {
+// on each side. When `value` is found in the matched line, the coordinates
+// point at the actual value text; otherwise they mark a +-100-rune window
+// around the offset so reports still have a region to highlight.
+func extractContext(body []byte, offset, span int, value string) []model.ContextLine {
 	if len(body) == 0 || offset < 0 || offset > len(body) {
 		return nil
 	}
@@ -42,8 +43,11 @@ func extractContext(body []byte, offset, span int) []model.ContextLine {
 			matchByte := min(max(offset-starts[index], 0), len(content))
 			matchRune := utf8.RuneCountInString(content[:matchByte])
 			total := utf8.RuneCountInString(content)
-			matchStart = max(0, matchRune-100)
-			matchEnd = min(total, matchRune+100)
+			matchStart, matchEnd = locateValueRunes(content, matchRune, value)
+			if matchStart < 0 {
+				matchStart = max(0, matchRune-100)
+				matchEnd = min(total, matchRune+100)
+			}
 		}
 		if matchStart >= 0 {
 			content, matchStart, matchEnd = trimContextLine(
@@ -63,13 +67,58 @@ func extractContext(body []byte, offset, span int) []model.ContextLine {
 	return lines
 }
 
-// trimContextLine shortens the matched line to maxContextLineRunes runes,
-// centering the window on the matched region.
+// locateValueRunes finds `value` in `content` near the offset rune (the AST
+// callee sits at or shortly before the URL literal) and returns rune
+// coordinates for the actual text, so report highlights wrap the real match
+// instead of an arbitrary window. -1 when the value is not in the line —
+// the source spelling can differ from the decoded value (escapes,
+// concatenation).
+func locateValueRunes(content string, offsetRune int, value string) (int, int) {
+	if value == "" {
+		return -1, -1
+	}
+	runes := []rune(content)
+	need := []rune(value)
+	if len(need) > len(runes) {
+		return -1, -1
+	}
+	// Prefer the nearest occurrence to the offset, searching outward.
+	best, bestDistance := -1, 1<<30
+	for index := 0; index+len(need) <= len(runes); index++ {
+		match := true
+		for i, char := range need {
+			if runes[index+i] != char {
+				match = false
+				break
+			}
+		}
+		if !match {
+			continue
+		}
+		distance := index - offsetRune
+		if distance < 0 {
+			distance = -distance
+		}
+		if distance < bestDistance {
+			best, bestDistance = index, distance
+		}
+	}
+	if best < 0 {
+		return -1, -1
+	}
+	return best, best + len(need)
+}
+
+// trimContextLine shortens the matched line to maxContextLineRunes runes
+// while keeping the matched region fully visible: the side budgets are
+// balanced around the match, so a long match can never be clipped by the
+// window the way a symmetric +-half window could.
 func trimContextLine(content string, matchStart, matchEnd int) (string, int, int) {
 	if utf8.RuneCountInString(content) <= maxContextLineRunes {
 		return content, matchStart, matchEnd
 	}
 	const ellipsis = "…"
+	ellipsisRunes := utf8.RuneCountInString(ellipsis)
 	runes := []rune(content)
 	if matchEnd > len(runes) {
 		matchEnd = len(runes)
@@ -77,9 +126,29 @@ func trimContextLine(content string, matchStart, matchEnd int) (string, int, int
 	if matchStart > matchEnd {
 		matchStart = matchEnd
 	}
-	half := (maxContextLineRunes - utf8.RuneCountInString(ellipsis)) / 2
-	windowStart := max(0, min(matchStart-half, len(runes)-maxContextLineRunes))
-	windowEnd := min(len(runes), windowStart+maxContextLineRunes)
+	matchLen := matchEnd - matchStart
+	side := (maxContextLineRunes - ellipsisRunes - matchLen) / 2
+	if side < 0 {
+		// The match alone exceeds the budget: show its head.
+		windowStart := max(0, matchStart)
+		windowEnd := min(len(runes), windowStart+maxContextLineRunes-ellipsisRunes)
+		return prefixWindow(runes, windowStart, windowEnd, matchStart, matchEnd)
+	}
+	windowStart := max(0, matchStart-side)
+	windowEnd := min(len(runes), matchEnd+side)
+	// Rebalance whatever side budget went unused at the boundaries.
+	if windowStart == 0 {
+		windowEnd = min(len(runes), windowStart+maxContextLineRunes-ellipsisRunes)
+	} else if windowEnd == len(runes) {
+		windowStart = max(0, len(runes)-maxContextLineRunes+ellipsisRunes)
+	}
+	return prefixWindow(runes, windowStart, windowEnd, matchStart, matchEnd)
+}
+
+func prefixWindow(
+	runes []rune, windowStart, windowEnd, matchStart, matchEnd int,
+) (string, int, int) {
+	const ellipsis = "…"
 	prefix, suffix := "", ""
 	if windowStart > 0 {
 		prefix = ellipsis
@@ -87,13 +156,9 @@ func trimContextLine(content string, matchStart, matchEnd int) (string, int, int
 	if windowEnd < len(runes) {
 		suffix = ellipsis
 	}
-	newStart := matchStart - windowStart
-	newEnd := matchEnd - windowStart
-	if prefix != "" {
-		newStart += utf8.RuneCountInString(prefix)
-		newEnd += utf8.RuneCountInString(prefix)
-	}
-	return prefix + string(runes[windowStart:windowEnd]) + suffix, newStart, newEnd
+	shift := utf8.RuneCountInString(prefix) - windowStart
+	return prefix + string(runes[windowStart:windowEnd]) + suffix,
+		matchStart + shift, matchEnd + shift
 }
 
 // lineStarts returns the byte offset of every line start.

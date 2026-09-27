@@ -300,3 +300,25 @@ func TestCollectorExcludesPlainAnchorsFromRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestFillValueRules(t *testing.T) {
+	cases := []struct {
+		info controlInfo
+		want string
+	}{
+		{controlInfo{Type: "email", Name: "mail"}, "jsowl@example.org"},
+		{controlInfo{Type: "password"}, "JsOwlP@ssw0rd1"},
+		{controlInfo{Type: "tel"}, "13800138000"},
+		{controlInfo{Type: "text", Name: "phone"}, "13800138000"},
+		{controlInfo{Type: "text", Name: "captcha"}, "123456"},
+		{controlInfo{Type: "number"}, "1"},
+		{controlInfo{Type: "text", Placeholder: "请输入"}, "请输入"},
+		{controlInfo{Type: "text", Value: "keep", Name: "user"}, ""},
+		{controlInfo{Type: "text", Name: "unknown"}, "jsowl"},
+	}
+	for _, want := range cases {
+		if got := fillValue(want.info); got != want.want {
+			t.Fatalf("fillValue(%+v) = %q, want %q", want.info, got, want.want)
+		}
+	}
+}

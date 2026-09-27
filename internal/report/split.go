@@ -6,8 +6,11 @@ import (
 	"net/url"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 
+	"github.com/youmulijiang/jsowl/internal/analyze"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
@@ -122,6 +125,12 @@ code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;b
 .section-title{margin:18px 0 10px;font-size:15px;color:var(--text);font-weight:600}
 .copy-btn{background:var(--panel);border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:1px 8px;font-size:11px;cursor:pointer;margin-left:8px;vertical-align:middle}
 .copy-btn:hover{color:var(--accent);border-color:var(--accent)}
+.pkt-wrap{margin-top:8px}
+.pkt-pre{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 12px;font-size:12px;line-height:1.6;overflow-x:auto;white-space:pre-wrap;word-break:break-all}
+.pkt-method{color:var(--accent);font-weight:700}
+.pkt-ph{color:#e6a23c;font-weight:600}
+.pkt-note{color:var(--muted)}
+.pkt-legend{margin-top:4px;font-size:11px}
 .filterbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px}
 .filterbar label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
 .filterbar select,.filterbar input[type="search"]{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:13px}
@@ -133,6 +142,17 @@ tr.ctx-row.open{display:table-row}
 tr.ctx-row>td{padding:0 12px 12px;border-bottom:1px solid var(--line)}
 .ctx-block pre.ctx-pre{margin:0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto}
 .ctx-pre mark{background:#fdeea8;color:#7a5d00;border-radius:3px;padding:0 2px}
+tr.api-row{cursor:pointer}
+tr.api-row td:first-child{position:relative}
+tr.api-row.open td{background:#f4f7ff}
+.detail{padding:12px 14px;display:grid;gap:10px}
+.detail-k{font-size:12px;color:var(--muted);margin:0 0 2px}
+.detail-v{font-size:13px;word-break:break-all}
+.detail-section{border:1px solid var(--line);border-radius:8px;padding:10px 12px;background:#fbfcfe}
+.spec-table{width:100%;border-collapse:collapse;background:transparent;margin-top:4px}
+.spec-table th{position:static;background:transparent;color:var(--muted);font-size:11px;padding:3px 10px 3px 0;border-bottom:1px solid var(--line)}
+.spec-table td{padding:3px 10px 3px 0;border-bottom:1px dashed var(--line);font-size:12px;background:transparent}
+.spec-table tr:last-child td{border-bottom:none}
 .pager{display:flex;gap:8px;align-items:center;justify-content:center;padding:10px 0}
 .pager button{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:5px 12px;border-radius:8px;font-size:12px;cursor:pointer}
 .pager button:disabled{opacity:.4;cursor:not-allowed}
@@ -192,19 +212,20 @@ footer{padding:12px 24px;color:var(--muted);font-size:12px;border-top:1px solid 
     apply();
   });
 
-  // Context toggle: the button sits in the endpoint row; the pre block lives
-  // in the full-width ctx-row right below it.
+  // Row detail panel: clicking an endpoint row (tr.api-row) toggles the
+  // full-width ctx-row right below it; the copy button is excluded so a
+  // copy click never flips the panel.
   document.addEventListener('click', function(event){
-    var button = event.target.closest ? event.target.closest('.ctx-toggle') : null;
-    if (!button) return;
-    var row = button.closest('tr');
+    if (event.target.closest && event.target.closest('[data-copy]')) return;
+    var row = event.target.closest ? event.target.closest('tr.api-row') : null;
+    if (!row) return;
     var ctxRow = row.nextElementSibling;
     if (!ctxRow || ctxRow.className.indexOf('ctx-row') === -1) return;
     var open = ctxRow.className.indexOf(' open') === -1;
     ctxRow.className = open ? ctxRow.className + ' open' : ctxRow.className.replace(' open', '');
+    row.className = open ? row.className + ' open' : row.className.replace(' open', '');
     if (open && row.style.display !== 'none') ctxRow.style.display = '';
     else ctxRow.style.display = 'none';
-    button.textContent = open ? '收起上下文' : '上下文';
   });
 
   document.addEventListener('click', function(event){
@@ -273,7 +294,7 @@ func renderAPIReport(result *model.Result) (int, string, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString(`<div class="filterbar"><span class="muted">点击路径旁的“复制”按钮复制纯路径；每条路径可展开查看 JS 上下文（路径已高亮）。完整 http(s) URL 见“完整 URL 报告”。</span></div>`)
+	b.WriteString(`<div class="filterbar"><span class="muted">点击路径旁的“复制”按钮复制纯路径；点击任意单元行展开详情面板：来源定位、RequestSpec（参数值、类型、置信度）、BaseURL 及 JS 上下文。完整 http(s) URL 见“完整 URL 报告”。</span></div>`)
 	writeAPISection := func(title string, rows *strings.Builder, count int) {
 		fmt.Fprintf(&b, `<h2 class="section-title">%s（%d）</h2><table class="paginated" data-page-size="50"><thead><tr><th>路径</th><th style="width:70px">方法</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:60px">状态</th></tr></thead><tbody>%s</tbody></table>`,
 			htmlEscape(title), count, rows.String())
@@ -337,27 +358,221 @@ func renderAPIRow(b *strings.Builder, endpoint model.Endpoint) {
 	if len(endpoint.BodyParams) > 0 {
 		bodyNote = `<div class="muted">body: ` + htmlEscape(strings.Join(endpoint.BodyParams, ", ")) + `</div>`
 	}
-	// Context expands in its own full-width row: a pre block inside the
-	// narrow path cell would wrap at the column width, not the table width.
-	contextToggle := ""
-	if len(endpoint.ContextLines) > 0 {
-		contextToggle = `<button class="copy-btn ctx-toggle">上下文</button>`
+	// The context button is gone: the whole row is the toggle now, and the
+	// detail panel (context + request spec) expands in the full-width row
+	// below so wide content wraps at the table width, not the path column.
+	detail := renderAPIDetail(endpoint)
+	rowClass := ""
+	if detail != "" {
+		rowClass = ` class="api-row"`
 	}
+	vendorMark := ""
 	if endpoint.Vendor {
-		contextToggle = `<span class="sev vendor">vendor</span>` + contextToggle
+		vendorMark = `<span class="sev vendor">vendor</span>`
 	}
 	fmt.Fprintf(b,
-		"<tr><td><code>%s</code><button class=\"copy-btn\" data-copy=\"%s\">复制</button>%s%s</td>"+
+		"<tr%s><td><code>%s</code><button class=\"copy-btn\" data-copy=\"%s\">复制</button>%s%s</td>"+
 			"<td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td>"+
 			"<td><code>%s</code></td><td>%d</td></tr>",
-		htmlEscape(path), htmlEscape(path), bodyNote, contextToggle,
+		rowClass,
+		htmlEscape(path), htmlEscape(path), bodyNote, vendorMark,
 		htmlEscape(method), evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
 		htmlEscape(location), endpoint.StatusCode)
-	if len(endpoint.ContextLines) > 0 {
+	if detail != "" {
 		fmt.Fprintf(b,
 			`<tr class="ctx-row"><td colspan="5">%s</td></tr>`,
-			renderContextBlock(endpoint.ContextLines, endpoint.Raw, endpoint.URL))
+			detail)
 	}
+}
+
+// renderAPIDetail builds the expandable panel for one endpoint row: source
+// location, the recovered RequestSpec (base URL and content type with their
+// confidence, query/body parameters with value, type, and evidence), and the
+// highlighted JS context. Empty when there is nothing beyond the table row.
+func renderAPIDetail(endpoint model.Endpoint) string {
+	var sections []string
+
+	if endpoint.SourceURL != "" {
+		location := htmlEscape(endpoint.SourceURL)
+		if endpoint.Line > 0 {
+			location += fmt.Sprintf(":%d:%d", endpoint.Line, endpoint.Column)
+		}
+		sections = append(sections,
+			`<div><div class="detail-k">来源定位（回溯 JS 位置）</div><div class="detail-v"><code>`+location+`</code></div></div>`)
+	}
+
+	if spec := endpoint.Spec; spec != nil {
+		var specRows []string
+		if spec.BaseURL != "" {
+			specRows = append(specRows, detailRow("BaseURL",
+				`<code>`+htmlEscape(spec.BaseURL)+`</code> `+evidenceBadge(spec.BaseURLKind)))
+		}
+		if spec.ContentType != "" {
+			specRows = append(specRows, detailRow("Content-Type",
+				`<code>`+htmlEscape(spec.ContentType)+`</code> `+evidenceBadge(spec.ContentTypeEvidence)))
+		}
+		if len(spec.Query) > 0 {
+			specRows = append(specRows, detailRow("Query 参数", renderParamTable(spec.Query)))
+		}
+		if len(spec.Body) > 0 {
+			specRows = append(specRows, detailRow("Body 参数", renderParamTable(spec.Body)))
+		}
+		if len(specRows) > 0 {
+			sections = append(sections,
+				`<div class="detail-section"><div class="detail-k">RequestSpec</div>`+
+					strings.Join(specRows, "")+`</div>`)
+		}
+	}
+
+	if packet := renderRequestPacket(endpoint.Template); packet != "" {
+		sections = append(sections,
+			`<div class="detail-section"><div class="detail-k">请求包复原</div>`+packet+`</div>`)
+	}
+
+	if context := renderContextBlock(endpoint.ContextLines, endpoint.Raw, endpoint.URL); context != "" {
+		sections = append(sections,
+			`<div><div class="detail-k">匹配上下文（路径已高亮）</div>`+context+`</div>`)
+	}
+
+	if len(sections) == 0 {
+		return ""
+	}
+	return `<div class="detail">` + strings.Join(sections, "") + `</div>`
+}
+
+func detailRow(label, value string) string {
+	return `<div><div class="detail-k">` + label + `</div><div class="detail-v">` + value + `</div></div>`
+}
+
+// renderRequestPacket formats the reconstructed request as a copy-paste
+// ready block: the method line and placeholders are highlighted, notes render
+// as comments, and a copy button ships the plain text. Empty when the
+// endpoint carries no template.
+func renderRequestPacket(t *model.RequestTemplate) string {
+	if t == nil || t.URL == "" {
+		return ""
+	}
+	packet := analyze.RenderPacket(t)
+	lines := strings.Split(packet, "\n")
+	escaped := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out := htmlEscape(line)
+		switch {
+		case strings.HasPrefix(line, "#"):
+			out = `<span class="pkt-note">` + out + `</span>`
+		default:
+			out = highlightPlaceholders(out)
+			if strings.Contains(line, " HTTP/1.1") {
+				out = `<span class="pkt-method">` + out + `</span>`
+			}
+		}
+		escaped = append(escaped, out)
+	}
+	body := strings.Join(escaped, "\n")
+	return `<div class="pkt-wrap"><pre class="pkt-pre">` + body + `</pre>` +
+		`<button class="copy-btn" data-copy="` + htmlEscape(packet) + `">复制请求包</button>` +
+		`<div class="muted pkt-legend">{{fuzz:}} = 需构造测试值；{{cookie:}} = 需会话 cookie；# 开头为注意事项</div></div>`
+}
+
+// highlightPlaceholders wraps {{...}} tokens in a colored span so fuzzer
+// substitution points stand out from literal values.
+func highlightPlaceholders(escapedLine string) string {
+	if !strings.Contains(escapedLine, "{{") {
+		return escapedLine
+	}
+	var b strings.Builder
+	for {
+		start := strings.Index(escapedLine, "{{")
+		if start < 0 {
+			b.WriteString(escapedLine)
+			return b.String()
+		}
+		end := strings.Index(escapedLine[start:], "}}")
+		if end < 0 {
+			b.WriteString(escapedLine)
+			return b.String()
+		}
+		end += start + 2
+		b.WriteString(escapedLine[:start])
+		b.WriteString(`<span class="pkt-ph">` + escapedLine[start:end] + `</span>`)
+		escapedLine = escapedLine[end:]
+	}
+}
+
+// renderParamTable lists one parameter list with the recovered value, the
+// value's inferred type, and the evidence for the recovery — the triple an
+// LLM (or a fuzzer) needs to decide what a field accepts.
+func renderParamTable(params []model.Param) string {
+	var b strings.Builder
+	b.WriteString(`<table class="spec-table"><thead><tr><th>键</th><th>值</th><th>类型</th><th>置信度</th></tr></thead><tbody>`)
+	for _, param := range params {
+		fmt.Fprintf(&b, "<tr><td><code>%s</code></td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>",
+			htmlEscape(param.Key), htmlEscape(param.Value),
+			htmlEscape(paramValueType(param)), evidenceBadge(param.Evidence))
+	}
+	b.WriteString(`</tbody></table>`)
+	return b.String()
+}
+
+// paramValueType classifies a recovered value so readers know what a field
+// accepts without parsing the JS themselves.
+func paramValueType(param model.Param) string {
+	value := param.Value
+	switch {
+	case value == "{" || value == "[":
+		return "对象/数组"
+	case value == "" || value == "{}":
+		return "未知"
+	case param.Evidence == model.EvidencePlaceholder || strings.Contains(value, "{}"):
+		return "动态"
+	case value == "true" || value == "false":
+		return "布尔"
+	case value == "null" || value == "undefined":
+		return "空值"
+	case isNumericLiteral(value):
+		return "数字"
+	default:
+		return "字符串"
+	}
+}
+
+func isNumericLiteral(value string) bool {
+	if value == "" {
+		return false
+	}
+	_, err := strconv.ParseFloat(value, 64)
+	return err == nil
+}
+
+// evidenceBadge renders a confidence level as a colored chip.
+func evidenceBadge(evidence string) string {
+	if evidence == "" {
+		return ""
+	}
+	class := "static"
+	switch evidence {
+	case model.EvidenceLiteral:
+		class = "runtime" // green: verbatim from source
+	case model.EvidenceConstant:
+		class = "full-url" // amber: resolved through a binding
+	case model.EvidenceInferred:
+		class = "low" // blue: deduced from payload shape
+	}
+	return `<span class="sev ` + class + `">` + htmlEscape(paramEvidenceLabel(evidence)) + `</span>`
+}
+
+func paramEvidenceLabel(evidence string) string {
+	switch evidence {
+	case model.EvidenceLiteral:
+		return "字面量"
+	case model.EvidenceConstant:
+		return "常量回溯"
+	case model.EvidenceInferred:
+		return "推断"
+	case model.EvidencePlaceholder:
+		return "动态占位"
+	}
+	return evidence
 }
 
 // renderContextBlock formats endpoint context lines as a hidden pre block
@@ -373,9 +588,20 @@ func renderContextBlock(lines []model.ContextLine, raw, resolved string) string 
 	for _, line := range lines {
 		marker := " "
 		content := htmlEscape(line.Content)
-		if line.MatchStart >= 0 && line.MatchEnd > line.MatchStart {
+		if line.MatchStart >= 0 && line.MatchEnd > line.MatchStart &&
+			line.MatchEnd <= utf8.RuneCountInString(line.Content) {
+			// Coordinates are authoritative: mark exactly the matched runes.
 			marker = ">"
-			content = highlightFragments(line.Content, pathFragments(raw, resolved))
+			runes := []rune(line.Content)
+			content = htmlEscape(string(runes[:line.MatchStart])) +
+				`<mark>` + htmlEscape(string(runes[line.MatchStart:line.MatchEnd])) + `</mark>` +
+				htmlEscape(string(runes[line.MatchEnd:]))
+		} else if marked, found := highlightFragments(
+			line.Content, pathFragments(raw, resolved),
+		); found {
+			// No usable coordinates: fall back to searching the path text.
+			marker = ">"
+			content = marked
 		}
 		// Defense in depth: discover already trims minified lines, but
 		// results loaded from older JSON or external files may still carry
@@ -410,21 +636,73 @@ func pathFragments(raw, resolved string) []string {
 			kept = append(kept, fragment)
 		}
 	}
+	if len(kept) == 0 && strings.Trim(source, "/?{}") != "" {
+		// Placeholder-only or slash-heavy values carry no static fragment;
+		// the raw text itself is still the best highlight needle.
+		kept = append(kept, source)
+	}
 	return kept
 }
 
 // highlightFragments wraps every occurrence of the fragments with <mark>,
 // escaping both the content and the fragments.
-func highlightFragments(content string, fragments []string) string {
+// highlightFragments wraps every occurrence of the fragments with <mark>,
+// escaping both the content and the fragments. Overlapping matches (one
+// fragment inside another, or the same fragment repeated) are merged into
+// disjoint spans first so the marks never nest or shadow each other.
+func highlightFragments(content string, fragments []string) (string, bool) {
 	escaped := htmlEscape(content)
+	type span struct{ start, end int }
+	var spans []span
 	for _, fragment := range fragments {
 		needle := htmlEscape(fragment)
-		if needle == "" || !strings.Contains(escaped, needle) {
+		if needle == "" {
 			continue
 		}
-		escaped = strings.Replace(escaped, needle, `<mark>`+needle+`</mark>`, 1)
+		for from := 0; ; {
+			index := strings.Index(escaped[from:], needle)
+			if index < 0 {
+				break
+			}
+			start := from + index
+			spans = append(spans, span{start, start + len(needle)})
+			from = start + len(needle)
+		}
 	}
-	return escaped
+	if len(spans) == 0 {
+		return escaped, false
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start != spans[j].start {
+			return spans[i].start < spans[j].start
+		}
+		return spans[i].end > spans[j].end
+	})
+	merged := spans[:1]
+	for _, current := range spans[1:] {
+		last := &merged[len(merged)-1]
+		if current.start <= last.end {
+			if current.end > last.end {
+				last.end = current.end
+			}
+			continue
+		}
+		merged = append(merged, current)
+	}
+	var b strings.Builder
+	cursor := 0
+	for _, current := range merged {
+		if current.start < cursor {
+			continue
+		}
+		b.WriteString(escaped[cursor:current.start])
+		b.WriteString(`<mark>`)
+		b.WriteString(escaped[current.start:current.end])
+		b.WriteString(`</mark>`)
+		cursor = current.end
+	}
+	b.WriteString(escaped[cursor:])
+	return b.String(), true
 }
 
 // renderURLReport lists every full http(s) URL with its host and source.

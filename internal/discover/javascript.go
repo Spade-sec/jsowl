@@ -47,6 +47,7 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 			candidate.Line, candidate.Column = lineColumn(body, extractedCandidate.Offset)
 			candidate.ContextLines = extractContext(
 				body, extractedCandidate.Offset, contextSpanLines,
+				extractedCandidate.Raw,
 			)
 		}
 		result.Candidates = append(result.Candidates, candidate)

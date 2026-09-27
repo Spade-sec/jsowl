@@ -158,6 +158,14 @@ func TestAPIFromASTKeepsStaticAndAddsBaseURLFold(t *testing.T) {
 	if gateway == nil || gateway.Evidence != model.EvidenceFullURL {
 		t.Fatalf("defaults.baseURL fold missing: %v", candidates)
 	}
+	if static == nil || static.Spec == nil || static.Spec.BaseURL != "https://api.example.com" ||
+		static.Spec.BaseURLKind != model.EvidenceLiteral {
+		t.Fatalf("static endpoint spec should carry literal baseURL: %+v", static)
+	}
+	if gateway.Spec == nil || gateway.Spec.BaseURL != "https://gw.example.test/v2" ||
+		gateway.Spec.BaseURLKind != model.EvidenceLiteral {
+		t.Fatalf("gateway spec should carry its baseURL: %+v", gateway)
+	}
 }
 
 func TestAPIFromASTCapturesContextLines(t *testing.T) {
@@ -289,5 +297,338 @@ func TestReactRouterRulesClassifyRoutes(t *testing.T) {
 	}
 	if len(routes) != 2 {
 		t.Fatalf("react routes = %v", routes)
+	}
+}
+
+func TestAPIFromASTFoldsConcatAndJoinURLs(t *testing.T) {
+	candidates := astCandidates(t, `
+		const base = "/api/v2/";
+		fetch(base.concat("users/list"));
+		fetch(["/api/v2/orders/", "detail"].join(""));
+		fetch(base.concat(id));
+	`)
+	if len(candidates) == 0 {
+		t.Fatal("no candidates extracted")
+	}
+	want := map[string]bool{
+		"/api/v2/users/list":    false,
+		"/api/v2/orders/detail": false,
+		"/api/v2/{}":            false,
+	}
+	for _, candidate := range candidates {
+		if _, ok := want[candidate.Raw]; ok {
+			want[candidate.Raw] = true
+		}
+	}
+	for raw, seen := range want {
+		if !seen {
+			t.Errorf("candidate %q missing; got %v", raw, candidates)
+		}
+	}
+}
+
+func findParam(params []model.Param, key string) *model.Param {
+	for i := range params {
+		if params[i].Key == key {
+			return &params[i]
+		}
+	}
+	return nil
+}
+
+func TestAPIFromASTSpecValuesAndEvidence(t *testing.T) {
+	candidates := astCandidates(t, `
+		const API_HOST = "https://api.test";
+		axios.post("/login", {username: "admin", count: 3, active: true, scope: API_HOST, tenant: tenantID, page: "p-" + n});
+	`)
+	login := findCandidate(candidates, "/login")
+	if login == nil || login.Spec == nil {
+		t.Fatalf("missing /login spec in %v", candidates)
+	}
+	cases := []struct {
+		key, value, evidence string
+	}{
+		{"username", "admin", model.EvidenceLiteral},
+		{"count", "3", model.EvidenceLiteral},
+		{"active", "true", model.EvidenceLiteral},
+		{"scope", "https://api.test", model.EvidenceConstant},
+		{"tenant", "{tenantID}", model.EvidencePlaceholder},
+		{"page", "p-{}", model.EvidencePlaceholder},
+	}
+	for _, want := range cases {
+		param := findParam(login.Spec.Body, want.key)
+		if param == nil {
+			t.Fatalf("missing body param %q in %+v", want.key, login.Spec.Body)
+		}
+		if param.Value != want.value || param.Evidence != want.evidence {
+			t.Fatalf("param %q = %q/%q, want %q/%q", want.key,
+				param.Value, param.Evidence, want.value, want.evidence)
+		}
+	}
+}
+
+func TestAPIFromASTSpecContentType(t *testing.T) {
+	candidates := astCandidates(t, `
+		axios.post("/json", {a: 1}, {headers: {"Content-Type": "application/json;charset=utf-8"}});
+		fetch("/form", {method: "POST", body: new FormData()});
+		$.ajax({url: "/legacy", contentType: "application/xml", data: {x: 1}});
+		fetch("/query?page=1");
+		axios.post("/stringify", JSON.stringify({b: 2}));
+	`)
+	jsonPost := findCandidate(candidates, "/json")
+	if jsonPost == nil || jsonPost.Spec == nil ||
+		jsonPost.Spec.ContentType != "application/json;charset=utf-8" ||
+		jsonPost.Spec.ContentTypeEvidence != model.EvidenceLiteral {
+		t.Fatalf("json post spec = %+v", jsonPost)
+	}
+	form := findCandidate(candidates, "/form")
+	if form == nil || form.Spec == nil ||
+		form.Spec.ContentType != "multipart/form-data" ||
+		form.Spec.ContentTypeEvidence != model.EvidenceInferred {
+		t.Fatalf("form spec = %+v", form)
+	}
+	legacy := findCandidate(candidates, "/legacy")
+	if legacy == nil || legacy.Spec == nil || legacy.Spec.ContentType != "application/xml" {
+		t.Fatalf("legacy spec = %+v", legacy)
+	}
+	stringify := findCandidate(candidates, "/stringify")
+	if stringify == nil || stringify.Spec == nil ||
+		stringify.Spec.ContentType != "application/json" ||
+		stringify.Spec.ContentTypeEvidence != model.EvidenceInferred {
+		t.Fatalf("stringify spec = %+v", stringify)
+	}
+	if get := findCandidate(candidates, "/query"); get != nil && get.Spec != nil && get.Spec.ContentType != "" {
+		t.Fatalf("GET should carry no content type: %+v", get.Spec)
+	}
+}
+
+func TestAPIFromASTSpecQueryAndNestedFlattening(t *testing.T) {
+	candidates := astCandidates(t, `
+		axios.get("/search", {params: {keyword: "js", page: 1, filter: {size: 10, order: "desc"}}});
+	`)
+	search := findCandidate(candidates, "/search")
+	if search == nil || search.Spec == nil {
+		t.Fatalf("missing /search spec in %v", candidates)
+	}
+	if len(search.Spec.Body) != 0 {
+		t.Fatalf("params should land in Query, got body %+v", search.Spec.Body)
+	}
+	cases := map[string]string{
+		"keyword":      "js",
+		"page":         "1",
+		"filter.size":  "10",
+		"filter.order": "desc",
+	}
+	for key, want := range cases {
+		param := findParam(search.Spec.Query, key)
+		if param == nil || param.Value != want {
+			t.Fatalf("query %q = %+v, want value %q", key, param, want)
+		}
+	}
+}
+
+func TestAPIFromASTKeepsSpecVariantsOfSamePath(t *testing.T) {
+	candidates := astCandidates(t, `
+		axios.post("/upload", JSON.stringify({a: 1}));
+		axios.post("/upload", new FormData());
+	`)
+	jsonVariant, formVariant := 0, 0
+	for _, candidate := range candidates {
+		if candidate.Raw != "/upload" || candidate.Spec == nil {
+			continue
+		}
+		switch candidate.Spec.ContentType {
+		case "application/json":
+			jsonVariant++
+		case "multipart/form-data":
+			formVariant++
+		}
+	}
+	if jsonVariant != 1 || formVariant != 1 {
+		t.Fatalf("expected one JSON and one multipart variant, got %d/%d in %v",
+			jsonVariant, formVariant, candidates)
+	}
+}
+
+func TestAPIFromASTFoldsNewURLConstructor(t *testing.T) {
+	candidates := astCandidates(t, `
+		const base = "https://api.test/v2";
+		fetch(new URL("/users", base).href);
+		const u = new URL("/orders/list", "https://api.test");
+		fetch(u.href);
+	`)
+	// A rooted path attaches to the base origin, matching new URL semantics.
+	findCandidate(candidates, "https://api.test/users")
+	findCandidate(candidates, "https://api.test/orders/list")
+}
+
+func TestAPIFromASTSplitsConditionalURLs(t *testing.T) {
+	candidates := astCandidates(t, `fetch(flag ? "/api/preview" : "/api/live");`)
+	findCandidate(candidates, "/api/preview")
+	findCandidate(candidates, "/api/live")
+}
+
+func TestAPIFromASTResolvesObjectConstantMembers(t *testing.T) {
+	candidates := astCandidates(t, `
+		const routes = {users: "/u/list", orders: "/o/list"};
+		fetch(routes.users);
+		fetch(routes["orders"]);
+	`)
+	findCandidate(candidates, "/u/list")
+	findCandidate(candidates, "/o/list")
+}
+
+func TestAPIFromASTFoldsReplaceAndAtob(t *testing.T) {
+	candidates := astCandidates(t, `
+		fetch("/api/v1/x".replace("v1", "v2"));
+		fetch(atob("L2FwaS91c2Vycw=="));
+	`)
+	candidates2 := astCandidates(t, `fetch("/a".replace("a", "b"));`)
+	findCandidate(candidates, "/api/v2/x")
+	findCandidate(candidates, "/api/users")
+	findCandidate(candidates2, "/b")
+}
+
+func TestAPIFromASTFlattensArrayParams(t *testing.T) {
+	candidates := astCandidates(t, `
+		axios.post("/batch", {items: [{id: 1, sku: "A"}, {id: 2}], tags: ["x"]});
+		axios.post("/list", [{qid: 9, pass: true}]);
+		axios.get("/page", {params: {filter: {ids: [7, 8]}}});
+	`)
+	batch := findCandidate(candidates, "/batch")
+	if batch == nil || batch.Spec == nil {
+		t.Fatalf("missing /batch spec in %v", candidates)
+	}
+	cases := []struct{ key, value, evidence, paramType string }{
+		{"items[].id", "1", model.EvidenceLiteral, "数字"},
+		{"items[].sku", "A", model.EvidenceLiteral, "字符串"},
+		{"tags[]", "x", model.EvidenceLiteral, "字符串"},
+	}
+	for _, want := range cases {
+		param := findParam(batch.Spec.Body, want.key)
+		if param == nil || param.Value != want.value || param.Evidence != want.evidence {
+			t.Fatalf("body %q = %+v, want %q/%q", want.key, param, want.value, want.evidence)
+		}
+	}
+	// Duplicate field names across elements collapse into one row.
+	if id := findParam(batch.Spec.Body, "items[].id"); id.Value != "1" {
+		t.Fatalf("duplicate array keys should dedupe, got %+v", id)
+	}
+	list := findCandidate(candidates, "/list")
+	if list == nil || list.Spec == nil {
+		t.Fatalf("missing /list spec in %v", candidates)
+	}
+	for key, want := range map[string]string{"[].qid": "9", "[].pass": "true"} {
+		param := findParam(list.Spec.Body, key)
+		if param == nil || param.Value != want {
+			t.Fatalf("top-level array %q = %+v, want %q", key, param, want)
+		}
+	}
+	page := findCandidate(candidates, "/page")
+	if page == nil || page.Spec == nil {
+		t.Fatalf("missing /page spec in %v", candidates)
+	}
+	ids := findParam(page.Spec.Query, "filter.ids[]")
+	if ids == nil || ids.Value != "7" || ids.Evidence != model.EvidenceLiteral {
+		t.Fatalf("nested array in query params = %+v", ids)
+	}
+}
+
+func TestAPIFromASTMarksDynamicPayload(t *testing.T) {
+	candidates := astCandidates(t, `
+		function P(t){return Object(r["a"])({url:"drug/submit",method:"post",data:t,headers:{"Content-Type":"application/json"}})}
+		function Q(e){return axios.post("/wrap", e.payload)}
+		P({orderId: 7, status: "A"});
+	`)
+	submit := findCandidate(candidates, "drug/submit")
+	if submit == nil || submit.Spec == nil {
+		t.Fatalf("missing drug/submit spec in %v", candidates)
+	}
+	// The wrapper's own call site yields a keyless placeholder: the axios
+	// slot name ("data") is a config protocol name, not a wire field.
+	var placeholder *model.Param
+	for i := range submit.Spec.Body {
+		if submit.Spec.Body[i].Evidence == model.EvidencePlaceholder {
+			placeholder = &submit.Spec.Body[i]
+		}
+	}
+	if placeholder == nil || placeholder.Key != "" || placeholder.Value != "{t}" {
+		t.Fatalf("dynamic payload param = %+v", submit.Spec.Body)
+	}
+	// The caller pass resolves the forwarded literal into real field keys.
+	var orderID *model.Param
+	for i := range candidates {
+		if candidates[i].Raw != "drug/submit" || candidates[i].Spec == nil {
+			continue
+		}
+		for _, p := range candidates[i].Spec.Body {
+			if p.Key == "orderId" {
+				p := p
+				orderID = &p
+			}
+		}
+	}
+	if orderID == nil || orderID.Value != "7" || orderID.Evidence != model.EvidenceLiteral {
+		t.Fatalf("caller literal should recover orderId: %+v", submit.Spec.Body)
+	}
+	wrap := findCandidate(candidates, "/wrap")
+	if wrap == nil || wrap.Spec == nil || len(wrap.Spec.Body) != 1 ||
+		wrap.Spec.Body[0].Key != "" || wrap.Spec.Body[0].Value != "{e.payload}" {
+		t.Fatalf("member payload param = %+v", wrap)
+	}
+}
+
+func TestAPIFromASTURLSearchParamsBuilder(t *testing.T) {
+	candidates := astCandidates(t, `
+		function pt(t){
+			var e = new URLSearchParams;
+			e.append("loginName", t.loginName);
+			e.append("password", t.password);
+			e.append("code", "wx");
+			e.append("uuid", t.uuid);
+			return Object(r["a"])({url:l+"/applet/login",method:"post",data:e,headers:{"Content-Type":"application/x-www-form-urlencoded"}})
+		}
+	`)
+	login := findCandidate(candidates, "{}/applet/login")
+	if login == nil || login.Spec == nil {
+		t.Fatalf("missing /applet/login spec in %v", candidates)
+	}
+	if login.Spec.ContentType != "application/x-www-form-urlencoded" {
+		t.Fatalf("content type = %q", login.Spec.ContentType)
+	}
+	for key, want := range map[string]string{"loginName": "{t.loginName}", "password": "{t.password}", "code": "wx"} {
+		got := findParam(login.Spec.Body, key)
+		if got == nil || got.Value != want {
+			t.Fatalf("param %q = %+v, want value %q", key, got, want)
+		}
+	}
+}
+
+func TestAPIFromASTWrapperCallerBacktrack(t *testing.T) {
+	candidates := astCandidates(t, `
+		function dt(t){return Object(r["a"])({url:l+"/user/upwd",method:"post",data:t})}
+		function caller(){
+			var form = {oldPwd: "a", newPwd: "b"};
+			dt(form);
+		}
+	`)
+	upwd := findCandidate(candidates, "{}/user/upwd")
+	if upwd == nil || upwd.Spec == nil {
+		t.Fatalf("missing /user/upwd spec in %v", candidates)
+	}
+	var oldPwd *model.Param
+	for i := range candidates {
+		if !strings.HasSuffix(candidates[i].Raw, "/user/upwd") || candidates[i].Spec == nil {
+			continue
+		}
+		for _, p := range candidates[i].Spec.Body {
+			if p.Key == "oldPwd" {
+				p := p
+				oldPwd = &p
+			}
+		}
+	}
+	if oldPwd == nil || oldPwd.Value != "a" || oldPwd.Evidence != model.EvidenceLiteral {
+		t.Fatalf("wrapper caller should recover oldPwd")
 	}
 }

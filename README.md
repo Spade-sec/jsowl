@@ -54,7 +54,7 @@ jsowl -h
 |---|---|
 | `-u, --url` | 目标 URL，可重复 |
 | `-l, --list` | 目标文件，忽略空行和 `#` 注释 |
-| `-c, --config` | YAML 配置文件 |
+| `-c, --config` | YAML 配置文件；`-h` 帮助中会显示用户级默认路径 `~/.jsowl/config.yml` |
 | `-o, --output` | 覆盖报告目录 |
 | `-m, --mode` | `auto`、`direct` 或 `browser` |
 | `-p, --proxy` | 覆盖 Surf 与 Rod 使用的 HTTP(S)/SOCKS5 代理 |
@@ -66,7 +66,28 @@ jsowl -h
 | `-v, --version` | 显示版本 |
 | `--check` | 检查配置、规则、输出目录、本地浏览器、CDP、JS 与注入快照 |
 
-CLI 显式值优先于 YAML，YAML 优先于内置默认值。若未传 `-c`，当前目录存在 `config.yml` 时会自动加载；项目自带的 `config.yml` 默认引用 `rules.yml`。不存在主配置时则直接使用内置默认配置和内置规则。
+CLI 显式值优先于 YAML，YAML 优先于内置默认值。若未传 `-c`，jsowl 会按以下顺序叠加配置：上层设置的每个字段覆盖下层，未指定的字段保留下层值。
+
+1. 当前目录 `config.yml`（项目级；项目自带的 `config.yml` 默认引用 `rules.yml`）；
+2. `~/.jsowl/config.yml`（用户级，对本机所有扫描生效）；
+3. 内置默认值。
+
+首次运行时若 `~/.jsowl/config.yml` 不存在，会自动创建 `~/.jsowl/` 目录并生成全部注释的默认模板（stderr 提示 `created user config: <路径>`）；之后每次运行都会在 stderr 提示 `user config: <路径>`，方便定位。取消注释任意字段即全局生效，删除该文件后下次运行会重新生成。传 `-c` 时完全以指定文件为准，不叠加用户级配置。
+
+## 用户级配置
+
+`~/.jsowl/config.yml` 适合放全局个性化设置，例如代理、全局请求头与 Cookie、浏览器路径：
+
+```yaml
+request:
+  proxy: http://127.0.0.1:8080
+  headers:
+    Authorization: Bearer token
+browser:
+  path: C:\Program Files\Google\Chrome\Application\chrome.exe
+```
+
+其中的相对路径（如 `rules_file`）以 `~/.jsowl` 为基准解析。
 
 ## 配置
 
@@ -88,7 +109,14 @@ browser:
   headless: true
   # 发现框架路由后逐个渲染，采集每个视图自己的请求、相对路径与敏感信息。
   # 默认关闭：成倍放大请求量，且可能触发目标自身的写操作。
-  crawl_routes: false
+  crawl_routes: true
+  # 运行时自动填表并提交（算法适配自 projectdiscovery/katana，MIT），
+  # 提交产生的请求由 CDP 捕获，其真实参数以 runtime 置信度回填报告。
+  auto_form: false
+  # 运行时点击按钮与内联事件元素，触发 SPA 隐藏的 API 调用。
+  trigger_events: false
+  # 两种交互单次页面渲染的总次数上限。
+  max_interactions: 20
   max_routes: 30
   crawl_timeout: 60s
   # 仅在受限容器/靶场中 Chrome 沙箱无法启动时开启。
@@ -124,8 +152,11 @@ Rod 的路径、等待、网络空闲、超时、窗口模式和注入脚本只�
 
 `scope.probe_source_maps` 默认 `true`。开启后扫描会探测 JS source map：既解析脚本里 `//# sourceMappingURL=` 指向的 `.map`（含内联 base64 形式），也直接抓取以 `.map` 结尾的资源；拿到 map 后按 shuji 的方式把 `sourcesContent` 里的**原始未压缩源码**取出，重新跑一遍正则与 AST 提取，因此路径、参数与敏感信息都按还原后的源码统计。`source_map_blacklist` 里的片段命中 map 路径时跳过下载，默认覆盖 `chunk-vendors`、`chunk-libs`、`node_modules`、`axios`、`lodash`、`element-ui` 等库 bundle，避免为体积巨大的厂商 map 浪费请求与磁盘。
 
-`browser.crawl_routes` 默认 `false`。开启后，扫描会在发现框架路由时逐个渲染这些路由视图：前端路由守卫常常只是"未登录就跳转"、并非鉴权，直接导航往往能渲染出视图并触发它自己的接口调用，从而额外采集该视图的请求路径、相对路径、敏感信息与嵌套路由（新路由会继续入队递归）。为避免失控，遍历受 `max_routes`（默认 `30`）与 `crawl_timeout`（默认 `60s`）双重约束；路由按归一化路径去重（`/user/1` 与 `/user/2` 折叠为同一路由），并对渲染结果做归一化签名，视图相同的路由不再继续展开。渲染优先通过页面自身的 `router.push()` 做页内跳转，拿不到路由器时才整页导航。注意它会把扫描从"单页只读"变成"对目标的多页主动爬取"，请求量成倍增加，且视图内的页面脚本可能发起写操作，请仅在已授权范围内开启。
+`browser.crawl_routes` 默认 `true`。开启后，扫描会在发现框架路由时逐个渲染这些路由视图：前端路由守卫常常只是"未登录就跳转"、并非鉴权，直接导航往往能渲染出视图并触发它自己的接口调用，从而额外采集该视图的请求路径、相对路径、敏感信息与嵌套路由（新路由会继续入队递归）。为避免失控，遍历受 `max_routes`（默认 `30`）与 `crawl_timeout`（默认 `60s`）双重约束；路由按归一化路径去重（`/user/1` 与 `/user/2` 折叠为同一路由），并对渲染结果做归一化签名，视图相同的路由不再继续展开。渲染优先通过页面自身的 `router.push()` 做页内跳转，拿不到路由器时才整页导航。注意它会把扫描从"单页只读"变成"对目标的多页主动爬取"，请求量成倍增加，且视图内的页面脚本可能发起写操作，请仅在已授权范围内开启。
 
+`browser.auto_form` 与 `browser.trigger_events` 默认均为 `false`，两者也可用 CLI 参数 `-aff`（即 `--aff`，automatic form fill，一次同时开启两者；配置文件里仍可分别控制）、`--max-interactions` 控制。开启后，浏览器渲染阶段会在被动快照之后执行运行时交互：自动填表按输入类型与 name/id 关键字选择值（算法适配自 projectdiscovery/katana，MIT，值规则保留其原有语义），逐表提交；事件触发则点击按钮与带内联事件的元素。这些交互发出的请求由 CDP `Network.requestWillBeSent` 捕获，`PostData` 与 URL query 会被解析成键/值/类型，以 `runtime` 置信度（最高级）合并进 API 端点的 RequestSpec——这是补齐 `data:t` 等动态 payload 字段的主要手段。运行时值会被截断到 64 字符以避免持久化完整敏感数据。注意：表单提交与按钮点击可能触发目标自身的写操作，请仅在已授权范围内开启。
+
+`browser.aggressive` 默认 `false`（仅配置项，无 CLI 参数）。开启后移除运行时交互的保守防护：disabled、readonly、`display:none` 的控件也通过 DOM 直写填值（并派发 input/change 事件），被遮挡的元素用 `element.click()` 兜底点击。服务端校验成为唯一防线，攻击面最大，但请求更嘈杂、更容易触发目标的风控或写入脏数据，仅在明确授权时开启。
 JsOwl 始终显式解析本地浏览器路径，并禁用了 Rod 的自动下载路径。找不到 Chrome/Chromium 时，`browser` 模式返回错误，`auto` 模式降级到 Surf。
 
 `request.proxy` 同时用于 Surf 与 Rod。目标初始 Cookie 会在导航前写入浏览器，Rod 运行时产生的 Cookie 会同步回 Surf，用于后续脚本、chunk 和 API GET。
@@ -220,22 +251,56 @@ for item := range scanner.ScanBatch(ctx, targets) {
 rules_file: ./rules.yml
 ```
 
-`rules.yml` 使用 Go RE2 语法，可以禁用内置规则并添加或覆盖同 ID 规则：
+匹配引擎与 [HaE](https://github.com/gh0stkey/HaE) 一致：所有规则经 regexp2
+（.NET 风格 NFA）编译，前瞻/后顾断言、反向引用、命名组开箱即用；单次匹配
+限时 2 秒，灾难性回溯只会截断该规则自身的匹配，不会挂死扫描。
+
+规则文件支持两种格式，加载时自动识别。
+
+**HaE 原生格式**——直接复用 HaE 规则库文件，无需转换（`scope` 字段接受但
+忽略；`color` 映射为严重级别；`sensitive: false` 即默认忽略大小写）：
 
 ```yaml
+rules:
+- group: 疑似漏洞
+  rule:
+  - name: GET 明文id
+    loaded: true
+    f_regex: (\b(?<!_)(id|\w+id)=(\d{2,15})\b(?![-_\/]))
+    s_regex: ''
+    format: '{0}'       # {0}=整个匹配，{N}=第 N 个捕获组
+    color: green
+    scope: request line # 接受但忽略
+    engine: nfa
+    sensitive: false
+```
+
+每条 HaE 规则生成形如 `hae.<组名>.<规则名>` 的 ID，可在 `disabled` 中引用。
+
+**JsOwl 原生格式**——适合手工维护的精简规则（字段含义等价：`pattern` 对应
+`f_regex`、`s_regex`/`s_group`/`format`/`ignore_case` 同名、`enabled` 对应
+`loaded`，缺省即 true）：
+
+```yaml
+include:                      # 可选：合并更多规则文件（相对本文件，自动防循环）
+  - ./hae_rules.yml
 disabled: [secret.account]
 custom:
   - id: secret.internal-token
     name: Internal token
-    category: sensitive
+    category: sensitive       # url 或 sensitive
     severity: high
     pattern: '(?i)internal[_-]?token\s*[:=]\s*["'']([^"'']+)'
     group: 1
     description: Internal test token
-    enabled: true
+    # s_regex: '^[A-Za-z0-9]+$'   # 二级正则：对提取值复检，不命中则丢弃（去误报）
+    # format: 'token={1}'         # 输出格式，缺省取 group 提取的文本
 ```
 
 项目根目录的 [rules.yml](rules.yml) 已加载并适配
-`正则表达式总结报告.md` 中适合 Web/JavaScript 信息收集的规则。原报告中
-Go RE2 不支持的前后向断言和反向引用已改写。无效正则、捕获组、模式、时间、
-并发和资源边界会在扫描前拒绝。
+`正则表达式总结报告.md` 中适合 Web/JavaScript 信息收集的规则，
+[hae_rules.yml](hae_rules.yml) 则是 HaE 原生格式的常用子集（身份证、邮箱、
+内网 IP、国内 Webhook、腾讯云密钥、Shiro/Druid 指纹等）。无效正则、捕获组、
+模式、时间、并发和资源边界会在扫描前拒绝。
+
+另外，jsowl 首次运行会在用户级配置目录（`~/.jsowl/`）自动生成 `rules.yaml`，内容即内置的 12 条敏感信息规则；之后每次扫描默认加载该文件做敏感信息匹配。规则 ID 与内置规则相同——直接编辑 `pattern`、设置 `enabled: false` 关闭某条、或追加自定义规则即可，下次扫描生效；若配置中设置了 `rules_file`，则以该文件为准，`rules.yaml` 不再加载。

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -188,7 +189,8 @@ func (c *Collector) collectOnce(
 			return
 		}
 		observed := collect.NetworkRecord{
-			Method: event.Request.Method,
+			Method:   event.Request.Method,
+			PostData: event.Request.PostData,
 		}
 		if event.Initiator != nil && event.Initiator.Stack != nil {
 			for _, frame := range event.Initiator.Stack.CallFrames {
@@ -249,6 +251,13 @@ func (c *Collector) collectOnce(
 	injectedURLs, injectedScripts, injectedRoutes, err := snapshotURLs(page, c.config.DisableInjection)
 	if err != nil {
 		return collect.BrowserResult{}, err
+	}
+	// Runtime interactions (form submit, event clicks) fire the requests
+	// whose payloads feed the parameter report; they run after the passive
+	// snapshot so the baseline observation is never disturbed.
+	if c.config.AutoForm || c.config.TriggerEvents {
+		interactions := map[string]struct{}{}
+		c.interactOnce(page, interactions)
 	}
 	if c.config.CrawlRoutes && !c.config.DisableInjection {
 		// Render every discovered route so each view's own requests are
@@ -472,6 +481,9 @@ func (c *Collector) crawlRouteViews(
 		if err != nil {
 			continue
 		}
+		if c.config.AutoForm || c.config.TriggerEvents {
+			c.interactOnce(page, seenViews)
+		}
 		for _, raw := range foundURLs {
 			urls[raw] = struct{}{}
 		}
@@ -537,7 +549,9 @@ func (c *Collector) maxRoutes() int {
 	if c.config.MaxRoutes > 0 {
 		return c.config.MaxRoutes
 	}
-	return 30
+	// 0 means no cap: walk every route the deadline and view signatures
+	// allow.
+	return math.MaxInt
 }
 
 func (c *Collector) crawlTimeout() time.Duration {

@@ -10,6 +10,8 @@ github.com/cpuguy83/go-md2man/v2 v2.0.6/go.mod h1:oOW0eioCTA6cOiMLiUPZOpcVxMig6N
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/dlclark/regexp2 v1.12.0 h1:0j4c5qQmnC6XOWNjP3PIXURXN2gWx76rd3KvgdPkCz8=
+github.com/dlclark/regexp2 v1.12.0/go.mod h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8=
 github.com/enetx/g v1.0.202 h1:E32/PWp542wHh7c5VYPGohK0Nu6CpiRm34vr0P1F6dU=
 github.com/enetx/g v1.0.202/go.mod h1:6/HQeRy+tIJVGY+oRPQVJ/vOSruAi0aldFggurT6jBY=
 github.com/enetx/http v1.0.24 h1:sMeJ0rN00HlUYLIhUTHx36KumAlkaZu7vsQe5+GMTNM=

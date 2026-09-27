@@ -56,6 +56,14 @@ func LoadConfig(path string) (Config, error) {
 	return model.LoadConfig(path)
 }
 
+// LoadConfigOnto decodes a strict YAML file on top of base: fields the file
+// leaves unspecified keep their base values, so configuration layers merge
+// (for example a user-level file beneath a project file). It validates the
+// result.
+func LoadConfigOnto(base Config, path string) (Config, error) {
+	return model.LoadConfigOnto(base, path)
+}
+
 // CheckBrowser verifies the configured local browser without downloading one.
 func CheckBrowser(
 	ctx context.Context,

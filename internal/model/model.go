@@ -1,8 +1,11 @@
 package model
 
 import (
+	"fmt"
 	"net/http"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 type Mode string
@@ -36,6 +39,62 @@ const (
 	EvidenceFullURL = "full-url" // absolute URL recovered by AST analysis
 	EvidenceStatic  = "static"   // relative path from AST or regex matching
 )
+
+// Request-parameter evidence ranks how strongly a param value or content
+// type was recovered. Values follow the same recall-first policy as API
+// discovery: even a placeholder name is reported, just with lower evidence.
+const (
+	EvidenceLiteral     = "literal"     // written as a constant in the source
+	EvidenceConstant    = "constant"    // resolved through an identifier binding
+	EvidencePlaceholder = "placeholder" // dynamic expression, name kept as {name}
+	EvidenceInferred    = "inferred"    // deduced from the payload shape
+)
+
+// Param is one request parameter key with the best value the AST could
+// recover. Values are always present in some form so the report can seed
+// fuzzing; the Evidence field says how trustworthy each value is.
+type Param struct {
+	Key      string `json:"key"`
+	Value    string `json:"value,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
+// RequestSpec is the normalized shape of one request call site, merged from
+// every client library into the same vocabulary.
+type RequestSpec struct {
+	// BaseURL is the axios-instance base the path would be joined with, when
+	// one was recovered; BaseURLKind carries the same evidence vocabulary.
+	BaseURL     string `json:"base_url,omitempty"`
+	BaseURLKind string `json:"base_url_kind,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	// ContentTypeEvidence marks how the content type was obtained: literal
+	// (headers object), inferred (JSON.stringify / FormData), or empty when
+	// unknown.
+	ContentTypeEvidence string  `json:"content_type_evidence,omitempty"`
+	Query               []Param `json:"query,omitempty"`
+	Body                []Param `json:"body,omitempty"`
+}
+
+// ParamKeys flattens both parameter lists into the deduplicated key set the
+// legacy BodyParams field carried.
+func (s *RequestSpec) ParamKeys() []string {
+	if s == nil {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(s.Body)+len(s.Query))
+	keys := make([]string, 0, len(s.Body)+len(s.Query))
+	for _, param := range append(append([]Param{}, s.Query...), s.Body...) {
+		if param.Key == "" {
+			continue
+		}
+		if _, duplicate := seen[param.Key]; duplicate {
+			continue
+		}
+		seen[param.Key] = struct{}{}
+		keys = append(keys, param.Key)
+	}
+	return keys
+}
 
 type ResourceType string
 
@@ -81,10 +140,29 @@ type BrowserConfig struct {
 	// fires its API calls. Off by default: it multiplies the requests a scan
 	// sends and can trigger the target's own write paths.
 	CrawlRoutes bool `yaml:"crawl_routes" json:"crawl_routes"`
-	// MaxRoutes bounds how many route views one scan renders.
+	// MaxRoutes bounds how many route views one scan renders. 0 means no
+	// cap: crawling is then bounded by crawl_timeout and view signatures
+	// alone.
 	MaxRoutes int `yaml:"max_routes" json:"max_routes"`
 	// CrawlTimeout bounds the total time spent rendering route views.
 	CrawlTimeout time.Duration `yaml:"crawl_timeout" json:"crawl_timeout"`
+	// AutoForm fills and submits the page's forms at runtime (katana-style,
+	// adapted from projectdiscovery/katana, MIT) so the requests a form
+	// submit fires are observed by CDP and their parameters recorded.
+	// Off by default: submission can trigger the target's write paths.
+	AutoForm bool `yaml:"auto_form" json:"auto_form"`
+	// TriggerEvents clicks buttons and elements carrying inline handlers so
+	// SPA interactions fire their hidden API calls. Off by default for the
+	// same reason.
+	TriggerEvents bool `yaml:"trigger_events" json:"trigger_events"`
+	// MaxInteractions bounds form submits plus event clicks per page render.
+	// 0 applies the default of 20.
+	MaxInteractions int `yaml:"max_interactions" json:"max_interactions"`
+	// Aggressive stops skipping disabled and invisible controls during
+	// runtime interactions: they are filled and clicked too, via direct DOM
+	// writes when normal interaction is impossible. Wider attack surface,
+	// noisier; server-side validation becomes the only guard.
+	Aggressive bool `yaml:"aggressive" json:"aggressive"`
 }
 
 type ConcurrencyConfig struct {
@@ -129,9 +207,16 @@ type OutputConfig struct {
 	HTML        bool   `yaml:"html" json:"html"`
 	DownloadJS  bool   `yaml:"download_js" json:"download_js"`
 	JSDirectory string `yaml:"js_directory" json:"js_directory"`
+	// RequestTemplate reconstructs an HTTP request packet per API endpoint
+	// into the API report (values literal where the source had them,
+	// {{fuzz:...}} placeholders elsewhere).
+	RequestTemplate bool `yaml:"request_template" json:"request_template"`
 }
 
 type RulesConfig struct {
+	// Include loads extra rule files (HaE-adapted sets, team rules); paths are
+	// resolved relative to the including file and merged before compilation.
+	Include  []string `yaml:"include" json:"include"`
 	Disabled []string `yaml:"disabled" json:"disabled"`
 	Custom   []Rule   `yaml:"custom" json:"custom"`
 }
@@ -169,6 +254,77 @@ type Rule struct {
 	MethodGroup int    `yaml:"method_group,omitempty" json:"method_group,omitempty"`
 	Description string `yaml:"description" json:"description"`
 	Enabled     bool   `yaml:"enabled" json:"enabled"`
+	// Engine is accepted for HaE-file compatibility (nfa/dfa/java) but no
+	// longer selects a backend: every rule compiles with regexp2.
+	Engine string `yaml:"engine,omitempty" json:"engine,omitempty"`
+	// SRegex optionally re-runs against the extracted value: a miss discards
+	// the finding (false-positive filter), a hit keeps it — and when SGroup
+	// names a capture group of SRegex, that group replaces the value.
+	SRegex string `yaml:"s_regex,omitempty" json:"s_regex,omitempty"`
+	SGroup int    `yaml:"s_group,omitempty" json:"s_group,omitempty"`
+	// Format renders the final value HaE-style: {0} is the whole match,
+	// {N} the Nth capture group; empty means the extracted text itself.
+	Format string `yaml:"format,omitempty" json:"format,omitempty"`
+	// IgnoreCase compiles the pattern case-insensitively; HaE rules derive
+	// it from an absent or false `sensitive` field.
+	IgnoreCase bool `yaml:"ignore_case,omitempty" json:"ignore_case,omitempty"`
+}
+
+// ruleYAMLFields is the whitelist of keys a rule mapping may carry; the
+// custom unmarshaler rejects anything else to keep rule files strict.
+var ruleYAMLFields = map[string]struct{}{
+	"id": {}, "name": {}, "category": {}, "severity": {}, "pattern": {},
+	"group": {}, "method_group": {}, "description": {}, "enabled": {},
+	"engine": {}, "s_regex": {}, "s_group": {}, "format": {}, "ignore_case": {},
+}
+
+// UnmarshalYAML decodes one rule mapping and defaults Enabled to true when
+// the key is absent, mirroring HaE's loaded field: rules are on unless
+// explicitly disabled, so HaE rule sets can be pasted in without edits.
+func (r *Rule) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind != yaml.MappingNode {
+		return fmt.Errorf("rule must be a mapping, got kind %v", value.Kind)
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i].Value
+		if _, known := ruleYAMLFields[key]; !known {
+			return fmt.Errorf("field %s not found", key)
+		}
+	}
+	var raw struct {
+		ID          string       `yaml:"id"`
+		Name        string       `yaml:"name"`
+		Category    RuleCategory `yaml:"category"`
+		Severity    Severity     `yaml:"severity"`
+		Pattern     string       `yaml:"pattern"`
+		Group       int          `yaml:"group"`
+		MethodGroup int          `yaml:"method_group"`
+		Description string       `yaml:"description"`
+		Enabled     *bool        `yaml:"enabled"`
+		Engine      string       `yaml:"engine"`
+		SRegex      string       `yaml:"s_regex"`
+		SGroup      int          `yaml:"s_group"`
+		Format      string       `yaml:"format"`
+		IgnoreCase  bool         `yaml:"ignore_case"`
+	}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	r.ID = raw.ID
+	r.Name = raw.Name
+	r.Category = raw.Category
+	r.Severity = raw.Severity
+	r.Pattern = raw.Pattern
+	r.Group = raw.Group
+	r.MethodGroup = raw.MethodGroup
+	r.Description = raw.Description
+	r.Enabled = raw.Enabled == nil || *raw.Enabled
+	r.Engine = raw.Engine
+	r.SRegex = raw.SRegex
+	r.SGroup = raw.SGroup
+	r.Format = raw.Format
+	r.IgnoreCase = raw.IgnoreCase
+	return nil
 }
 
 type BrowserStatus struct {
@@ -211,6 +367,9 @@ type Endpoint struct {
 	ContextLines []ContextLine `json:"context_lines,omitempty"`
 	// BodyParams lists request-body field names for write methods.
 	BodyParams []string `json:"body_params,omitempty"`
+	// Spec is the normalized request shape (content type, query and body
+	// parameters with per-value evidence) recovered from the AST call site.
+	Spec *RequestSpec `json:"spec,omitempty"`
 	// Vendor marks a result that came from a third-party library bundle
 	// (identified by its license banner) instead of application code.
 	Vendor bool `json:"vendor,omitempty"`
@@ -218,6 +377,35 @@ type Endpoint struct {
 	// so fields that only the server exposes can be fuzzed too. Only names
 	// are kept; response bodies are never persisted.
 	ResponseParams []string `json:"response_params,omitempty"`
+	// Template is the reconstructed HTTP request packet for this endpoint:
+	// method, URL, headers and a body serialized from Spec, with values kept
+	// literal where the source had them and {{fuzz:...}} placeholders where
+	// they must be invented. Built by analyze.BuildTemplate.
+	Template *RequestTemplate `json:"template,omitempty"`
+}
+
+// RequestTemplate is the reconstructed HTTP request packet for one endpoint.
+// Placeholder syntax embedded in URL/Headers/Body:
+//   - {{fuzz:name}}        — value must be invented for testing
+//   - {{fuzz:body:{sym}}}  — the whole body is a runtime object (source symbol sym)
+//   - {{cookie:NAME}}      — session cookie the client library is expected to send
+type RequestTemplate struct {
+	Method  string      `json:"method"`
+	URL     string      `json:"url"`
+	Headers []HeaderTpl `json:"headers,omitempty"`
+	Body    string      `json:"body,omitempty"`
+	// Notes carry caveats that would break the packet if ignored (e.g. the
+	// site likely hashes passwords before sending).
+	Notes []string `json:"notes,omitempty"`
+}
+
+// HeaderTpl is one reconstructed header line; Evidence distinguishes headers
+// read verbatim from the call site (literal) from ones inferred from the
+// payload shape (inferred) or expected client-library behavior (placeholder).
+type HeaderTpl struct {
+	Key      string `json:"key"`
+	Value    string `json:"value"`
+	Evidence string `json:"evidence,omitempty"`
 }
 
 // ContextLine is one line of surrounding source code for a finding.

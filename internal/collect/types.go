@@ -36,6 +36,9 @@ type NetworkRecord struct {
 	InitiatorURL string
 	Line         int
 	Column       int
+	// PostData is the request body as reported by CDP; parsed into runtime
+	// parameters by ParseRequestPayload.
+	PostData string
 }
 
 // BrowserRoute is one framework route observed at runtime.

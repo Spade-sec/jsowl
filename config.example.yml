@@ -21,6 +21,19 @@ browser:
   idle_max: 5s
   timeout: 45s
   headless: true
+  # 运行时自动填表并提交（算法适配自 projectdiscovery/katana，MIT）。
+  # 提交产生的请求会被 CDP 捕获，其真实参数（键、值、类型）以 runtime
+  # 置信度回填进报告的 RequestSpec——这是补齐 data:t 等动态 payload
+  # 字段的主要手段。默认关闭：提交可能触发目标自身的写操作。
+  auto_form: false
+  # 运行时点击按钮和带内联事件的元素，触发 SPA 隐藏的 API 调用。
+  # 默认关闭，风险同上。
+  trigger_events: false
+  # 单次页面渲染中"填表提交 + 事件点击"的总次数上限。
+  max_interactions: 20
+  # 激进模式：disabled/隐藏的控件也写入值（DOM 直写并派发事件），
+  # 不可见元素也点击。攻击面更大，但更嘈杂、更易扰动目标。
+  aggressive: false
   # 仅在受限容器/靶场中 Chrome 沙箱无法启动时开启；默认保持 false。
   no_sandbox: false
   # 可覆盖为 collect_resource_urls.js 的绝对路径。
@@ -29,9 +42,10 @@ browser:
   # 发现框架路由后逐个渲染，采集每个视图自己的请求/相对路径/敏感信息。
   # 前端路由守卫常常不是鉴权，直接导航往往能渲染出视图并触发其接口调用。
   # 默认关闭：它会成倍放大请求量，并可能触发目标自身的写操作。
-  crawl_routes: false
-  # 单次扫描最多渲染多少个路由视图。
-  max_routes: 30
+  # 默认 true：渲染发现的每个框架路由视图，观测该视图自身发出的请求。
+  crawl_routes: true
+  # 单次扫描最多渲染多少个路由视图。0 表示不限制，仅由 crawl_timeout 和视图签名去重约束。
+  max_routes: 0
   # 路由渲染的总时长上限。
   crawl_timeout: 60s
 
@@ -43,7 +57,8 @@ limits:
   max_depth: 5
   # 0 表示不限制：所有可达的脚本与 chunk 都会被下载并解析。
   max_resources: 0
-  max_body_size: 10MiB
+  # 0 表示不限制：完整下载响应体，避免截断破坏 AST chunk 提取。
+  max_body_size: 0
 
 scope:
   allow_domains: []
@@ -132,6 +147,10 @@ output:
   # 默认开启：开启后会先把所有 JS 下载完成，再统一做正则匹配和 AST 解析。
   download_js: true
   js_directory: js
+  # 在 API 报告的接口详情里复原 HTTP 请求包：源码有字面量值的参数保真，
+  # 其余参数生成 {{fuzz:...}} 占位符，可直接复制进 burp/yakit 重放。
+  request_template: true
 
 # 相对路径以本配置文件所在目录为基准。
+# 不设置 rules_file 时，默认加载用户级 ~/.jsowl/rules.yaml（首次运行自动生成）。
 rules_file: ./rules.yml

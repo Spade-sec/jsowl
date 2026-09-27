@@ -357,7 +357,7 @@ func browserSeeds(root *url.URL, rendered collect.BrowserResult) []pipeline.Seed
 	seen := make(map[string]pipeline.Seed)
 	addSeed := func(raw string, kind model.ResourceType, record collect.NetworkRecord) {
 		if _, exists := seen[raw]; !exists {
-			seen[raw] = pipeline.Seed{
+			seed := pipeline.Seed{
 				URL: raw, Kind: kind,
 				Evidence:     model.EvidenceRuntime,
 				Method:       record.Method,
@@ -366,6 +366,11 @@ func browserSeeds(root *url.URL, rendered collect.BrowserResult) []pipeline.Seed
 				Column:       record.Column,
 				Source:       "cdp",
 			}
+			if kind == model.ResourceTypeAPI {
+				seed.Spec = collect.ParseRequestPayload(
+					record.Method, record.URL, record.PostData, record.ContentType)
+			}
+			seen[raw] = seed
 		}
 	}
 	for _, record := range rendered.Network {

@@ -3,7 +3,6 @@ package analyze
 import (
 	"bytes"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -35,7 +34,10 @@ type Candidate struct {
 
 type compiledRule struct {
 	rule model.Rule
-	re   *regexp.Regexp
+	m    matcher
+	// sm applies the rule's optional second-stage regex to each extracted
+	// value: no match discards the finding, a capture in SGroup replaces it.
+	sm matcher
 }
 
 // extractMethod returns the normalised HTTP verb captured by the rule's
@@ -128,27 +130,38 @@ func New(custom []model.Rule, disabled []string) (*Engine, error) {
 		if rule.ID == "" {
 			return fmt.Errorf("rule ID is empty")
 		}
-		compiled, err := regexp.Compile(rule.Pattern)
+		compiled, err := compileMatcher(rule, rule.Pattern)
 		if err != nil {
 			return fmt.Errorf("compile rule %s: %w", rule.ID, err)
 		}
-		if rule.Group < 0 || rule.Group > compiled.NumSubexp() {
+		groupCount := compiled.groupCount()
+		if rule.Group < 0 || rule.Group > groupCount {
 			return fmt.Errorf(
 				"compile rule %s: capture group %d exceeds %d",
 				rule.ID,
 				rule.Group,
-				compiled.NumSubexp(),
+				groupCount,
 			)
 		}
-		if rule.MethodGroup < 0 || rule.MethodGroup > compiled.NumSubexp() {
+		if rule.MethodGroup < 0 || rule.MethodGroup > groupCount {
 			return fmt.Errorf(
 				"compile rule %s: method group %d exceeds %d",
 				rule.ID,
 				rule.MethodGroup,
-				compiled.NumSubexp(),
+				groupCount,
 			)
 		}
-		engine.rules = append(engine.rules, compiledRule{rule: rule, re: compiled})
+		if rule.SGroup < 0 {
+			return fmt.Errorf("compile rule %s: capture groups must not be negative", rule.ID)
+		}
+		var second matcher
+		if rule.SRegex != "" {
+			second, err = compileMatcher(rule, rule.SRegex)
+			if err != nil {
+				return fmt.Errorf("compile rule %s s_regex: %w", rule.ID, err)
+			}
+		}
+		engine.rules = append(engine.rules, compiledRule{rule: rule, m: compiled, sm: second})
 		return nil
 	}
 	for _, rule := range APIRules() {
@@ -176,14 +189,40 @@ func (e *Engine) Analyze(source ResourceRef, body []byte) ([]model.Finding, []Ca
 	seenFindings := make(map[string]struct{})
 	seenCandidates := make(map[string]struct{})
 
+	// Convert once per body: regexp2 counts capture offsets in runes, and
+	// every rule reuses the same rune→byte translation table.
+	text := string(body)
+	offsets := runeOffsets(text)
+
 	for _, rule := range e.rules {
-		for _, indices := range rule.re.FindAllSubmatchIndex(body, -1) {
+		matches, matchErr := rule.m.findAll(text, offsets)
+		// A regexp2 timeout aborts the rest of this rule's pass; matches
+		// recovered before the deadline are still reported.
+		_ = matchErr
+		for _, indices := range matches {
 			groupOffset := rule.rule.Group * 2
+			if groupOffset+1 >= len(indices) {
+				continue // pattern has fewer groups than the rule declares
+			}
 			start, end := indices[groupOffset], indices[groupOffset+1]
 			if start < 0 || end < start {
 				continue
 			}
-			value := string(body[start:end])
+			value := text[start:end]
+			if rule.sm != nil {
+				second := rule.sm.findFirst(value)
+				if second == nil || second[0] < 0 {
+					continue // second-stage filter rejected the value
+				}
+				switch {
+				case rule.rule.Format != "":
+					value = expandFormat(rule.rule.Format, value, second)
+				case rule.rule.SGroup > 0:
+					value = groupText(value, second, rule.rule.SGroup)
+				}
+			} else if rule.rule.Format != "" {
+				value = expandFormat(rule.rule.Format, text, indices)
+			}
 			key := rule.rule.ID + "\x00" + source.URL + "\x00" + value
 			if _, duplicate := seenFindings[key]; duplicate {
 				continue
@@ -303,21 +342,48 @@ func matchContext(body []byte, start, end int) []model.ContextLine {
 }
 
 // trimContextLine shortens one context line to maxContextLineRunes runes,
-// keeping the highlighted match visible and its coordinates adjusted.
+// keeping the highlighted match fully visible: the side budgets are balanced
+// around the match, so a long match can never be clipped by the window.
 func trimContextLine(content string, matchStart, matchEnd int) (string, int, int) {
 	if utf8.RuneCountInString(content) <= maxContextLineRunes {
 		return content, matchStart, matchEnd
 	}
 	const ellipsis = "…"
+	runes := []rune(content)
+	if matchEnd > len(runes) {
+		matchEnd = len(runes)
+	}
+	if matchStart > matchEnd {
+		matchStart = matchEnd
+	}
+	matchLen := matchEnd - matchStart
+	ellipsisRunes := utf8.RuneCountInString(ellipsis)
+	side := (maxContextLineRunes - ellipsisRunes - matchLen) / 2
 	if matchStart < 0 || matchEnd <= matchStart {
-		trimmed := []rune(content)[:maxContextLineRunes]
+		trimmed := runes[:maxContextLineRunes]
 		return string(trimmed) + ellipsis, matchStart, matchEnd
 	}
-	half := (maxContextLineRunes - utf8.RuneCountInString(ellipsis)) / 2
-	runes := []rune(content)
-	windowStart := max(0, matchStart-half)
-	windowEnd := min(len(runes), matchEnd+half)
-	trimmed := runes[windowStart:windowEnd]
+	if side < 0 {
+		// The match alone exceeds the budget: show its head.
+		windowStart := max(0, matchStart)
+		windowEnd := min(len(runes), windowStart+maxContextLineRunes-ellipsisRunes)
+		return windowString(runes, windowStart, windowEnd, matchStart, matchEnd)
+	}
+	windowStart := max(0, matchStart-side)
+	windowEnd := min(len(runes), matchEnd+side)
+	// Rebalance whatever side budget went unused at the boundaries.
+	if windowStart == 0 {
+		windowEnd = min(len(runes), windowStart+maxContextLineRunes-ellipsisRunes)
+	} else if windowEnd == len(runes) {
+		windowStart = max(0, len(runes)-maxContextLineRunes+ellipsisRunes)
+	}
+	return windowString(runes, windowStart, windowEnd, matchStart, matchEnd)
+}
+
+func windowString(
+	runes []rune, windowStart, windowEnd, matchStart, matchEnd int,
+) (string, int, int) {
+	const ellipsis = "…"
 	prefix, suffix := "", ""
 	if windowStart > 0 {
 		prefix = ellipsis
@@ -325,13 +391,9 @@ func trimContextLine(content string, matchStart, matchEnd int) (string, int, int
 	if windowEnd < len(runes) {
 		suffix = ellipsis
 	}
-	newStart := matchStart - windowStart
-	newEnd := matchEnd - windowStart
-	if prefix != "" {
-		newStart += utf8.RuneCountInString(prefix)
-		newEnd += utf8.RuneCountInString(prefix)
-	}
-	return prefix + string(trimmed) + suffix, newStart, newEnd
+	shift := utf8.RuneCountInString(prefix) - windowStart
+	return prefix + string(runes[windowStart:windowEnd]) + suffix,
+		matchStart + shift, matchEnd + shift
 }
 
 func truncateRunes(value string, limit int) string {

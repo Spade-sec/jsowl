@@ -33,9 +33,6 @@ func New(
 	if config.Timeout <= 0 {
 		return nil, errors.New("request timeout must be positive")
 	}
-	if maxBodySize <= 0 {
-		return nil, errors.New("maximum body size must be positive")
-	}
 
 	builder := surf.NewClient().Builder().Session()
 	if config.Proxy != "" {
@@ -94,6 +91,21 @@ func (c *Client) Get(
 		}
 	}
 	defer response.Body.Close()
+
+	// maxBody <= 0 means no cap: read the whole body without truncation.
+	if c.maxBody <= 0 {
+		body, err := io.ReadAll(response.Body)
+		if err != nil {
+			return collect.Response{}, fmt.Errorf("read %s: %w", target, err)
+		}
+		return collect.Response{
+			URL:        response.Request.URL.String(),
+			StatusCode: response.StatusCode,
+			Header:     response.Header.Clone(),
+			Body:       body,
+			Duration:   time.Since(started),
+		}, nil
+	}
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, c.maxBody+1))
 	if err != nil {

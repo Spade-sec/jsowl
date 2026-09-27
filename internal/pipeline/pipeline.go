@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +50,9 @@ type Seed struct {
 	Column       int
 	// Source records the extractor: cdp for runtime seeds.
 	Source string
+	// Spec carries runtime-observed query/body parameters from the request
+	// payload CDP captured for this seed.
+	Spec *model.RequestSpec
 }
 
 type outcome struct {
@@ -333,6 +337,7 @@ func (p *Pipeline) RunDetailed(
 					Line:       seed.Line,
 					Column:     seed.Column,
 					Source:     seed.Source,
+					Spec:       seed.Spec,
 					Type:       "api",
 				})
 			}
@@ -397,6 +402,23 @@ func (p *Pipeline) RunDetailed(
 
 	if p.options.Config.Scope.ProbeRoutes {
 		p.probeRoutes(ctx, result, headers, root)
+	}
+	if p.options.Config.Output.RequestTemplate {
+		templates := make([]*model.RequestTemplate, len(result.Endpoints))
+		endpoints := make([]*model.Endpoint, len(result.Endpoints))
+		for i := range result.Endpoints {
+			result.Endpoints[i].Template = analyze.BuildTemplate(&result.Endpoints[i])
+			templates[i] = result.Endpoints[i].Template
+			endpoints[i] = &result.Endpoints[i]
+		}
+		// Optional AI enrichment point: the default enricher is a no-op and
+		// returns the deterministic templates unchanged.
+		refined := analyze.DefaultEnricher{}.Enrich(templates, endpoints)
+		for i := range result.Endpoints {
+			if refined != nil && i < len(refined) && refined[i] != nil {
+				result.Endpoints[i].Template = refined[i]
+			}
+		}
 	}
 	if spa.RootNode || spa.DynamicImport || spa.HistoryRouting || spa.DynamicScript {
 		result.Technologies = append(result.Technologies, "spa")
@@ -604,6 +626,11 @@ func (p *Pipeline) processCandidates(
 				})
 			}
 		case discover.KindEndpoint:
+			if discover.IsNoiseEndpoint(candidate.Raw) {
+				// A value consisting of slashes only ("//", "///") is a
+				// regex artifact over comment markers, not an endpoint.
+				continue
+			}
 			if discover.IsStaticAssetPath(resolved.Path) {
 				// A quoted "/a/b.png" or "/bundle.js" is a resource
 				// reference, not an API endpoint.
@@ -627,6 +654,7 @@ func (p *Pipeline) processCandidates(
 					ContextLines: candidate.ContextLines,
 					Vendor:       candidate.Vendor,
 					BodyParams:   candidate.BodyParams,
+					Spec:         candidate.Spec,
 					Source:       candidate.Source,
 					Type:         "api",
 				})
@@ -680,6 +708,14 @@ func enrichEndpoint(
 	if len(endpoint.BodyParams) == 0 && len(candidate.BodyParams) > 0 {
 		endpoint.BodyParams = candidate.BodyParams
 	}
+	endpoint.Spec = mergeSpec(endpoint.Spec, candidate.Spec)
+	if endpoint.Spec != nil {
+		// The spec's union of keys is the recall-first superset of the
+		// per-candidate lists; keep the legacy field consistent with it.
+		if keys := endpoint.Spec.ParamKeys(); len(keys) > len(endpoint.BodyParams) {
+			endpoint.BodyParams = keys
+		}
+	}
 	if len(endpoint.ContextLines) == 0 && len(candidate.ContextLines) > 0 {
 		endpoint.ContextLines = candidate.ContextLines
 	}
@@ -695,6 +731,67 @@ func enrichEndpoint(
 	if evidenceRank(evidence) > evidenceRank(endpoint.Evidence) {
 		endpoint.Evidence = evidence
 	}
+}
+
+// mergeSpec unions two request specs by parameter key, recall-first: a key
+// seen at either call site is kept, the higher-evidence value wins, and an
+// explicit content type outranks an inferred one. Either side may be nil.
+func mergeSpec(base, extra *model.RequestSpec) *model.RequestSpec {
+	if extra == nil {
+		return base
+	}
+	if base == nil {
+		return extra
+	}
+	if base.ContentType == "" && extra.ContentType != "" {
+		base.ContentType, base.ContentTypeEvidence =
+			extra.ContentType, extra.ContentTypeEvidence
+	}
+	if base.BaseURL == "" && extra.BaseURL != "" {
+		base.BaseURL, base.BaseURLKind = extra.BaseURL, extra.BaseURLKind
+	}
+	base.Query = mergeParams(base.Query, extra.Query)
+	base.Body = mergeParams(base.Body, extra.Body)
+	return base
+}
+
+var specEvidenceRank = map[string]int{
+	model.EvidenceRuntime:     4,
+	model.EvidenceLiteral:     3,
+	model.EvidenceConstant:    2,
+	model.EvidenceInferred:    1,
+	model.EvidencePlaceholder: 0,
+}
+
+func paramRank(param model.Param) int {
+	if rank, ok := specEvidenceRank[param.Evidence]; ok {
+		return rank
+	}
+	return 0
+}
+
+func mergeParams(base, extra []model.Param) []model.Param {
+	if len(extra) == 0 {
+		return base
+	}
+	index := make(map[string]int, len(base)+len(extra))
+	for i, param := range base {
+		index[param.Key] = i
+	}
+	for _, param := range extra {
+		if param.Key == "" {
+			continue
+		}
+		if i, exists := index[param.Key]; exists {
+			if paramRank(param) > paramRank(base[i]) {
+				base[i] = param
+			}
+			continue
+		}
+		index[param.Key] = len(base)
+		base = append(base, param)
+	}
+	return base
 }
 
 func evidenceRank(evidence string) int {
@@ -986,7 +1083,7 @@ func (p *Pipeline) probeRoutes(
 			endpoint.Probe = "unknown"
 			continue
 		}
-		if sha256.Sum256(response.Body) == rootHash {
+		if normalizedBodyHash(response.Body) == rootHash {
 			endpoint.Probe = "static"
 		} else {
 			endpoint.Probe = "server"
@@ -1005,7 +1102,37 @@ func (p *Pipeline) routeBodyHash(
 	if err != nil {
 		return empty, false
 	}
-	return sha256.Sum256(response.Body), true
+	return normalizedBodyHash(response.Body), true
+}
+
+// route-probe noise patterns: template engines, dev servers and server
+// frameworks inject values that differ on every request (CSRF nonces, build
+// hashes, timestamps, asset versions) even though the page is the same SPA
+// fallback. Everything below is stripped before the body hash so such pages
+// compare equal.
+var (
+	routeProbeScriptBlock = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script>`)
+	routeProbeStyleBlock  = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style>`)
+	routeProbeComment     = regexp.MustCompile(`(?s)<!--.*?-->`)
+	routeProbeVolatile    = regexp.MustCompile(
+		`(?is)\b(?:nonce|csrf[-_a-z]*|token|_?timestamp|ts|etag|sig)\b\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)`)
+	routeProbeHiddenValue = regexp.MustCompile(
+		`(?is)<input\b[^>]*\btype\s*=\s*["']?hidden["']?[^>]*\bvalue\s*=\s*(?:"[^"]*"|'[^']*')`)
+	routeProbeWhitespace = regexp.MustCompile(`\s+`)
+)
+
+// normalizedBodyHash hashes a response body after removing the parts that vary
+// between requests to the same SPA shell. The raw-body comparison it replaces
+// marked every route as "server" whenever the index carried a CSRF nonce or a
+// build timestamp.
+func normalizedBodyHash(body []byte) [32]byte {
+	normalized := routeProbeScriptBlock.ReplaceAll(body, nil)
+	normalized = routeProbeStyleBlock.ReplaceAll(normalized, nil)
+	normalized = routeProbeComment.ReplaceAll(normalized, nil)
+	normalized = routeProbeHiddenValue.ReplaceAll(normalized, nil)
+	normalized = routeProbeVolatile.ReplaceAll(normalized, nil)
+	normalized = routeProbeWhitespace.ReplaceAll(normalized, []byte(" "))
+	return sha256.Sum256(normalized)
 }
 
 // routeCanonical returns the dedup and display URL for a route. Hash-router

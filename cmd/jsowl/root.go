@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/spf13/cobra"
 	"github.com/youmulijiang/jsowl"
+	"github.com/youmulijiang/jsowl/internal/model"
 )
 
 // version is overridden at build time via -ldflags "-X ...version=v1.2.3".
@@ -27,35 +27,26 @@ type scanService interface {
 }
 
 type dependencies struct {
-	stdout        io.Writer
-	stderr        io.Writer
-	defaultConfig func() jsowl.Config
-	loadConfig    func(string) (jsowl.Config, error)
-	newScanner    func(jsowl.Config) (scanService, error)
-	writeJSON     func(string, *jsowl.Result) error
-	writeHTML     func(string, *jsowl.Result) error
-	writeText     func(string, *jsowl.Result) error
-	check         func(context.Context, jsowl.BrowserConfig) jsowl.BrowserCheckReport
-	ensureOutput  func(string) error
+	stdout         io.Writer
+	stderr         io.Writer
+	defaultConfig  func() jsowl.Config
+	loadConfig     func(string) (jsowl.Config, error)
+	loadConfigOnto func(jsowl.Config, string) (jsowl.Config, error)
+	userHomeDir    func() (string, error)
+	newScanner     func(jsowl.Config) (scanService, error)
+	writeJSON      func(string, *jsowl.Result) error
+	writeHTML      func(string, *jsowl.Result) error
+	writeText      func(string, *jsowl.Result) error
+	check          func(context.Context, jsowl.BrowserConfig) jsowl.BrowserCheckReport
+	ensureOutput   func(string) error
+	// ensureUserRules seeds ~/.jsowl/rules.yaml on first run.
+	ensureUserRules func(path string) (bool, error)
+	// loadRules reads a rules file in either supported schema.
+	loadRules func(path string) (model.RulesConfig, error)
 }
 
-type options struct {
-	urls    []string
-	list    string
-	config  string
-	output  string
-	mode    string
-	proxy   string
-	baseURL string
-	headers []string
-	scopes  []string
-	threads int
-	silent  bool
-	version bool
-	check   bool
-}
-
-// newRootCommand constructs JsOwl's root-only command.
+// newRootCommand constructs JsOwl's root-only command. The flag surface and
+// override rules live in options.go (options.register / options.applyOverrides).
 func newRootCommand(deps dependencies) *cobra.Command {
 	deps = completeDependencies(deps)
 	opts := &options{}
@@ -74,7 +65,7 @@ func newRootCommand(deps dependencies) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := applyOverrides(command, opts, &config); err != nil {
+			if err := opts.applyOverrides(command, &config); err != nil {
 				return err
 			}
 			if opts.check {
@@ -83,7 +74,7 @@ func newRootCommand(deps dependencies) *cobra.Command {
 				}
 				return runCheck(command.Context(), deps, config)
 			}
-			targets, err := loadTargets(opts.urls, opts.list)
+			targets, err := opts.targets()
 			if err != nil {
 				return err
 			}
@@ -100,21 +91,10 @@ func newRootCommand(deps dependencies) *cobra.Command {
 	}
 	command.SetOut(deps.stdout)
 	command.SetErr(deps.stderr)
-	flags := command.Flags()
-	flags.StringArrayVarP(&opts.urls, "url", "u", nil, "target URL (repeatable)")
-	flags.StringVarP(&opts.list, "list", "l", "", "file containing target URLs")
-	flags.StringVarP(&opts.config, "config", "c", "", "YAML configuration file")
-	flags.StringVarP(&opts.output, "output", "o", "", "report output directory")
-	flags.StringVarP(&opts.mode, "mode", "m", "", "auto, direct, or browser")
-	flags.StringVarP(&opts.proxy, "proxy", "p", "", "HTTP(S) or SOCKS5 proxy URL")
-	flags.StringVar(&opts.baseURL, "base-url", "", "base URL for relative discoveries")
-	flags.StringArrayVarP(&opts.headers, "header", "H", nil, "request header Name: value")
-	flags.StringArrayVar(&opts.scopes, "scope", nil,
-		"restrict crawling to these comma-separated domains (repeatable; root origin always allowed)")
-	flags.IntVarP(&opts.threads, "threads", "t", 0, "per-target resource concurrency")
-	flags.BoolVarP(&opts.silent, "silent", "s", false, "suppress successful result lines")
-	flags.BoolVarP(&opts.version, "version", "v", false, "print version")
-	flags.BoolVar(&opts.check, "check", false, "check config, rules, and browser")
+	// pflag cannot parse the literal "-aff" (see normalizeAffFlag), so the
+	// process arguments are rewritten before Cobra sees them.
+	command.SetArgs(normalizeAffFlag(os.Args[1:]))
+	opts.register(command.Flags())
 	return command
 }
 
@@ -130,6 +110,12 @@ func completeDependencies(deps dependencies) dependencies {
 	}
 	if deps.loadConfig == nil {
 		deps.loadConfig = jsowl.LoadConfig
+	}
+	if deps.loadConfigOnto == nil {
+		deps.loadConfigOnto = jsowl.LoadConfigOnto
+	}
+	if deps.userHomeDir == nil {
+		deps.userHomeDir = os.UserHomeDir
 	}
 	if deps.newScanner == nil {
 		deps.newScanner = func(config jsowl.Config) (scanService, error) {
@@ -151,7 +137,23 @@ func completeDependencies(deps dependencies) dependencies {
 	if deps.ensureOutput == nil {
 		deps.ensureOutput = ensureWritableDirectory
 	}
+	if deps.ensureUserRules == nil {
+		deps.ensureUserRules = ensureUserRulesFile
+	}
+	if deps.loadRules == nil {
+		deps.loadRules = model.LoadRulesFile
+	}
 	return deps
+}
+
+// configFlagHelp describes the -c flag and shows where the auto-created
+// user-level config lives, so users can find it from --help alone.
+func configFlagHelp() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "YAML configuration file"
+	}
+	return "YAML configuration file (user-level default: " + userConfigPath(home) + ")"
 }
 
 func ensureWritableDirectory(path string) error {
@@ -170,6 +172,12 @@ func ensureWritableDirectory(path string) error {
 	return os.Remove(probePath)
 }
 
+// loadConfiguration resolves the effective configuration. With -c the named
+// file replaces everything below it. Otherwise the layers merge, each field
+// taken from the highest layer that sets it: the project config.yml in the
+// working directory, then the user-level ~/.jsowl/config.yml (auto-created
+// with a commented template on first run, its path announced on stderr), then
+// the built-in defaults.
 func loadConfiguration(deps dependencies, explicit string) (jsowl.Config, error) {
 	if explicit != "" {
 		config, err := deps.loadConfig(explicit)
@@ -178,136 +186,63 @@ func loadConfiguration(deps dependencies, explicit string) (jsowl.Config, error)
 		}
 		return config, nil
 	}
+	config := deps.defaultConfig()
+	home, err := deps.userHomeDir()
+	hadHome := err == nil
+	if hadHome {
+		userPath := userConfigPath(home)
+		created, err := ensureUserConfigFile(userPath)
+		if err != nil {
+			return jsowl.Config{}, err
+		}
+		if created {
+			_, _ = fmt.Fprintf(deps.stderr, "created user config: %s\n", userPath)
+		} else {
+			_, _ = fmt.Fprintf(deps.stderr, "user config: %s\n", userPath)
+		}
+		config, err = deps.loadConfigOnto(config, userPath)
+		if err != nil {
+			return jsowl.Config{}, fmt.Errorf("load user config: %w", err)
+		}
+	}
+	// Without a home directory there is no user-level config to consult;
+	// continue with the project config and built-in defaults.
 	if info, err := os.Stat("config.yml"); err == nil && !info.IsDir() {
-		return deps.loadConfig("config.yml")
+		config, err = deps.loadConfigOnto(config, "config.yml")
+		if err != nil {
+			return jsowl.Config{}, fmt.Errorf("load config.yml: %w", err)
+		}
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return jsowl.Config{}, fmt.Errorf("inspect optional config.yml: %w", err)
 	}
-	return deps.defaultConfig(), nil
-}
-
-func applyOverrides(
-	command *cobra.Command,
-	opts *options,
-	config *jsowl.Config,
-) error {
-	if command.Flags().Changed("output") {
-		config.Output.Directory = opts.output
-	}
-	if command.Flags().Changed("mode") {
-		config.Mode = jsowl.Mode(opts.mode)
-	}
-	if command.Flags().Changed("threads") {
-		config.Concurrency.ResourcesPerTarget = opts.threads
-	}
-	if command.Flags().Changed("scope") {
-		config.Scope.RestrictDomains = parseScopeDomains(opts.scopes)
-	}
-	if command.Flags().Changed("proxy") {
-		config.Request.Proxy = opts.proxy
-	}
-	if config.Request.Headers == nil {
-		config.Request.Headers = make(map[string]string)
-	}
-	for _, raw := range opts.headers {
-		name, value, err := parseHeader(raw)
+	// Default rules layer: when no configuration layer chose a rules_file,
+	// seed and load the user-level rules.yaml so the sensitive rules live in
+	// an editable file instead of hard-coded behavior. An explicit rules_file
+	// (user config or project config) always wins over this default.
+	if hadHome && config.RulesFile == "" && rulesConfigEmpty(config.Rules) {
+		rulesPath := userRulesPath(home)
+		created, err := deps.ensureUserRules(rulesPath)
 		if err != nil {
-			return err
+			return jsowl.Config{}, err
 		}
-		for existing := range config.Request.Headers {
-			if strings.EqualFold(existing, name) {
-				delete(config.Request.Headers, existing)
-			}
+		if created {
+			_, _ = fmt.Fprintf(deps.stderr, "created user rules: %s\n", rulesPath)
 		}
-		config.Request.Headers[name] = value
-	}
-	return config.Validate()
-}
-
-func applyBaseURL(targets []jsowl.Target, raw string) error {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	base, err := url.Parse(raw)
-	if err != nil || !base.IsAbs() || base.Host == "" ||
-		(base.Scheme != "http" && base.Scheme != "https") ||
-		base.User != nil {
-		return fmt.Errorf("invalid base URL %q", raw)
-	}
-	for index := range targets {
-		targets[index].BaseURL = base.String()
-	}
-	return nil
-}
-
-func parseHeader(raw string) (string, string, error) {
-	name, value, found := strings.Cut(raw, ":")
-	name = strings.TrimSpace(name)
-	value = strings.TrimSpace(value)
-	if !found || name == "" || !validHeaderName(name) {
-		return "", "", fmt.Errorf("invalid header %q; expected Name: value", raw)
-	}
-	if strings.ContainsAny(value, "\r\n") {
-		return "", "", fmt.Errorf("invalid newline in header %q", name)
-	}
-	return name, value, nil
-}
-
-func validHeaderName(name string) bool {
-	const tokenSpecials = "!#$%&'*+-.^_`|~"
-	for _, character := range name {
-		if character >= 'a' && character <= 'z' ||
-			character >= 'A' && character <= 'Z' ||
-			character >= '0' && character <= '9' ||
-			strings.ContainsRune(tokenSpecials, character) {
-			continue
-		}
-		return false
-	}
-	return name != ""
-}
-
-func loadTargets(urls []string, listPath string) ([]jsowl.Target, error) {
-	rawTargets := append([]string(nil), urls...)
-	if listPath != "" {
-		file, err := os.Open(listPath)
+		rules, err := deps.loadRules(rulesPath)
 		if err != nil {
-			return nil, fmt.Errorf("open target list: %w", err)
+			return jsowl.Config{}, fmt.Errorf("load user rules: %w", err)
 		}
-		defer file.Close()
-		scanner := bufio.NewScanner(file)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" && !strings.HasPrefix(line, "#") {
-				rawTargets = append(rawTargets, line)
-			}
-		}
-		if err := scanner.Err(); err != nil {
-			return nil, fmt.Errorf("read target list: %w", err)
-		}
+		config.Rules = rules
 	}
+	return config, nil
+}
 
-	seen := make(map[string]struct{})
-	targets := make([]jsowl.Target, 0, len(rawTargets))
-	for _, raw := range rawTargets {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
-			continue
-		}
-		parsed, err := url.ParseRequestURI(raw)
-		if err != nil || parsed.Host == "" ||
-			(parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return nil, fmt.Errorf("invalid target URL %q", raw)
-		}
-		if _, duplicate := seen[raw]; duplicate {
-			continue
-		}
-		seen[raw] = struct{}{}
-		targets = append(targets, jsowl.Target{URL: raw})
-	}
-	return targets, nil
+// rulesConfigEmpty reports whether no rule source reached the config: any
+// explicit rules_file, include, disabled entry, or custom rule disables the
+// default user-level rules layer.
+func rulesConfigEmpty(rules model.RulesConfig) bool {
+	return len(rules.Include) == 0 && len(rules.Disabled) == 0 &&
+		len(rules.Custom) == 0
 }
 
 func runCheck(
@@ -396,21 +331,6 @@ func runScans(
 		return fmt.Errorf("%d target or report task(s) failed", failures)
 	}
 	return nil
-}
-
-// parseScopeDomains accepts both repeated flags and comma-separated values:
-// --scope a.com --scope b.com and --scope a.com,b.com produce the same list.
-func parseScopeDomains(values []string) []string {
-	domains := make([]string, 0, len(values))
-	for _, value := range values {
-		for _, domain := range strings.Split(value, ",") {
-			domain = strings.TrimSpace(domain)
-			if domain != "" {
-				domains = append(domains, domain)
-			}
-		}
-	}
-	return domains
 }
 
 // synchronizedWriter serializes concurrent writes so probe lines from the

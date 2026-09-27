@@ -154,6 +154,150 @@ func TestExampleConfigurationLoadsAndCompilesExternalRules(t *testing.T) {
 	}
 }
 
+func TestLoadConfigOntoLayersFilesOverBase(t *testing.T) {
+	base := DefaultConfig()
+	base.Request.Headers["X-Base"] = "base"
+
+	path := filepath.Join(t.TempDir(), "config.yml")
+	data := []byte(
+		"mode: direct\nbrowser:\n  wait: 5s\n" +
+			"request:\n  headers:\n    X-File: file\n",
+	)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadConfigOnto(base, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != ModeDirect {
+		t.Fatalf("Mode = %q, want %q", cfg.Mode, ModeDirect)
+	}
+	if cfg.Browser.Wait != 5*time.Second {
+		t.Fatalf("Browser.Wait = %s, want 5s", cfg.Browser.Wait)
+	}
+	if cfg.Concurrency.ResourcesPerTarget != 16 {
+		t.Fatalf("default ResourcesPerTarget lost: %d", cfg.Concurrency.ResourcesPerTarget)
+	}
+	if cfg.Request.Headers["X-Base"] != "base" ||
+		cfg.Request.Headers["X-File"] != "file" {
+		t.Fatalf("Request.Headers = %#v, want merged base and file", cfg.Request.Headers)
+	}
+	// The base itself must stay untouched by the higher layer.
+	if len(base.Request.Headers) != 1 {
+		t.Fatalf("base headers mutated: %#v", base.Request.Headers)
+	}
+}
+
+func TestLoadConfigOntoKeepsBaseUntouchedByCommentOnlyFile(t *testing.T) {
+	base := DefaultConfig()
+	base.Mode = ModeBrowser
+	base.Browser.Wait = 9 * time.Second
+
+	path := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(
+		path, []byte("# comment only\n# mode: direct\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfigOnto(base, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Mode != ModeBrowser || cfg.Browser.Wait != 9*time.Second {
+		t.Fatalf(
+			"comment-only file altered base: mode=%q wait=%s",
+			cfg.Mode, cfg.Browser.Wait,
+		)
+	}
+}
+
+func TestLoadConfigOntoRulesFollowTheFileThatSetsRulesFile(t *testing.T) {
+	writeRules := func(directory, marker string) error {
+		rules := []byte(
+			"custom:\n" +
+				"  - id: " + marker + "\n" +
+				"    name: Fixture\n" +
+				"    category: sensitive\n" +
+				"    severity: high\n" +
+				"    pattern: 'fixture_([a-z]+)'\n" +
+				"    group: 1\n" +
+				"    description: fixture\n" +
+				"    enabled: true\n",
+		)
+		return os.WriteFile(filepath.Join(directory, "rules.yml"), rules, 0o600)
+	}
+
+	first := t.TempDir()
+	if err := writeRules(first, "fixture.first"); err != nil {
+		t.Fatal(err)
+	}
+	firstConfig := filepath.Join(first, "config.yml")
+	if err := os.WriteFile(
+		firstConfig, []byte("rules_file: rules.yml\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	base, err := LoadConfig(firstConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(base.Rules.Custom) != 1 || base.Rules.Custom[0].ID != "fixture.first" {
+		t.Fatalf("base rules = %#v", base.Rules.Custom)
+	}
+
+	// A second file without rules_file keeps the inherited rules.
+	second := t.TempDir()
+	secondConfig := filepath.Join(second, "config.yml")
+	if err := os.WriteFile(secondConfig, []byte("mode: direct\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := LoadConfigOnto(base, secondConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(merged.Rules.Custom) != 1 || merged.Rules.Custom[0].ID != "fixture.first" {
+		t.Fatalf("rules lost without rules_file: %#v", merged.Rules.Custom)
+	}
+	if merged.RulesFile != "rules.yml" {
+		t.Fatalf("RulesFile = %q, want inherited rules.yml", merged.RulesFile)
+	}
+
+	// A file that sets rules_file reloads rules relative to its own directory.
+	third := t.TempDir()
+	if err := writeRules(third, "fixture.third"); err != nil {
+		t.Fatal(err)
+	}
+	thirdConfig := filepath.Join(third, "config.yml")
+	if err := os.WriteFile(
+		thirdConfig, []byte("rules_file: rules.yml\n"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := LoadConfigOnto(base, thirdConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replaced.Rules.Custom) != 1 ||
+		replaced.Rules.Custom[0].ID != "fixture.third" {
+		t.Fatalf("rules not reloaded from overriding file: %#v", replaced.Rules.Custom)
+	}
+
+	// An explicit empty rules_file clears inherited rules.
+	clearedConfig := filepath.Join(t.TempDir(), "config.yml")
+	if err := os.WriteFile(clearedConfig, []byte("rules_file: \"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := LoadConfigOnto(base, clearedConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.RulesFile != "" || len(cleared.Rules.Custom) != 0 {
+		t.Fatalf("empty rules_file did not clear rules: %#v", cleared.Rules)
+	}
+}
+
 func TestConfigValidateRejectsUnsafeBounds(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -166,7 +310,7 @@ func TestConfigValidateRejectsUnsafeBounds(t *testing.T) {
 		{"resource concurrency", func(cfg *Config) { cfg.Concurrency.ResourcesPerTarget = 0 }},
 		{"max depth", func(cfg *Config) { cfg.Limits.MaxDepth = -1 }},
 		{"max resources", func(cfg *Config) { cfg.Limits.MaxResources = -1 }},
-		{"max body size", func(cfg *Config) { cfg.Limits.MaxBodySize = 0 }},
+		{"max body size", func(cfg *Config) { cfg.Limits.MaxBodySize = -1 }},
 	}
 
 	for _, test := range tests {

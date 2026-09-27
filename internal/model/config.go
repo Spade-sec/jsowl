@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
@@ -27,13 +28,23 @@ func DefaultConfig() Config {
 			Cookies:       make(map[string]string),
 		},
 		Browser: BrowserConfig{
-			Wait:         3 * time.Second,
-			Idle:         800 * time.Millisecond,
-			IdleMax:      5 * time.Second,
-			Timeout:      45 * time.Second,
-			Headless:     true,
-			MaxRoutes:    30,
+			Wait:     3 * time.Second,
+			Idle:     800 * time.Millisecond,
+			IdleMax:  5 * time.Second,
+			Timeout:  45 * time.Second,
+			Headless: true,
+			// 0 means no route cap: every route the crawl deadline allows
+			// is rendered.
+			MaxRoutes:    0,
 			CrawlTimeout: 60 * time.Second,
+			// Route crawling is on by default: static extraction lists the
+			// routes, but only rendering each view observes the API calls
+			// the view itself fires.
+			CrawlRoutes: true,
+
+			AutoForm:        false,
+			TriggerEvents:   false,
+			MaxInteractions: 20,
 		},
 		Concurrency: ConcurrencyConfig{
 			Targets:            4,
@@ -44,7 +55,9 @@ func DefaultConfig() Config {
 			// 0 means no resource cap: every reachable script and chunk is
 			// fetched and analyzed.
 			MaxResources: 0,
-			MaxBodySize:  10 * 1024 * 1024,
+			// 0 means no body cap: responses are downloaded in full, so
+			// truncated bundles never break AST chunk extraction.
+			MaxBodySize: 0,
 		},
 		Scope: ScopeConfig{
 			FetchExternalScripts: true,
@@ -69,17 +82,31 @@ func DefaultConfig() Config {
 			},
 		},
 		Output: OutputConfig{
-			Directory:   "./jsowl-report",
-			JSON:        true,
-			HTML:        true,
-			DownloadJS:  true,
-			JSDirectory: "js",
+			Directory:       "./jsowl-report",
+			JSON:            true,
+			HTML:            true,
+			DownloadJS:      true,
+			JSDirectory:     "js",
+			RequestTemplate: true,
 		},
 	}
 }
 
 // LoadConfig decodes a strict YAML configuration while preserving unspecified defaults.
 func LoadConfig(path string) (Config, error) {
+	return LoadConfigOnto(DefaultConfig(), path)
+}
+
+// LoadConfigOnto decodes the strict YAML file at path on top of base. Fields
+// the file leaves unspecified keep their base values, so layered files merge:
+// a user-level file can carry global values while a project file overrides
+// individual fields. rules_file is honored only when this file sets it, and
+// resolves relative to the file's directory.
+func LoadConfigOnto(base Config, path string) (Config, error) {
+	// Clone the maps so a higher layer never mutates the base it decodes over.
+	base.Request.Headers = maps.Clone(base.Request.Headers)
+	base.Request.Cookies = maps.Clone(base.Request.Cookies)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
@@ -97,22 +124,29 @@ func LoadConfig(path string) (Config, error) {
 		return Config{}, fmt.Errorf("normalize config: %w", err)
 	}
 
-	cfg := DefaultConfig()
+	cfg := base
 	decoder := yaml.NewDecoder(&normalized)
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
-	if cfg.RulesFile != "" {
-		rulesPath := cfg.RulesFile
-		if !filepath.IsAbs(rulesPath) {
-			rulesPath = filepath.Join(filepath.Dir(path), rulesPath)
+	if documentSetsKey(&document, "rules_file") {
+		if strings.TrimSpace(cfg.RulesFile) == "" {
+			// An explicit empty rules_file clears rules inherited from
+			// lower configuration layers.
+			cfg.RulesFile = ""
+			cfg.Rules = RulesConfig{}
+		} else {
+			rulesPath := cfg.RulesFile
+			if !filepath.IsAbs(rulesPath) {
+				rulesPath = filepath.Join(filepath.Dir(path), rulesPath)
+			}
+			rules, err := loadRulesFile(rulesPath)
+			if err != nil {
+				return Config{}, err
+			}
+			cfg.Rules = rules
 		}
-		rules, err := loadRulesFile(rulesPath)
-		if err != nil {
-			return Config{}, err
-		}
-		cfg.Rules = rules
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -120,19 +154,84 @@ func LoadConfig(path string) (Config, error) {
 	return cfg, nil
 }
 
-// loadRulesFile strictly decodes the rule-specific YAML document.
+// documentSetsKey reports whether the document's root mapping contains the
+// key, so inherited values are only replaced by files that actually set one.
+func documentSetsKey(document *yaml.Node, key string) bool {
+	if document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		return false
+	}
+	root := document.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
+}
+
+// LoadRulesFile reads a rule file in either supported schema (JsOwl custom
+// or HaE native), resolving include chains relative to the file.
+func LoadRulesFile(path string) (RulesConfig, error) {
+	return loadRulesFile(path)
+}
+
+// loadRulesFile strictly decodes the rule-specific YAML document and folds in
+// any included rule files (resolved relative to this file, cycle-safe).
 func loadRulesFile(path string) (RulesConfig, error) {
+	return loadRulesFileVisited(path, map[string]struct{}{})
+}
+
+func loadRulesFileVisited(path string, visited map[string]struct{}) (RulesConfig, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		absolute = path
+	}
+	if _, seen := visited[absolute]; seen {
+		return RulesConfig{}, fmt.Errorf("rules include cycle at %q", path)
+	}
+	visited[absolute] = struct{}{}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return RulesConfig{}, fmt.Errorf("read rules file %q: %w", path, err)
 	}
-	var rules RulesConfig
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&rules); err != nil {
-		return RulesConfig{}, fmt.Errorf("decode rules file %q: %w", path, err)
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return RulesConfig{}, fmt.Errorf("parse rules file %q: %w", path, err)
 	}
-	return rules, nil
+	var rules RulesConfig
+	if isHaERulesDocument(&document) {
+		// HaE-native files (rules:/group:/rule:) decode leniently: they come
+		// from an external ecosystem and must load without edits.
+		rules, err = parseHaERules(&document)
+		if err != nil {
+			return RulesConfig{}, fmt.Errorf("decode rules file %q: %w", path, err)
+		}
+	} else {
+		decoder := yaml.NewDecoder(bytes.NewReader(data))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(&rules); err != nil {
+			return RulesConfig{}, fmt.Errorf("decode rules file %q: %w", path, err)
+		}
+	}
+
+	merged := rules
+	for _, include := range rules.Include {
+		includePath := include
+		if !filepath.IsAbs(includePath) {
+			includePath = filepath.Join(filepath.Dir(path), includePath)
+		}
+		included, err := loadRulesFileVisited(includePath, visited)
+		if err != nil {
+			return RulesConfig{}, err
+		}
+		merged.Disabled = append(merged.Disabled, included.Disabled...)
+		merged.Custom = append(merged.Custom, included.Custom...)
+	}
+	return merged, nil
 }
 
 // Validate rejects configuration values that could disable scan safety bounds.
@@ -147,14 +246,18 @@ func (c Config) Validate() error {
 		c.Browser.IdleMax < 0 || c.Browser.Timeout <= 0 {
 		return errors.New("browser durations are invalid")
 	}
+	if c.Browser.MaxInteractions < 0 {
+		return errors.New("browser.max_interactions must not be negative")
+	}
 	if c.Browser.MaxRoutes < 0 || c.Browser.CrawlTimeout < 0 {
 		return errors.New("browser crawl bounds are invalid")
 	}
 	if c.Concurrency.Targets <= 0 || c.Concurrency.ResourcesPerTarget <= 0 {
 		return errors.New("concurrency values must be positive")
 	}
-	// MaxResources accepts 0 for "no cap"; negative values are rejected.
-	if c.Limits.MaxDepth < 0 || c.Limits.MaxResources < 0 || c.Limits.MaxBodySize <= 0 {
+	// MaxResources accepts 0 for "no cap"; MaxBodySize accepts 0 for
+	// "download in full"; negative values are rejected.
+	if c.Limits.MaxDepth < 0 || c.Limits.MaxResources < 0 || c.Limits.MaxBodySize < 0 {
 		return errors.New("resource limits are invalid")
 	}
 	if err := validateProxy(c.Request.Proxy); err != nil {

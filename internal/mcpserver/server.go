@@ -136,8 +136,8 @@ func (s *Store) scanTool(ctx context.Context, req *mcp.CallToolRequest, input sc
 		ScanID: id, Target: result.Target, Mode: string(result.Mode),
 		ReportDir: reportDir,
 		Resources: len(result.Resources), Endpoints: len(result.Endpoints),
-		Routes:   countRoutes(result),
-		Sensitive: countSensitive(result),
+		Routes:          countRoutes(result),
+		Sensitive:       countSensitive(result),
 		RuntimeEvidence: countEvidence(result, model.EvidenceRuntime),
 		FullURLEvidence: countEvidence(result, model.EvidenceFullURL),
 	}
@@ -167,16 +167,17 @@ type endpointsInput struct {
 }
 
 type endpointRow struct {
-	URL        string   `json:"url"`
-	Method     string   `json:"method,omitempty"`
-	Evidence   string   `json:"evidence,omitempty"`
-	Type       string   `json:"type,omitempty"`
-	Probe      string   `json:"probe,omitempty"`
-	Source     string   `json:"source,omitempty"`
-	Line       int      `json:"line,omitempty"`
-	Status     int      `json:"status_code,omitempty"`
-	BodyParams []string `json:"body_params,omitempty"`
-	Context    []string `json:"context,omitempty"`
+	URL        string             `json:"url"`
+	Method     string             `json:"method,omitempty"`
+	Evidence   string             `json:"evidence,omitempty"`
+	Type       string             `json:"type,omitempty"`
+	Probe      string             `json:"probe,omitempty"`
+	Source     string             `json:"source,omitempty"`
+	Line       int                `json:"line,omitempty"`
+	Status     int                `json:"status_code,omitempty"`
+	BodyParams []string           `json:"body_params,omitempty"`
+	Spec       *model.RequestSpec `json:"spec,omitempty"`
+	Context    []string           `json:"context,omitempty"`
 }
 
 func (s *Store) endpointsTool(ctx context.Context, req *mcp.CallToolRequest, input endpointsInput) (*mcp.CallToolResult, []endpointRow, error) {
@@ -208,6 +209,7 @@ func (s *Store) endpointsTool(ctx context.Context, req *mcp.CallToolRequest, inp
 			Type:     endpoint.Type, Probe: endpoint.Probe,
 			Source: endpoint.SourceURL, Line: endpoint.Line,
 			Status: endpoint.StatusCode, BodyParams: endpoint.BodyParams,
+			Spec: endpoint.Spec,
 		}
 		if input.WithCtx {
 			for _, line := range endpoint.ContextLines {

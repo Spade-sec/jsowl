@@ -54,8 +54,18 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 		return nil
 	}
 	publicBase := source
+	// The AST pass runs unconditionally on webpack-evidenced bundles and its
+	// results are unioned with the regex pass below: the two have disjoint
+	// blind spots (the AST misses truncated/mangled bundles, the regex
+	// misses plain-function runtimes, template strings and subscript
+	// property access).
+	astPublicPath, astFilenames := webpackASTExtract(body)
 	if match := webpackPublicPath.FindSubmatch(body); len(match) == 2 {
 		if resolved, ok := resolveURL(source, string(match[1])); ok {
+			publicBase = ensureDirectoryURL(resolved)
+		}
+	} else if astPublicPath != "" {
+		if resolved, ok := resolveURL(source, astPublicPath); ok {
 			publicBase = ensureDirectoryURL(resolved)
 		}
 	} else {
@@ -125,6 +135,9 @@ func FromWebpack(source *url.URL, body []byte, limit int) []Candidate {
 				prefix+string(pair[1])+"."+string(pair[2])+".js")
 		}
 	}
+
+	// Union in the AST pass filenames; the result loop deduplicates.
+	filenames = append(filenames, astFilenames...)
 
 	result := make([]Candidate, 0, min(limit, len(filenames)))
 	seen := make(map[string]struct{})

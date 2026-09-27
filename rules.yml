@@ -1,6 +1,9 @@
 # JsOwl external rule set.
 # Patterns are adapted from 正则表达式总结报告.md for Go's RE2 engine.
 # Unsupported lookarounds/backreferences were rewritten into RE2-compatible forms.
+# engine: nfa 的规则由 regexp2 编译，可直接使用 HaE 风格的前瞻/后顾/反向引用。
+include:
+  - ./hae_rules.yml
 disabled: []
 
 custom:

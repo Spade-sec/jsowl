@@ -296,7 +296,9 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 		"绝对路径", "相对路径", // grouped by path kind
 		"复制", "data-copy=\"/api/users?id=1\"", // one-click copy
 		"app.js:42:9", "上下文", "client.post(", "const api = client;",
-		"<mark>api/users</mark>", // path highlighted in context
+		// Coordinates are authoritative now: the whole matched region is
+		// wrapped, quotes included.
+		`<mark>client.post(&quot;/api/users&quot;, body)</mark>`, // match region highlighted
 	} {
 		if !strings.Contains(string(api), want) {
 			t.Fatalf("API report missing %q", want)
@@ -373,5 +375,88 @@ func TestWriteSplitReportsGeneratesTopicPages(t *testing.T) {
 		if !strings.Contains(string(main), want) {
 			t.Fatalf("main report nav missing %q", want)
 		}
+	}
+}
+
+func TestAPIReportDetailPanel(t *testing.T) {
+	result := sampleResult()
+	result.Endpoints = append(result.Endpoints, model.Endpoint{
+		Raw: "/api/login", URL: "https://example.test/api/login",
+		SourceURL: "https://example.test/app.js", Method: "POST",
+		Line: 88, Column: 3,
+		ContextLines: []model.ContextLine{
+			{LineNumber: 88, Content: `axios.post("/api/login", {user: "admin"})`, MatchStart: 0, MatchEnd: 12},
+		},
+		Spec: &model.RequestSpec{
+			BaseURL:             "https://api.example.test",
+			BaseURLKind:         model.EvidenceLiteral,
+			ContentType:         "application/json",
+			ContentTypeEvidence: model.EvidenceInferred,
+			Query: []model.Param{
+				{Key: "page", Value: "1", Evidence: model.EvidenceLiteral},
+				{Key: "kw", Value: "{kw}", Evidence: model.EvidencePlaceholder},
+			},
+			Body: []model.Param{
+				{Key: "user", Value: "admin", Evidence: model.EvidenceLiteral},
+			},
+		},
+	})
+	// A bare endpoint without spec or context renders no detail panel.
+	result.Endpoints = append(result.Endpoints, model.Endpoint{
+		Raw: "/bare", URL: "https://example.test/bare", Type: "api",
+	})
+	directory := t.TempDir()
+	if err := WriteSplitReports(directory, result); err != nil {
+		t.Fatal(err)
+	}
+	api, err := os.ReadFile(filepath.Join(directory, "API报告.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(api)
+	for _, want := range []string{
+		`class="api-row"`, // row is the toggle now
+		"RequestSpec",     // spec section in the panel
+		"BaseURL",         // base URL surfaced
+		"字面量",             // literal evidence label
+		"动态占位",            // placeholder evidence label
+		"推断",              // inferred evidence label
+		"来源定位",            // source location section
+		"app.js:88:3",     // exact JS position
+		"匹配上下文",           // context section inside the panel
+		"数字",              // query value typed as number
+		"字符串",             // body value typed as string
+	} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("API report detail panel missing %q", want)
+		}
+	}
+	if strings.Contains(page, `ctx-toggle`) {
+		t.Fatalf("context toggle button should be removed")
+	}
+	if strings.Contains(strings.SplitN(page, `/bare`, 2)[1], `class="api-row"`) &&
+		!strings.Contains(strings.SplitN(page, `/api/login`, 2)[1], `class="api-row"`) {
+		// /bare has no detail: it must not be clickable. The login row must be.
+		t.Fatalf("row toggle classes wrong")
+	}
+}
+
+func TestHighlightFragmentsHighlightsEveryOccurrence(t *testing.T) {
+	content := `{"path":"/ContentManagement","component":"Layout","redirect":"/ContentManagement/ReleaseManagement"}`
+	got, markedAny := highlightFragments(content, []string{"/ContentManagement"})
+	if !markedAny {
+		t.Fatal("expected the fragment to be marked")
+	}
+	marked := strings.Count(got, "<mark>")
+	if marked != 2 {
+		t.Fatalf("expected 2 marks for repeated fragment, got %d: %s", marked, got)
+	}
+	// The longer fragment must not leave a nested or partial mark behind.
+	got, _ = highlightFragments(content, []string{"/ContentManagement", "ReleaseManagement"})
+	if strings.Count(got, "<mark>") != 3 {
+		t.Fatalf("expected 3 marks with overlapping fragments, got: %s", got)
+	}
+	if strings.Contains(got, "mark><mark") || strings.Contains(got, "</mark></mark>") {
+		t.Fatalf("marks must never nest: %s", got)
 	}
 }

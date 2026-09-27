@@ -1,6 +1,15 @@
 package analyze
 
-import "github.com/youmulijiang/jsowl/internal/model"
+import (
+	"fmt"
+
+	"go.yaml.in/yaml/v3"
+
+	"github.com/youmulijiang/jsowl/internal/model"
+)
+
+// RulesConfig re-exported for the YAML marshal below.
+type RulesConfig = model.RulesConfig
 
 // APIRules returns the URL-extraction rules hard-wired into JsOwl. They are
 // compiled unconditionally and cannot be disabled or replaced through rule
@@ -186,6 +195,26 @@ func urlMethodRule(id, name, pattern string, group, methodGroup int) model.Rule 
 	rule := urlRule(id, name, pattern, group)
 	rule.MethodGroup = methodGroup
 	return rule
+}
+
+// rulesFileHeader explains the generated user-level rules file.
+const rulesFileHeader = `# JsOwl 用户级敏感信息规则（首次运行时自动生成，可自由编辑）。
+# - id 与内置规则同名时覆盖内置定义；enabled: false 关闭该条；
+#   从文件中删除某条规则不会关闭同名内置规则，请用 enabled: false。
+# - 修改 pattern / 新增规则后，下次扫描即生效，无需其他配置。
+# - 若配置文件设置了 rules_file，则以该规则文件为准，本文件不再加载。
+`
+
+// BuiltinRulesYAML renders the built-in sensitive rules as a user-editable
+// rules file: the seed content of ~/.jsowl/rules.yaml. Built-in IDs are
+// preserved so an edited entry overrides its built-in counterpart through
+// the custom-rule override path in Engine.New.
+func BuiltinRulesYAML() ([]byte, error) {
+	encoded, err := yaml.Marshal(RulesConfig{Custom: BuiltinRules()})
+	if err != nil {
+		return nil, fmt.Errorf("marshal builtin rules: %w", err)
+	}
+	return append([]byte(rulesFileHeader), encoded...), nil
 }
 
 func sensitiveRule(

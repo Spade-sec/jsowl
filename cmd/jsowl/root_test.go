@@ -374,6 +374,12 @@ func testDependencies() dependencies {
 		loadConfig: func(string) (jsowl.Config, error) {
 			return jsowl.Config{}, errors.New("unexpected config load")
 		},
+		// Most tests exercise no user-level config at all: this stub
+		// simulates an environment without a home directory, and the
+		// user-config tests install their own fake home instead.
+		userHomeDir: func() (string, error) {
+			return "", errors.New("no user home in tests")
+		},
 		newScanner: func(jsowl.Config) (scanService, error) {
 			return &fakeScanner{}, nil
 		},

@@ -149,7 +149,9 @@ func TestAnalyzeContextContainsExactlyTwoSurroundingLines(t *testing.T) {
 
 func TestNewRejectsInvalidPatternAndCaptureGroup(t *testing.T) {
 	tests := []model.Rule{
-		{ID: "bad.regex", Pattern: `(?=lookahead)`, Enabled: true},
+		// regexp2 (the .NET-style engine) also accepts (?P<name>...), so a
+		// pattern that is broken for .NET regardless of dialect is used here.
+		{ID: "bad.regex", Pattern: `[a-,x]`, Enabled: true},
 		{ID: "bad.group", Pattern: `(one)`, Group: 2, Enabled: true},
 	}
 	for _, rule := range tests {

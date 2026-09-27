@@ -1,6 +1,10 @@
 package discover
 
-import "github.com/youmulijiang/jsowl/internal/model"
+import (
+	"strings"
+
+	"github.com/youmulijiang/jsowl/internal/model"
+)
 
 // Kind identifies how a discovered URL should be processed by the scan queue.
 type Kind string
@@ -31,12 +35,22 @@ type Candidate struct {
 	ContextLines []model.ContextLine
 	// BodyParams lists request-body field names for write methods.
 	BodyParams []string
+	// Spec is the normalized request shape (content type, query and body
+	// parameters with per-value evidence) recovered from the AST call site.
+	Spec *model.RequestSpec
 	// Vendor marks a candidate extracted from a third-party library bundle.
 	Vendor bool
 	// Source records the extractor that produced this candidate: ast or regex.
 	Source string
 	// RuleID is the regex rule that matched, when extraction came from rules.
 	RuleID string
+}
+
+// IsNoiseEndpoint reports whether an endpoint candidate is an extraction
+// artifact rather than a real reference — a value consisting of slashes
+// only ("//", "///") comes from regexes over comment markers.
+func IsNoiseEndpoint(raw string) bool {
+	return strings.Trim(raw, "/") == ""
 }
 
 // SPAEvidence records static signals that indicate browser rendering may add resources.
