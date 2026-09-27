@@ -632,3 +632,121 @@ func TestAPIFromASTWrapperCallerBacktrack(t *testing.T) {
 		t.Fatalf("wrapper caller should recover oldPwd")
 	}
 }
+
+func TestAPIFromASTHeuristicMemberWrites(t *testing.T) {
+	// gitee 形态：对象分步构造，键散落在成员赋值里
+	candidates := astCandidates(t, `
+		function notice(){
+			var o = {scope: t};
+			"messages" == t ? o.message_ids = n : o.noti_ids = n;
+			$.ajax({url: "/notifications/mark_dropdown", data: o, type: "PUT"});
+		}
+	`)
+	mark := findCandidate(candidates, "/notifications/mark_dropdown")
+	if mark == nil || mark.Spec == nil {
+		t.Fatalf("missing mark_dropdown spec in %v", candidates)
+	}
+	// 原 call 保留占位符变体；启发式变体带真实键
+	var variant *Candidate
+	for i := range candidates {
+		if candidates[i].Raw == "/notifications/mark_dropdown" && candidates[i].Spec != nil &&
+			len(candidates[i].Spec.Body) >= 2 {
+			variant = &candidates[i]
+		}
+	}
+	if variant == nil {
+		t.Fatalf("heuristic variant with real keys missing; candidates=%d", len(candidates))
+	}
+	for key, value := range map[string]string{"scope": "{t}", "message_ids": "{n}", "noti_ids": "{n}"} {
+		got := findParam(variant.Spec.Body, key)
+		if got == nil || got.Value != value {
+			t.Fatalf("heuristic key %q = %+v, want %q", key, got, value)
+		}
+	}
+}
+
+func TestAPIFromASTHeuristicScopeIsolation(t *testing.T) {
+	// 同名对象 o 在两个函数里分别构造 —— 键不得串
+	candidates := astCandidates(t, `
+		function sendA(){
+			var o = {onlyA: 1};
+			$.ajax({url: "/a", data: o, type: "POST"});
+		}
+		function sendB(){
+			var o = {onlyB: 2};
+			$.ajax({url: "/b", data: o, type: "POST"});
+		}
+	`)
+	for raw, key := range map[string]string{"/a": "onlyA", "/b": "onlyB"} {
+		var variant *Candidate
+		for i := range candidates {
+			if candidates[i].Raw == raw && candidates[i].Spec != nil && findParam(candidates[i].Spec.Body, key) != nil {
+				variant = &candidates[i]
+			}
+		}
+		if variant == nil {
+			t.Fatalf("%s heuristic key %q missing", raw, key)
+		}
+		other := "onlyB"
+		if key == "onlyB" {
+			other = "onlyA"
+		}
+		if findParam(variant.Spec.Body, other) != nil {
+			t.Fatalf("%s leaked key %q from the other scope", raw, other)
+		}
+	}
+}
+
+func TestAPIFromASTTaintUpstream(t *testing.T) {
+	candidates := astCandidates(t, `
+		function load(){ return Object(r["a"])({url:"/drug/list",method:"get"}) }
+		function run(){
+			load().then(function(res){
+				axios.post("/drug/submit", res.data);
+			});
+		}
+	`)
+	submit := findCandidate(candidates, "/drug/submit")
+	if submit == nil || submit.Spec == nil || len(submit.Spec.Body) != 1 {
+		t.Fatalf("missing /drug/submit placeholder: %+v", submit)
+	}
+	ta := submit.Spec.Body[0].Taint
+	if ta == nil || ta.Kind != model.TaintUpstream || ta.Upstream != "/drug/list" || ta.UpstreamField != "data" {
+		t.Fatalf("upstream taint = %+v", ta)
+	}
+}
+
+func TestAPIFromASTTaintStorage(t *testing.T) {
+	candidates := astCandidates(t, `
+		function send(){
+			var org = sessionStorage.getItem("orgCode");
+			axios.post("/dep/list", org);
+		}
+	`)
+	list := findCandidate(candidates, "/dep/list")
+	if list == nil || list.Spec == nil || len(list.Spec.Body) != 1 {
+		t.Fatalf("missing /dep/list: %+v", list)
+	}
+	ta := list.Spec.Body[0].Taint
+	if ta == nil || ta.Kind != model.TaintStorage {
+		t.Fatalf("storage taint = %+v", ta)
+	}
+}
+
+func TestAPIFromASTTaintUnknownCrossFunction(t *testing.T) {
+	candidates := astCandidates(t, `
+		function makePayload(){ return {a: 1}; }
+		function send(){
+			var p = makePayload();
+			axios.post("/x", p);
+		}
+	`)
+	x := findCandidate(candidates, "/x")
+	if x == nil || x.Spec == nil || len(x.Spec.Body) != 1 {
+		t.Fatalf("missing /x: %+v", x)
+	}
+	ta := x.Spec.Body[0].Taint
+	if ta == nil || ta.Kind != model.TaintUnknown {
+		t.Fatalf("cross-function taint must stay unknown: %+v", ta)
+	}
+}

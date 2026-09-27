@@ -420,6 +420,9 @@ func (p *Pipeline) RunDetailed(
 			}
 		}
 	}
+	// Optional AI taint refinement point: deterministic kernel annotations
+	// pass through the default no-op unchanged.
+	result = analyze.DefaultTaintEnricher{}.EnrichTaint(result)
 	if spa.RootNode || spa.DynamicImport || spa.HistoryRouting || spa.DynamicScript {
 		result.Technologies = append(result.Technologies, "spa")
 	}

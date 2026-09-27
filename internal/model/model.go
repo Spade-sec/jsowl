@@ -57,7 +57,38 @@ type Param struct {
 	Key      string `json:"key"`
 	Value    string `json:"value,omitempty"`
 	Evidence string `json:"evidence,omitempty"`
+	// Taint describes where a runtime-only value flows in from. It is
+	// advisory metadata: the value column stays the source symbol.
+	Taint *Taint `json:"taint,omitempty"`
 }
+
+// Taint is the local backward-taint annotation attached to placeholder
+// parameters: the value of such a parameter is a runtime object, and this
+// says where that object originates.
+type Taint struct {
+	// Kind classifies the origin: upstream (a prior API response), storage
+	// (localStorage/sessionStorage), route (client router params), or
+	// unknown.
+	Kind string `json:"kind"`
+	// Symbol is the source-level expression the value flows through
+	// (e.g. "res.data").
+	Symbol string `json:"symbol,omitempty"`
+	// Upstream is the URL of the API whose response feeds this parameter
+	// (Kind=upstream); UpstreamField is the response member read.
+	Upstream      string `json:"upstream,omitempty"`
+	UpstreamField string `json:"upstream_field,omitempty"`
+	// Hops counts backward-binding steps taken (1 = bound directly in the
+	// same function).
+	Hops int `json:"hops,omitempty"`
+}
+
+// Taint kinds.
+const (
+	TaintUpstream = "upstream"
+	TaintStorage  = "storage"
+	TaintRoute    = "route"
+	TaintUnknown  = "unknown"
+)
 
 // RequestSpec is the normalized shape of one request call site, merged from
 // every client library into the same vocabulary.

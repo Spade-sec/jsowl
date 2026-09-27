@@ -100,6 +100,9 @@ type apiCall struct {
 	Context               []model.ContextLine
 	BodyParams            []string
 	Spec                  *model.RequestSpec
+	// FuncStart is the enclosing function's start offset (0 at file scope);
+	// heuristic and taint passes scope their lookups by it.
+	FuncStart uint32
 }
 
 // dedupKey distinguishes two call sites that share method and path but carry
@@ -146,12 +149,16 @@ func APIFromAST(source *url.URL, body []byte) []Candidate {
 		instanceBaseKind: map[string]string{},
 		builders:         map[string]string{},
 		appends:          map[string][]appendPair{},
-		objectNodes:      map[string]*sitter.Node{},
+		objectNodes:      map[string][]objectBinding{},
+		funcNodes:        map[uint32]*sitter.Node{},
+		memberWrites:     map[uint32]map[string][]appendPair{},
 		wrappers:         map[string]wrappedCall{},
 		source:           body,
 	}
 	w.walk(root)
 	w.resolveWrapperCallers(root)
+	w.resolveHeuristics()
+	w.resolveTaint()
 	sort.SliceStable(w.calls, func(i, j int) bool {
 		if w.calls[i].Line != w.calls[j].Line {
 			return w.calls[i].Line < w.calls[j].Line
@@ -197,12 +204,36 @@ type astWalker struct {
 	// on a best-effort basis by a later resolve pass.
 	appends map[string][]appendPair
 	// objectNodes keeps object-literal binding sites (var form = {...}) so a
-	// wrapper called with a variable can still resolve its fields.
-	objectNodes map[string]*sitter.Node
+	// wrapper called with a variable can still resolve its fields. Bindings
+	// are kept per function scope: the minifier reuses short names, so every
+	// scope's version must survive.
+	objectNodes map[string][]objectBinding
+	// funcStack tracks enclosing function start offsets while walking, so
+	// per-function scopes (member writes, bindings) stay isolated despite
+	// the minifier reusing short names across the file.
+	funcStack []uint32
+	// funcNodes maps a function's start offset to its node, so a later pass
+	// can search a call's enclosing function body again.
+	funcNodes map[uint32]*sitter.Node
+	// memberWrites collects o.key = value statements per function scope and
+	// object name — the heuristic layer for payloads built incrementally
+	// ("var o = {a:1}; o.b = 2; send(o)").
+	memberWrites map[uint32]map[string][]appendPair
+	// thenChains records .then/.done callbacks together with the request
+	// call they chain from, so a placeholder parameter bound to the callback
+	// parameter can be traced back to the upstream API.
+	thenChains []thenChain
 	// wrappers records wrapper functions delegating their parameter straight
 	// into a request call (function P(t){...data:t...}): name → the request
 	// they forward to, so caller arguments can be resolved in a second pass.
 	wrappers map[string]wrappedCall
+}
+
+// thenChain links a response callback's function start offset to the call
+// whose response feeds it.
+type thenChain struct {
+	funcStart uint32
+	upstream  *sitter.Node // the request call expression chained with .then
 }
 
 type appendPair struct {
@@ -210,9 +241,22 @@ type appendPair struct {
 	value *sitter.Node
 }
 
+// objectBinding is one object-literal binding of a name within one function
+// scope (0 = file scope).
+type objectBinding struct {
+	funcStart uint32
+	node      *sitter.Node
+}
+
 type wrappedCall struct {
 	Raw, Method, Evidence string
 	Line, Column          int
+	// HasPayload marks wrappers that forward their own parameter into the
+	// request body (function P(t){...data:t...}) — only these produce
+	// caller-side parameter variants. No-payload wrappers (function
+	// load(){...GET without data...}) register too, but solely so promise
+	// chains can resolve their URL.
+	HasPayload bool
 }
 
 func (w *astWalker) text(n *sitter.Node) string {
@@ -231,16 +275,68 @@ func (w *astWalker) walk(n *sitter.Node) {
 		w.bind(n.ChildByFieldName("name"), n.ChildByFieldName("value"))
 	case "assignment_expression":
 		w.bindAssignment(n.ChildByFieldName("left"), n.ChildByFieldName("right"))
+		w.recordMemberWrite(n)
 	case "call_expression":
 		w.visitCall(n)
 	case "new_expression":
 		w.visitNewExpression(n)
+	case "function_declaration", "function", "function_expression",
+		"generator_function_declaration", "generator_function", "arrow_function":
+		// Per-function scopes: member writes and bindings collected inside
+		// this subtree belong to this function only.
+		start := uint32(n.StartByte())
+		w.funcStack = append(w.funcStack, start)
+		w.funcNodes[start] = n
+		for i := uint(0); i < n.NamedChildCount(); i++ {
+			w.walk(n.NamedChild(i))
+		}
+		w.funcStack = w.funcStack[:len(w.funcStack)-1]
+		return
 	}
 	// ERROR nodes are named nodes too. Walking through them is intentional:
 	// valid descendants in malformed or truncated bundles remain recoverable.
 	for i := uint(0); i < n.NamedChildCount(); i++ {
 		w.walk(n.NamedChild(i))
 	}
+}
+
+// recordMemberWrite captures `o.key = value` statements — the heuristic
+// layer's key sources for payloads assembled incrementally. Only literal
+// property names count; computed keys are runtime decisions.
+func (w *astWalker) recordMemberWrite(n *sitter.Node) {
+	if len(w.funcStack) == 0 {
+		return
+	}
+	left := unwrap(n.ChildByFieldName("left"))
+	right := unwrap(n.ChildByFieldName("right"))
+	if left == nil || left.Kind() != "member_expression" {
+		return
+	}
+	object := unwrap(left.ChildByFieldName("object"))
+	property := unwrap(left.ChildByFieldName("property"))
+	if object == nil || object.Kind() != "identifier" || property == nil {
+		return
+	}
+	if property.Kind() != "property_identifier" {
+		return
+	}
+	funcStart := w.funcStack[len(w.funcStack)-1]
+	scope := w.memberWrites[funcStart]
+	if scope == nil {
+		scope = map[string][]appendPair{}
+		w.memberWrites[funcStart] = scope
+	}
+	name := w.text(object)
+	scope[name] = append(scope[name], appendPair{key: w.text(property), value: right})
+}
+
+// currentFunc returns the start offset of the enclosing function, or 0 at
+// file scope.
+func (w *astWalker) currentFunc() uint32 {
+	if len(w.funcStack) == 0 {
+		return 0
+	}
+	return w.funcStack[len(w.funcStack)-1]
 }
 
 func (w *astWalker) bind(nameNode, value *sitter.Node) {
@@ -255,7 +351,8 @@ func (w *astWalker) bind(nameNode, value *sitter.Node) {
 		return
 	}
 	if value.Kind() == "object" {
-		w.objectNodes[name] = value
+		w.objectNodes[name] = append(w.objectNodes[name],
+			objectBinding{funcStart: w.currentFunc(), node: value})
 	}
 	w.bindValue(name, value)
 }
@@ -355,6 +452,22 @@ func (w *astWalker) visitCall(call *sitter.Node) {
 				}
 				name := w.text(unwrap(object))
 				w.appends[name] = append(w.appends[name], appendPair{key: key, value: value})
+			}
+		}
+		// Promise chains: obj.then(function(res){...}) links the callback's
+		// function scope to the upstream request call, so a request issued
+		// inside the callback can be traced back to that upstream API.
+		if (property == "then" || property == "done" || property == "always") && len(args) > 0 {
+			for _, arg := range args {
+				arg = unwrap(arg)
+				if kind(arg) == "function" || kind(arg) == "function_expression" ||
+					kind(arg) == "arrow_function" || kind(arg) == "generator_function" {
+					w.thenChains = append(w.thenChains, thenChain{
+						funcStart: uint32(arg.StartByte()),
+						upstream:  call,
+					})
+					break
+				}
 			}
 		}
 		switch property {
@@ -499,7 +612,7 @@ func (w *astWalker) recordCall(
 		}
 	}
 	params := spec.ParamKeys()
-	w.calls = append(w.calls, apiCall{raw, method, evidence, line, column, ctx, params, spec})
+	w.calls = append(w.calls, apiCall{raw, method, evidence, line, column, ctx, params, spec, w.currentFunc()})
 	// The same call may be the body of a wrapper delegating its own
 	// parameter (function P(t){...data:t...}); recording that mapping lets a
 	// second pass resolve caller-side argument literals into field keys.
@@ -508,7 +621,7 @@ func (w *astWalker) recordCall(
 		receiver := w.outermostIdentifier(object)
 		if base := w.instanceBSE[receiver]; base != "" {
 			if joined := joinBaseURL(base, raw); joined != "" {
-				w.calls = append(w.calls, apiCall{joined, method, model.EvidenceFullURL, line, column, ctx, params, spec})
+				w.calls = append(w.calls, apiCall{joined, method, model.EvidenceFullURL, line, column, ctx, params, spec, w.currentFunc()})
 			}
 		}
 	}
@@ -521,19 +634,32 @@ func (w *astWalker) recordCall(
 // `t(e)`) are skipped: their names collide across the bundle and would
 // resolve unrelated call sites.
 func (w *astWalker) recordWrapper(callee *sitter.Node, raw, method string, args []*sitter.Node, bodyArg int, line, column int) {
-	for _, payload := range w.payloadNodesFor(args, bodyArg) {
+	fn, fnName := w.enclosingNamedFunction(callee)
+	if fn == nil {
+		return
+	}
+	if _, exists := w.wrappers[fnName]; exists {
+		return
+	}
+	payloads := w.payloadNodesFor(args, bodyArg)
+	if len(payloads) == 0 {
+		// No payload slot: still a nameable request wrapper, but callers
+		// cannot contribute parameters to it.
+		w.wrappers[fnName] = wrappedCall{Raw: raw, Method: method, Line: line, Column: column}
+		return
+	}
+	for _, payload := range payloads {
 		node := unwrap(payload.node)
 		if kind(node) != "identifier" {
 			continue
 		}
-		fn, fnName := w.enclosingNamedFunction(callee)
-		if fn == nil || !w.declaredParam(fn, w.text(node)) {
+		if !w.declaredParam(fn, w.text(node)) {
 			continue
 		}
-		if _, exists := w.wrappers[fnName]; exists {
-			continue
+		w.wrappers[fnName] = wrappedCall{
+			Raw: raw, Method: method, Line: line, Column: column, HasPayload: true,
 		}
-		w.wrappers[fnName] = wrappedCall{Raw: raw, Method: method, Line: line, Column: column}
+		return
 	}
 }
 
@@ -630,15 +756,15 @@ func (w *astWalker) resolveWrapperCallers(n *sitter.Node) {
 	if kind(n) == "call_expression" {
 		callee := unwrap(n.ChildByFieldName("function"))
 		if callee != nil && callee.Kind() == "identifier" {
-			if wrapped, ok := w.wrappers[w.text(callee)]; ok {
+			if wrapped, ok := w.wrappers[w.text(callee)]; ok && wrapped.HasPayload {
 				args := w.arguments(n)
 				if len(args) > 0 {
 					first := unwrap(args[0])
 					// A variable argument resolves through its binding site:
 					// var form = {...}; dt(form) still recovers the fields.
 					if kind(first) == "identifier" {
-						if bound, ok := w.objectNodes[w.text(first)]; ok {
-							first = bound
+						if bindings := w.objectNodes[w.text(first)]; len(bindings) > 0 {
+							first = bindings[len(bindings)-1].node
 						}
 					}
 					if kind(first) == "object" {
@@ -652,6 +778,250 @@ func (w *astWalker) resolveWrapperCallers(n *sitter.Node) {
 	for i := uint(0); i < n.NamedChildCount(); i++ {
 		w.resolveWrapperCallers(n.NamedChild(i))
 	}
+}
+
+// resolveHeuristics is the recall layer for payloads assembled incrementally:
+// for every call whose body is a keyless runtime placeholder, it collects the
+// keys written to that object within the same function (object-literal
+// binding plus `o.key = value` member writes) and records a second candidate
+// carrying the real field keys. Keys found here are genuine source literals —
+// only their VALUES stay placeholders — so they keep their value-level
+// evidence while the variant itself is marked inferred by the caller pass.
+func (w *astWalker) resolveHeuristics() {
+	var extra []apiCall
+	for _, call := range w.calls {
+		if call.Spec == nil {
+			continue
+		}
+		for _, param := range call.Spec.Body {
+			if param.Key != "" || param.Evidence != model.EvidencePlaceholder {
+				continue
+			}
+			keys := w.heuristicKeys(call.FuncStart, strings.Trim(param.Value, "{}"))
+			if len(keys) == 0 {
+				continue
+			}
+			spec := *call.Spec
+			spec.Body = appendParams(nil, keys)
+			variant := call
+			variant.Spec = &spec
+			extra = append(extra, variant)
+			break // one heuristic variant per call site
+		}
+	}
+	w.calls = append(w.calls, extra...)
+}
+
+// heuristicKeys gathers a payload object's field keys from one function
+// scope: the binding's own object literal (when bound in the same function,
+// or at file scope where a single binding cannot collide) plus every
+// member write recorded for it.
+func (w *astWalker) heuristicKeys(funcStart uint32, sym string) []model.Param {
+	var params []model.Param
+	for _, binding := range w.objectNodes[sym] {
+		// Same-scope bindings always count; file-scope bindings (module-level
+		// const tables) are safe for any caller. Other scopes are other
+		// functions' objects — the minifier reuses names, so they must not.
+		if binding.funcStart == funcStart || binding.funcStart == 0 {
+			params = appendParams(params, w.objectPairs(binding.node, "", 0))
+		}
+	}
+	for _, pair := range w.memberWrites[funcStart][sym] {
+		if pair.key == "" {
+			continue
+		}
+		value, evidence := "", model.EvidencePlaceholder
+		if pair.value != nil {
+			value, evidence = w.valueOf(pair.value)
+			if value == "" {
+				if symbol := w.payloadSymbol(pair.value); symbol != "" {
+					value = "{" + symbol + "}"
+				}
+			}
+		}
+		params = appendParams(params,
+			[]model.Param{{Key: pair.key, Value: value, Evidence: evidence}})
+	}
+	return params
+}
+
+// resolveTaint attaches local backward-taint annotations to keyless
+// placeholder parameters: where does this runtime object flow in from? The
+// trace is deliberately bounded — same function, a few binding hops — and
+// anything it cannot pin down honestly stays Kind=unknown.
+func (w *astWalker) resolveTaint() {
+	for ci := range w.calls {
+		spec := w.calls[ci].Spec
+		if spec == nil {
+			continue
+		}
+		for pi := range spec.Body {
+			param := &spec.Body[pi]
+			if param.Key != "" || param.Evidence != model.EvidencePlaceholder || param.Taint != nil {
+				continue
+			}
+			param.Taint = w.traceTaint(&w.calls[ci], strings.Trim(param.Value, "{}"))
+		}
+	}
+}
+
+// traceTaint walks bindings backward from a placeholder symbol. Recognized
+// origins: a callback parameter whose callback chains from a request
+// (.then(function(res){...})) marks the upstream API; a binding to
+// localStorage/sessionStorage or router params marks storage/route sources;
+// plain identifier/member chains are followed up to three hops.
+func (w *astWalker) traceTaint(call *apiCall, sym string) *model.Taint {
+	visited := map[string]bool{}
+	current := sym
+	hops := 0
+	for hops <= 3 {
+		if visited[current] {
+			break
+		}
+		visited[current] = true
+		funcNode := w.funcNodes[call.FuncStart]
+		if funcNode == nil {
+			break
+		}
+		root, rest := splitRoot(current)
+		if w.declaredParam(funcNode, root) {
+			if chain, ok := w.thenByFunc(call.FuncStart); ok {
+				upstream := w.requestURLFromCallNode(chain.upstream)
+				if upstream != "" {
+					return &model.Taint{
+						Kind: model.TaintUpstream, Symbol: current,
+						Upstream: upstream, UpstreamField: rest, Hops: hops + 1,
+					}
+				}
+			}
+			// A callback parameter without a recognized chain origin.
+			return &model.Taint{Kind: model.TaintUnknown, Symbol: current, Hops: hops + 1}
+		}
+		bound := w.findBinding(funcNode, current)
+		if bound == nil {
+			break
+		}
+		text := w.text(unwrap(bound))
+		switch {
+		case strings.Contains(text, "localStorage.getItem"), strings.Contains(text, "sessionStorage.getItem"):
+			return &model.Taint{Kind: model.TaintStorage, Symbol: current, Hops: hops + 1}
+		case strings.Contains(text, "$route.params"), strings.Contains(text, "$route.query"),
+			strings.Contains(text, "route.params"), strings.Contains(text, "route.query"):
+			return &model.Taint{Kind: model.TaintRoute, Symbol: current, Hops: hops + 1}
+		}
+		// Follow plain identifier/member chains one more hop.
+		kindBound := kind(unwrap(bound))
+		if kindBound == "identifier" || kindBound == "member_expression" || kindBound == "subscript_expression" {
+			current = w.text(unwrap(bound))
+			hops++
+			continue
+		}
+		break
+	}
+	return &model.Taint{Kind: model.TaintUnknown, Symbol: sym, Hops: hops}
+}
+
+// splitRoot splits "res.data.rows" into root identifier "res" and the rest.
+func splitRoot(sym string) (string, string) {
+	if idx := strings.Index(sym, "."); idx > 0 {
+		return sym[:idx], sym[idx+1:]
+	}
+	return sym, ""
+}
+
+// thenByFunc finds the promise chain registered for a callback function.
+func (w *astWalker) thenByFunc(funcStart uint32) (thenChain, bool) {
+	for _, chain := range w.thenChains {
+		if chain.funcStart == funcStart {
+			return chain, true
+		}
+	}
+	return thenChain{}, false
+}
+
+// requestURLFromCallNode recovers the URL of a recorded request call node
+// after the walk: wrapper indirection, axios-style verb calls, and
+// object-style calls all resolve through the same conventions visitCall
+// used inline. Empty when the shape is unrecognized.
+func (w *astWalker) requestURLFromCallNode(n *sitter.Node) string {
+	n = unwrap(n)
+	if n == nil || n.Kind() != "call_expression" {
+		return ""
+	}
+	callee := unwrap(n.ChildByFieldName("function"))
+	if callee == nil {
+		return ""
+	}
+	// Promise chains: descend through .then/.done wrappers to the request
+	// call they are chained onto.
+	if object, property, ok := w.memberParts(callee); ok &&
+		(property == "then" || property == "done" || property == "always") {
+		if chained := w.requestURLFromCallNode(unwrap(object)); chained != "" {
+			return chained
+		}
+	}
+	args := w.arguments(n)
+	if callee.Kind() == "identifier" {
+		if wrapped, ok := w.wrappers[w.text(callee)]; ok {
+			return wrapped.Raw
+		}
+	}
+	if object, property, ok := w.memberParts(callee); ok {
+		switch property {
+		case "get", "post", "put", "patch", "delete", "head", "options", "request":
+			if len(args) > 0 {
+				for _, candidate := range w.resolveURLExpressions(args[0]) {
+					if candidate != "" {
+						return candidate
+					}
+				}
+			}
+		}
+		_ = object
+	}
+	if len(args) > 0 {
+		if first := unwrap(args[0]); first.Kind() == "object" {
+			if urlNode := w.objectValue(first, "url"); urlNode != nil {
+				for _, candidate := range w.resolveURLExpressions(urlNode) {
+					if candidate != "" {
+						return candidate
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// findBinding locates the node that binds sym inside a function subtree:
+// a variable declarator or an assignment whose left side is the identifier.
+func (w *astWalker) findBinding(fn *sitter.Node, sym string) *sitter.Node {
+	var found *sitter.Node
+	var search func(n *sitter.Node)
+	search = func(n *sitter.Node) {
+		if n == nil || found != nil {
+			return
+		}
+		switch n.Kind() {
+		case "variable_declarator":
+			name := unwrap(n.ChildByFieldName("name"))
+			if name != nil && name.Kind() == "identifier" && w.text(name) == sym {
+				found = n.ChildByFieldName("value")
+				return
+			}
+		case "assignment_expression":
+			left := unwrap(n.ChildByFieldName("left"))
+			if left != nil && left.Kind() == "identifier" && w.text(left) == sym {
+				found = n.ChildByFieldName("right")
+				return
+			}
+		}
+		for i := uint(0); i < n.NamedChildCount(); i++ {
+			search(n.NamedChild(i))
+		}
+	}
+	search(fn)
+	return found
 }
 
 func isMiniProgram(s string) bool {

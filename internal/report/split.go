@@ -506,12 +506,36 @@ func renderParamTable(params []model.Param) string {
 	var b strings.Builder
 	b.WriteString(`<table class="spec-table"><thead><tr><th>键</th><th>值</th><th>类型</th><th>置信度</th></tr></thead><tbody>`)
 	for _, param := range params {
+		value := htmlEscape(param.Value)
+		if taint := taintHint(param.Taint); taint != "" {
+			value += ` <span class="muted">← ` + taint + `</span>`
+		}
 		fmt.Fprintf(&b, "<tr><td><code>%s</code></td><td><code>%s</code></td><td>%s</td><td>%s</td></tr>",
-			htmlEscape(param.Key), htmlEscape(param.Value),
+			htmlEscape(param.Key), value,
 			htmlEscape(paramValueType(param)), evidenceBadge(param.Evidence))
 	}
 	b.WriteString(`</tbody></table>`)
 	return b.String()
+}
+
+// taintHint renders a one-line origin label for annotated placeholders.
+func taintHint(t *model.Taint) string {
+	if t == nil {
+		return ""
+	}
+	switch t.Kind {
+	case model.TaintUpstream:
+		source := htmlEscape(t.Upstream)
+		if t.UpstreamField != "" {
+			source += " 的 " + htmlEscape(t.UpstreamField)
+		}
+		return "上游 " + source
+	case model.TaintStorage:
+		return "本地存储"
+	case model.TaintRoute:
+		return "路由参数"
+	}
+	return ""
 }
 
 // paramValueType classifies a recovered value so readers know what a field
