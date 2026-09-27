@@ -69,8 +69,11 @@ func TestTemplateRuntimeBodyPlaceholder(t *testing.T) {
 	if !strings.HasPrefix(got, "POST /ydzf/drug/FeedbackOrAuditSubmit HTTP/1.1") {
 		t.Fatalf("url join wrong:\n%s", got)
 	}
-	if !strings.Contains(got, `"{{fuzz:body:t}}"`) {
+	if !strings.Contains(got, "{{fuzz:body:t}}") {
 		t.Fatalf("body placeholder missing:\n%s", got)
+	}
+	if strings.Contains(got, `"{{fuzz:body:t}}"`) {
+		t.Fatalf("placeholder must replace the whole body, not sit inside braces:\n%s", got)
 	}
 	if !strings.Contains(got, "# 请求体为运行时对象") {
 		t.Fatalf("runtime body note missing:\n%s", got)

@@ -133,15 +133,22 @@ func templateBody(spec *model.RequestSpec, method string, notes *[]string) strin
 
 // serializeJSON renders body parameters as a JSON object. Literal values are
 // typed correctly (numbers bare, strings quoted); placeholder values stay
-// strings — a fuzzer replaces the whole {{fuzz:...}} token anyway.
+// strings — a fuzzer replaces the whole {{fuzz:...}} token anyway. A keyless
+// placeholder replaces the ENTIRE body: the payload is one runtime object,
+// so wrapping the token in an object with a fake key would produce invalid
+// and misleading JSON.
 func serializeJSON(params []model.Param, notes *[]string) string {
+	for _, param := range params {
+		if param.Key == "" && param.Evidence == model.EvidencePlaceholder {
+			symbol := strings.Trim(param.Value, "{}")
+			*notes = append(*notes,
+				"请求体为运行时对象（源码符号 "+symbol+"），字段需动态确认")
+			return "{{fuzz:body:" + symbol + "}}"
+		}
+	}
 	parts := make([]string, 0, len(params))
 	for _, param := range params {
 		if param.Key == "" {
-			// Keyless placeholder: the whole body is a runtime object.
-			*notes = append(*notes,
-				"请求体为运行时对象（源码符号 "+strings.Trim(param.Value, "{}")+"），字段需动态确认")
-			parts = append(parts, `"{{fuzz:body:`+strings.Trim(param.Value, "{}")+`}}"`)
 			continue
 		}
 		value, _ := bodyValue(param)

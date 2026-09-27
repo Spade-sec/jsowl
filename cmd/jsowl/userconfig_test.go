@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/youmulijiang/jsowl"
+	"github.com/youmulijiang/jsowl/internal/model"
 )
 
 func TestEnsureUserConfigFileCreatesTemplateOnce(t *testing.T) {
@@ -29,13 +31,16 @@ func TestEnsureUserConfigFileCreatesTemplateOnce(t *testing.T) {
 	if !strings.Contains(string(data), "用户级配置文件") {
 		t.Fatalf("template header missing: %q", string(data))
 	}
-	// A fully commented template must stay inert when loaded.
+	// The preset-values template must stay inert when loaded: every value
+	// mirrors DefaultConfig.
 	defaults := jsowl.DefaultConfig()
 	loaded, err := jsowl.LoadConfigOnto(defaults, path)
 	if err != nil {
 		t.Fatalf("load generated template: %v", err)
 	}
-	if !reflect.DeepEqual(loaded, jsowl.DefaultConfig()) {
+	if !reflect.DeepEqual(
+		normalizeEmptySlices(loaded), normalizeEmptySlices(jsowl.DefaultConfig()),
+	) {
 		t.Fatalf("generated template changed defaults: %#v", loaded)
 	}
 
@@ -67,11 +72,20 @@ func TestLoadConfigurationCreatesUserConfigOnFirstRun(t *testing.T) {
 	if !strings.Contains(stderr.String(), userPath) {
 		t.Fatalf("creation notice missing from stderr: %q", stderr.String())
 	}
-	// The fresh template must not alter the defaults — except Rules, which
-	// is now intentionally seeded from ~/.jsowl/rules.yaml.
-	defaults := deps.defaultConfig()
-	config.Rules = defaults.Rules
-	if !reflect.DeepEqual(config, defaults) {
+	// The preset template mirrors the production defaults (jsowl.DefaultConfig),
+	// which is what it must load to — Rules is the one intentional difference:
+	// it is seeded from ~/.jsowl/rules.yaml.
+	defaults := jsowl.DefaultConfig()
+	if len(config.Rules.Custom) == 0 {
+		t.Fatalf("rules.yaml should be seeded and loaded: %#v", config.Rules)
+	}
+	config.Rules = model.RulesConfig{}
+	if !reflect.DeepEqual(
+		normalizeEmptySlices(config), normalizeEmptySlices(defaults),
+	) {
+		if diff := walkConfigDiff(reflect.ValueOf(config), reflect.ValueOf(defaults), ""); diff != "" {
+			t.Log(diff)
+		}
 		t.Fatalf("fresh user config changed defaults: %#v", config)
 	}
 
@@ -214,4 +228,42 @@ func TestLoadConfigurationExplicitRulesFileWins(t *testing.T) {
 	if _, err := os.Stat(userRulesPath(home)); !os.IsNotExist(err) {
 		t.Fatalf("rules.yaml should not be seeded when rules_file is set: %v", err)
 	}
+}
+
+// normalizeEmptySlices folds empty slices to nil so a template that presets
+// "[]" compares equal to the default's nil slice — they mean the same thing.
+func normalizeEmptySlices(config model.Config) model.Config {
+	if len(config.Scope.AllowDomains) == 0 {
+		config.Scope.AllowDomains = nil
+	}
+	if len(config.Scope.RestrictDomains) == 0 {
+		config.Scope.RestrictDomains = nil
+	}
+	if len(config.Scope.SuffixBlacklist) == 0 {
+		config.Scope.SuffixBlacklist = nil
+	}
+	if len(config.Scope.SourceMapBlacklist) == 0 {
+		config.Scope.SourceMapBlacklist = nil
+	}
+	return config
+}
+
+func walkConfigDiff(a, b reflect.Value, path string) string {
+	out := ""
+	if a.Kind() == reflect.Struct {
+		for i := 0; i < a.NumField(); i++ {
+			out += walkConfigDiff(a.Field(i), b.Field(i), path+"."+a.Type().Field(i).Name)
+		}
+		return out
+	}
+	if !reflect.DeepEqual(a.Interface(), b.Interface()) {
+		nilInfo := ""
+		switch a.Kind() {
+		case reflect.Slice, reflect.Map, reflect.Ptr, reflect.Interface:
+			nilInfo = fmt.Sprintf(" (config nil=%v defaults nil=%v)", a.IsNil(), b.IsNil())
+		}
+		out += fmt.Sprintf("REAL DIFF at %s: config=%#v defaults=%#v%s",
+			path, a.Interface(), b.Interface(), nilInfo)
+	}
+	return out
 }

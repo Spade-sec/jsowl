@@ -750,3 +750,125 @@ func TestAPIFromASTTaintUnknownCrossFunction(t *testing.T) {
 		t.Fatalf("cross-function taint must stay unknown: %+v", ta)
 	}
 }
+
+func TestAPIFromASTCrossModuleWrapper(t *testing.T) {
+	// webpack 双模块形态：service 模块定义 C，组件模块 import 后别名调用
+	candidates := astCandidates(t, `
+		var modules={
+			"ab8c":function(t,e,a){
+				function C(t){return Object(r["a"])({url:l+"/user/list",method:"post",data:t,params:{PageNum:t.pageNum,PageSize:t.pageSize}})}
+				a.d(e,"C",function(){return C});
+			},
+			"0b1c":function(t,e,a){
+				var r=a("ab8c");
+				function query(){
+					var form={userName:"admin",status:1};
+					r["C"](form);
+				}
+			},
+		};
+	`)
+	list := findCandidateSuffix(candidates, "/user/list")
+	if list == nil {
+		t.Fatalf("missing /user/list: %v", candidates)
+	}
+	var variant *Candidate
+	for i := range candidates {
+		if strings.HasSuffix(candidates[i].Raw, "/user/list") && candidates[i].Spec != nil &&
+			findParam(candidates[i].Spec.Body, "userName") != nil {
+			variant = &candidates[i]
+		}
+	}
+	if variant == nil {
+		t.Fatalf("cross-module caller keys not recovered")
+	}
+	if got := findParam(variant.Spec.Body, "userName"); got == nil || got.Value != "admin" {
+		t.Fatalf("userName = %+v", got)
+	}
+}
+
+func TestAPIFromASTMemberPayloadWrapper(t *testing.T) {
+	// orderList 形态：data:t.ManageOrderParamDTO，调用方传聚合对象
+	candidates := astCandidates(t, `
+		var modules={
+			"svc":function(t,e,a){
+				function R(t){return Object(r["a"])({url:l+"/order/orderList",method:"post",data:t.ManageOrderParamDTO,params:{PageNum:t.pageNum,PageSize:t.pageSize}})}
+				a.d(e,"R",function(){return R});
+			},
+			"cmp":function(t,e,a){
+				var r=a("svc");
+				function page(){
+					r["R"]({pageNum:1, ManageOrderParamDTO:{orderId:"x", status:"A"}});
+				}
+			},
+		};
+	`)
+	list := findCandidateSuffix(candidates, "/order/orderList")
+	if list == nil {
+		t.Fatalf("missing /order/orderList")
+	}
+	var variant *Candidate
+	for i := range candidates {
+		if strings.HasSuffix(candidates[i].Raw, "/order/orderList") && candidates[i].Spec != nil &&
+			findParam(candidates[i].Spec.Body, "orderId") != nil {
+			variant = &candidates[i]
+		}
+	}
+	if variant == nil {
+		t.Fatalf("member-path caller keys not recovered")
+	}
+	if got := findParam(variant.Spec.Body, "status"); got == nil || got.Value != "A" {
+		t.Fatalf("status = %+v", got)
+	}
+}
+
+func TestAPIFromASTCallerContextFeeding(t *testing.T) {
+	// 调用方实参不是字面量对象时，调用点上下文应捐给占位符记录（AI 证据包）
+	candidates := astCandidates(t, `
+		var modules={
+			"ab8c":function(t,e,a){
+				function C(t){return Object(r["a"])({url:l+"/user/list",method:"post",data:t,params:{PageNum:t.pageNum}})}
+				a.d(e,"C",function(){return C});
+			},
+			"0b1c":function(t,e,a){
+				var r=a("ab8c");
+				function query(){
+					var form=buildForm();
+					r["C"](form);
+				}
+			},
+		};
+	`)
+	var base *Candidate
+	for i := range candidates {
+		if strings.HasSuffix(candidates[i].Raw, "/user/list") && candidates[i].Spec != nil {
+			for _, p := range candidates[i].Spec.Body {
+				if p.Key == "" && p.Evidence == model.EvidencePlaceholder {
+					base = &candidates[i]
+				}
+			}
+		}
+	}
+	if base == nil {
+		t.Fatalf("placeholder record missing")
+	}
+	found := false
+	for _, line := range base.ContextLines {
+		if strings.Contains(line.Content, "r[\"C\"](form)") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("caller context not donated: %+v", base.ContextLines)
+	}
+}
+
+
+func findCandidateSuffix(candidates []Candidate, suffix string) *Candidate {
+	for i := range candidates {
+		if strings.HasSuffix(candidates[i].Raw, suffix) {
+			return &candidates[i]
+		}
+	}
+	return nil
+}

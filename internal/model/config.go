@@ -81,6 +81,12 @@ func DefaultConfig() Config {
 				".pdf", ".wasm", ".exe", ".dll", ".dmg", ".iso", ".css",
 			},
 		},
+		// AI defaults mirror what the runtime falls back to (aiclient and
+		// NewAIThird), so the user-level config template can preset them.
+		AI: AIConfig{
+			Path:        "/chat/completions",
+			MaxRequests: 20,
+		},
 		Output: OutputConfig{
 			Directory:       "./jsowl-report",
 			JSON:            true,

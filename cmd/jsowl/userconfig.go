@@ -19,68 +19,149 @@ const (
 	userRulesFileName = "rules.yaml"
 )
 
-// userConfigTemplate is written on first run. Every field stays commented out
-// so the generated file never overrides anything by itself: it documents the
-// defaults until the user uncomments a field, and project config.yml plus CLI
-// flags always win over this file.
-const userConfigTemplate = `# JsOwl 用户级配置文件（首次运行时自动生成，删除本文件后下次运行会重新生成）。
-# 所有配置项默认处于注释状态：取消注释并修改后，对本机所有 jsowl 扫描生效。
+// userConfigTemplate is written on first run. It presets every default so
+// the file doubles as living documentation: users edit values in place
+// instead of uncommenting lines. Values mirror DefaultConfig exactly (a test
+// DeepEqual-guards against drift); an empty value means "fall back to the
+// built-in default" for fields where that is meaningful. rules_file stays
+// commented because setting it would replace the default ~/.jsowl/rules.yaml.
+const userConfigTemplate = `# JsOwl 用户级配置文件（首次运行时自动生成，已预置全部默认值）。
+# 直接修改各项数值即可生效，对本机所有 jsowl 扫描生效。
 # 优先级：命令行参数 > 当前目录 config.yml > 本文件 > 内置默认值。
 # 各项含义与完整示例见 jsowl 仓库中的 config.example.yml。
 
-# mode: auto
+mode: auto
 
-# request:
-#   timeout: 15s
-#   target_timeout: 5m
-#   retry: 1
-#   proxy: ""
-#   user_agent: ""
-#   headers: {}
-#   cookies: {}
+request:
+  timeout: 15s
+  target_timeout: 5m
+  retry: 1
+  proxy: ""
+  user_agent: ""
+  headers: {}
+  cookies: {}
 
-# browser:
-#   path: ""
-#   wait: 3s
-#   idle: 800ms
-#   idle_max: 5s
-#   timeout: 45s
-#   headless: true
-#   no_sandbox: false
-#   collector_script: ""
-#   disable_injection: false
-#   crawl_routes: false
-#   max_routes: 0    # 0 = 不限制，只受 crawl_timeout 约束
-#   crawl_timeout: 60s
+browser:
+  # 浏览器可执行文件路径，留空时只搜索本地已安装的 Chrome/Chromium。
+  path: ""
+  wait: 3s
+  idle: 800ms
+  idle_max: 5s
+  timeout: 45s
+  headless: true
+  no_sandbox: false
+  collector_script: ""
+  disable_injection: false
+  # 渲染发现的每个框架路由视图，观测该视图自身发出的请求。
+  crawl_routes: true
+  max_routes: 0      # 0 = 不限制，只受 crawl_timeout 约束
+  crawl_timeout: 60s
+  # 运行时自动填表提交 / 点击交互元素（会触发目标写操作，谨慎开启）。
+  auto_form: false
+  trigger_events: false
+  max_interactions: 20
+  # 激进模式：disabled/隐藏控件也填写点击，攻击面更大也更嘈杂。
+  aggressive: false
 
-# concurrency:
-#   targets: 4
-#   resources_per_target: 16
+concurrency:
+  targets: 4
+  resources_per_target: 16
 
-# limits:
-#   max_depth: 5
-#   max_resources: 0
-#   max_body_size: 0    # 0 = 不限制，完整下载响应体
+limits:
+  max_depth: 5
+  max_resources: 0   # 0 = 不限制
+  max_body_size: 0   # 0 = 不限制，完整下载响应体
 
-# scope:
-#   allow_domains: []
-#   restrict_domains: []
-#   suffix_blacklist: []
-#   fetch_external_scripts: true
-#   probe_external_endpoints: false
-#   skip_library_bundles: true
-#   probe_source_maps: true
-#   source_map_blacklist: []
+scope:
+  allow_domains: []
+  restrict_domains: []
+  fetch_external_scripts: true
+  probe_external_endpoints: false
+  probe_routes: false
+  probe_source_maps: true
+  skip_library_bundles: true
+  # 已知的第三方库/静态资源黑名单，按需增删。
+  suffix_blacklist:
+    - .png
+    - .jpg
+    - .jpeg
+    - .gif
+    - .webp
+    - .svg
+    - .ico
+    - .bmp
+    - .tif
+    - .tiff
+    - .woff
+    - .woff2
+    - .ttf
+    - .otf
+    - .eot
+    - .mp3
+    - .wav
+    - .ogg
+    - .flac
+    - .mp4
+    - .webm
+    - .avi
+    - .mov
+    - .mkv
+    - .zip
+    - .rar
+    - .7z
+    - .tar
+    - .gz
+    - .bz2
+    - .xz
+    - .pdf
+    - .wasm
+    - .exe
+    - .dll
+    - .dmg
+    - .iso
+    - .css
+  source_map_blacklist:
+    - chunk-vendors
+    - chunk-libs
+    - vendors~
+    - /vendor
+    - node_modules
+    - /polyfills
+    - /runtime.
+    - /libs/
+    - axios
+    - lodash
+    - jquery
+    - moment
+    - echarts
+    - element-ui
+    - elementui
+    - antd
+    - highlight.js
+    - /umd/
+    - core-js
+    - regenerator-runtime
+    - zone.js
+    - bootstrap
 
-# output:
-#   directory: ./jsowl-report
-#   json: true
-#   html: true
-#   download_js: true
-#   js_directory: js
+output:
+  directory: ./jsowl-report
+  json: true
+  html: true
+  download_js: true
+  js_directory: js
+  request_template: true
 
-# 敏感信息规则默认位于 ~/.jsowl/rules.yaml（首次运行自动生成，可直接编辑，
-# 修改 pattern / enabled: false / 追加规则后下次扫描生效）。
+# AI 增强配置（配合 -ai 参数使用；api_key 建议手动填写在配置里而不是命令行）。
+ai:
+  enabled: false
+  api_key: ""
+  base_url: ""                     # 例如 https://open.bigmodel.cn/api/paas/v4
+  path: "/chat/completions"        # OpenAI 兼容路径
+  model: ""                        # 例如 glm-4-flash
+  max_requests: 20                 # 单次扫描 AI 请求上限
+
+# 敏感信息规则默认位于 ~/.jsowl/rules.yaml（首次运行自动生成，可直接编辑）。
 # 下面的 rules_file 用于改用其他规则文件（HaE 原生格式亦可），设置后
 # rules.yaml 不再加载。相对路径以本文件所在目录（~/.jsowl）为基准。
 # rules_file: ./rules.yml

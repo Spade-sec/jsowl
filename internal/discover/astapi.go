@@ -91,6 +91,7 @@ func collectJSONFieldNames(
 // maxBodyParams caps how many field names one request contributes.
 const maxBodyParams = 32
 
+
 // maxParamDepth bounds how deep nested object parameters are flattened.
 const maxParamDepth = 2
 
@@ -152,11 +153,19 @@ func APIFromAST(source *url.URL, body []byte) []Candidate {
 		objectNodes:      map[string][]objectBinding{},
 		funcNodes:        map[uint32]*sitter.Node{},
 		memberWrites:     map[uint32]map[string][]appendPair{},
+		moduleIDs:        map[uint32]string{},
+		moduleParams:     map[uint32]moduleParams{},
+		moduleImports:    map[uint32]map[string]string{},
+		moduleExports:    map[string]map[string]string{},
+		callTargets:      []map[string]int{{}},
+		memberRoots:      []map[string]int{{}},
+		delegates:        map[string]string{},
 		wrappers:         map[string]wrappedCall{},
 		source:           body,
 	}
 	w.walk(root)
 	w.resolveWrapperCallers(root)
+	w.resolveAliasedCalls()
 	w.resolveHeuristics()
 	w.resolveTaint()
 	sort.SliceStable(w.calls, func(i, j int) bool {
@@ -223,9 +232,37 @@ type astWalker struct {
 	// call they chain from, so a placeholder parameter bound to the callback
 	// parameter can be traced back to the upstream API.
 	thenChains []thenChain
+	// webpack module graph: moduleIDs maps a module function's start offset
+	// to its module id ("ab8c":function(t,e,a){...}); moduleParams keeps the
+	// (exports, require) parameter names per module; moduleImports maps
+	// module scope → local var → imported module id; moduleExports maps
+	// module id → export key → local function name. Together they let a
+	// second pass resolve cross-module aliased calls like r["C"]({...}).
+	moduleIDs     map[uint32]string
+	moduleParams  map[uint32]moduleParams
+	moduleImports map[uint32]map[string]string
+	moduleExports map[string]map[string]string
+	// aliasCalls records call sites whose callee is a (possibly Object-wrapped)
+	// cross-module service reference, for resolution after the walk.
+	aliasCalls []aliasCallSite
+	// callTargets is a stack (one map per function scope) counting identifier
+	// callees, so a function whose subtree calls exactly one other local
+	// function can be recognized as a delegating wrapper (the async-generator
+	// pattern A(t){return z.apply(...)} around the real request).
+	callTargets []map[string]int
+	// memberRoots is the parallel stack counting member-call root identifiers
+	// (z.apply(...) roots at z) — used only when a scope has no identifier
+	// callees, so A(t){return z.apply(this,arguments)} still yields the edge
+	// A→z.
+	memberRoots []map[string]int
+	// delegates maps moduleID/funcName → the single local function it
+	// delegates to; alias resolution follows these edges from an export's
+	// local name down to the real request wrapper.
+	delegates map[string]string
 	// wrappers records wrapper functions delegating their parameter straight
-	// into a request call (function P(t){...data:t...}): name → the request
-	// they forward to, so caller arguments can be resolved in a second pass.
+	// into a request call (function P(t){...data:t...}): keyed by
+	// moduleID/funcName — the minifier reuses single-letter names across the
+	// bundle's 100+ modules, so the module scope must be part of the key.
 	wrappers map[string]wrappedCall
 }
 
@@ -234,6 +271,22 @@ type astWalker struct {
 type thenChain struct {
 	funcStart uint32
 	upstream  *sitter.Node // the request call expression chained with .then
+}
+
+// moduleParams holds the webpack module signature names: the second
+// parameter is the exports object, the third the require function.
+type moduleParams struct {
+	exports string
+	require string
+}
+
+// aliasCallSite is one call whose callee is a cross-module service reference
+// (r["C"](...) or the Object(r["C"])(...) wrapper form). scopes snapshots the
+// enclosing function stack innermost-first: import bindings live at module
+// scope, the call may sit several functions deeper.
+type aliasCallSite struct {
+	node   *sitter.Node
+	scopes []uint32
 }
 
 type appendPair struct {
@@ -251,6 +304,14 @@ type objectBinding struct {
 type wrappedCall struct {
 	Raw, Method, Evidence string
 	Line, Column          int
+	// ModuleID scopes the wrapper's name: the same minified function name
+	// exists in many webpack modules.
+	ModuleID string
+	// MemberPath is the property suffix when the wrapper forwards a MEMBER
+	// of its parameter (function R(t){...data:t.ManageOrderParamDTO...}):
+	// caller arguments must be navigated down this path to reach the object
+	// whose keys are the real body fields.
+	MemberPath string
 	// HasPayload marks wrappers that forward their own parameter into the
 	// request body (function P(t){...data:t...}) — only these produce
 	// caller-side parameter variants. No-payload wrappers (function
@@ -273,9 +334,11 @@ func (w *astWalker) walk(n *sitter.Node) {
 	switch n.Kind() {
 	case "variable_declarator":
 		w.bind(n.ChildByFieldName("name"), n.ChildByFieldName("value"))
+		w.recordModuleImport(n, unwrap(n.ChildByFieldName("name")), unwrap(n.ChildByFieldName("value")))
 	case "assignment_expression":
 		w.bindAssignment(n.ChildByFieldName("left"), n.ChildByFieldName("right"))
 		w.recordMemberWrite(n)
+		w.recordModuleImport(n, unwrap(n.ChildByFieldName("left")), unwrap(n.ChildByFieldName("right")))
 	case "call_expression":
 		w.visitCall(n)
 	case "new_expression":
@@ -287,10 +350,16 @@ func (w *astWalker) walk(n *sitter.Node) {
 		start := uint32(n.StartByte())
 		w.funcStack = append(w.funcStack, start)
 		w.funcNodes[start] = n
+		w.callTargets = append(w.callTargets, map[string]int{})
+		w.memberRoots = append(w.memberRoots, map[string]int{})
+		w.detectWebpackModule(n, start)
 		for i := uint(0); i < n.NamedChildCount(); i++ {
 			w.walk(n.NamedChild(i))
 		}
+		w.recordDelegation(n, start)
 		w.funcStack = w.funcStack[:len(w.funcStack)-1]
+		w.callTargets = w.callTargets[:len(w.callTargets)-1]
+		w.memberRoots = w.memberRoots[:len(w.memberRoots)-1]
 		return
 	}
 	// ERROR nodes are named nodes too. Walking through them is intentional:
@@ -328,6 +397,391 @@ func (w *astWalker) recordMemberWrite(n *sitter.Node) {
 	}
 	name := w.text(object)
 	scope[name] = append(scope[name], appendPair{key: w.text(property), value: right})
+}
+
+// detectWebpackModule recognises webpack module entries — the shape
+// "moduleId":function(module, exports, require){...} — and records the
+// module id plus its exports/require parameter names, so imports and
+// exports inside this scope can be attributed.
+func (w *astWalker) detectWebpackModule(fn *sitter.Node, start uint32) {
+	parent := fn.Parent()
+	if parent == nil || parent.Kind() != "pair" {
+		return
+	}
+	keyNode := unwrap(parent.ChildByFieldName("key"))
+	if keyNode == nil {
+		return
+	}
+	// Module keys appear both quoted ("ab8c":) and bare (c24f:) depending
+	// on whether the id is numeric.
+	var moduleID string
+	switch keyNode.Kind() {
+	case "string":
+		moduleID = decodeJSString(w.text(keyNode))
+	case "property_identifier", "number":
+		moduleID = w.text(keyNode)
+	default:
+		return
+	}
+	if moduleID == "" {
+		return
+	}
+	w.moduleIDs[start] = moduleID
+	var params moduleParams
+	if signature := unwrap(fn.ChildByFieldName("parameters")); signature != nil && signature.NamedChildCount() >= 3 {
+		params.exports = w.text(unwrap(signature.NamedChild(1)))
+		params.require = w.text(unwrap(signature.NamedChild(2)))
+	}
+	w.moduleParams[start] = params
+}
+
+// recordModuleImport captures webpack require bindings inside a module —
+// `var r = a("ab8c")` but also the minified sequence form
+// `r = (a("x"),a("y"),a("c24f"))` where side-effect calls precede the real
+// import and the LAST call is the binding value.
+func (w *astWalker) recordModuleImport(n *sitter.Node, name, value *sitter.Node) {
+	if len(w.funcStack) == 0 {
+		return
+	}
+	funcStart := w.currentFunc()
+	params, isModule := w.moduleParams[funcStart]
+	if !isModule || params.require == "" {
+		return
+	}
+	if name == nil || name.Kind() != "identifier" || value == nil {
+		return
+	}
+	// Reduce the binding value to the effective require call: unwrap
+	// parentheses; in a sequence the last expression is the value.
+	value = unwrap(value)
+	if value.Kind() == "sequence_expression" {
+		children := value.NamedChildCount()
+		if children == 0 {
+			return
+		}
+		value = unwrap(value.NamedChild(children - 1))
+	}
+	if value == nil || value.Kind() != "call_expression" {
+		return
+	}
+	callee := unwrap(value.ChildByFieldName("function"))
+	if callee == nil || callee.Kind() != "identifier" || w.text(callee) != params.require {
+		return
+	}
+	args := w.arguments(value)
+	if len(args) == 0 || kind(unwrap(args[0])) != "string" {
+		return
+	}
+	target := decodeJSString(w.text(unwrap(args[0])))
+	if target == "" {
+		return
+	}
+	if w.moduleImports[funcStart] == nil {
+		w.moduleImports[funcStart] = map[string]string{}
+	}
+	w.moduleImports[funcStart][w.text(name)] = target
+}
+
+// maybeRecordAliasCall saves call sites whose callee is a cross-module
+// service reference — r["C"](...), r.C(...), or the Object(r["C"])(...)
+// wrapper form — for resolution once the module graph is complete.
+func (w *astWalker) maybeRecordAliasCall(call, callee *sitter.Node) {
+	if len(w.funcStack) == 0 {
+		return
+	}
+	if _, _, _, ok := w.aliasRef(callee); ok {
+		scopes := make([]uint32, len(w.funcStack))
+		copy(scopes, w.funcStack)
+		w.aliasCalls = append(w.aliasCalls, aliasCallSite{node: call, scopes: scopes})
+	}
+}
+
+// aliasRef decomposes a callee into (localVar, exportKey, scopeFunc, ok)
+// when it references an import: r["KEY"], r.KEY, or Object(r["KEY"]).
+func (w *astWalker) aliasRef(callee *sitter.Node) (string, string, uint32, bool) {
+	callee = unwrap(callee)
+	if callee == nil {
+		return "", "", 0, false
+	}
+	switch callee.Kind() {
+	case "subscript_expression":
+		object := unwrap(callee.ChildByFieldName("object"))
+		property := unwrap(callee.ChildByFieldName("index"))
+		if object == nil || object.Kind() != "identifier" || property == nil || property.Kind() != "string" {
+			return "", "", 0, false
+		}
+		key := decodeJSString(w.text(property))
+		if key == "" {
+			return "", "", 0, false
+		}
+		return w.text(object), key, w.currentFunc(), true
+	case "member_expression":
+		object := unwrap(callee.ChildByFieldName("object"))
+		property := unwrap(callee.ChildByFieldName("property"))
+		if object == nil || object.Kind() != "identifier" || property == nil || property.Kind() != "property_identifier" {
+			return "", "", 0, false
+		}
+		return w.text(object), w.text(property), w.currentFunc(), true
+	case "call_expression":
+		// Object(r["C"]) — unwrap the Object() wrapper and retry.
+		inner := unwrap(callee.ChildByFieldName("function"))
+		args := w.arguments(callee)
+		if inner != nil && inner.Kind() == "identifier" && w.text(inner) == "Object" && len(args) == 1 {
+			return w.aliasRef(unwrap(args[0]))
+		}
+	}
+	return "", "", 0, false
+}
+
+// returnIdentifier extracts the local name a webpack export shim returns:
+// function(){return C} → "C".
+func (w *astWalker) returnIdentifier(fn *sitter.Node) string {
+	var name string
+	var search func(n *sitter.Node)
+	search = func(n *sitter.Node) {
+		if n == nil || name != "" {
+			return
+		}
+		if n.Kind() == "return_statement" && n.NamedChildCount() > 0 {
+			value := unwrap(n.NamedChild(0))
+			if value != nil && value.Kind() == "identifier" {
+				name = w.text(value)
+			}
+			return
+		}
+		for i := uint(0); i < n.NamedChildCount(); i++ {
+			search(n.NamedChild(i))
+		}
+	}
+	search(fn)
+	return name
+}
+
+// resolveAliasedCalls runs after the walk, when the module graph and wrapper
+// table are complete: every recorded cross-module call whose target resolves
+// to a payload-forwarding wrapper contributes the caller's argument literal
+// — the service module's keys live here, one import hop away from the
+// request. Callers whose argument cannot be reduced to an object literal
+// instead donate their context lines to the placeholder record, feeding both
+// the report and the AI evidence pack.
+func (w *astWalker) resolveAliasedCalls() {
+	for _, site := range w.aliasCalls {
+		callee := unwrap(site.node.ChildByFieldName("function"))
+		if callee == nil {
+			continue
+		}
+		localVar, exportKey, _, ok := w.aliasRef(callee)
+		if !ok {
+			continue
+		}
+		targetModule := ""
+		for _, scope := range site.scopes { // innermost → outermost
+			if imported := w.moduleImports[scope][localVar]; imported != "" {
+				targetModule = imported
+				break
+			}
+		}
+		if targetModule == "" {
+			continue
+		}
+		localName := w.moduleExports[targetModule][exportKey]
+		if localName == "" {
+			continue
+		}
+		// The export's local may be a delegating async-generator wrapper;
+		// follow the chain down to the real request wrapper.
+		wrapped, ok := w.followDelegation(targetModule, localName)
+		if !ok {
+			continue
+		}
+		args := w.arguments(site.node)
+		payload := w.resolveCallerPayload(wrapped, args, site.scopes)
+		if payload != nil {
+			w.recordCall(callee, wrapped.Raw, wrapped.Method, []*sitter.Node{payload}, 0)
+		} else {
+			w.appendCallerContext(wrapped, callee)
+		}
+	}
+}
+
+// resolveCallerPayload reduces a wrapper caller's first argument to an
+// object-literal node, navigating the wrapper's member path when it forwards
+// a field of an aggregate argument. nil when the argument is not (or not yet)
+// statically resolvable.
+func (w *astWalker) resolveCallerPayload(wrapped wrappedCall, args []*sitter.Node, callerScopes []uint32) *sitter.Node {
+	if !wrapped.HasPayload || len(args) == 0 {
+		return nil
+	}
+	first := unwrap(args[0])
+	if kind(first) == "identifier" {
+		// Binding scope must match one of the caller's enclosing functions
+		// (or be file scope): the minifier reuses names across functions.
+		for _, binding := range w.objectNodes[w.text(first)] {
+			for _, scope := range callerScopes {
+				if binding.funcStart == scope || binding.funcStart == 0 {
+					first = binding.node
+					break
+				}
+			}
+		}
+	}
+	if kind(first) != "object" {
+		return nil
+	}
+	if wrapped.MemberPath != "" {
+		if navigated := w.navigateMemberPath(first, wrapped.MemberPath); navigated != nil {
+			return navigated
+		}
+		return nil
+	}
+	return first
+}
+
+// appendCallerContext donates a cross-module caller's source line to the
+// placeholder record of the wrapped request, so the report and the AI
+// evidence pack can see where the payload object is actually built.
+func (w *astWalker) appendCallerContext(wrapped wrappedCall, callee *sitter.Node) {
+	ctx := extractContext(w.source, int(callee.StartByte()), contextSpanLines, wrapped.Raw)
+	for i := len(w.calls) - 1; i >= 0; i-- {
+		record := &w.calls[i]
+		if record.Raw != wrapped.Raw || record.Spec == nil {
+			continue
+		}
+		hasPlaceholder := false
+		for _, param := range record.Spec.Body {
+			if param.Key == "" && param.Evidence == model.EvidencePlaceholder {
+				hasPlaceholder = true
+				break
+			}
+		}
+		if !hasPlaceholder {
+			continue
+		}
+		for _, contextLine := range ctx {
+			duplicate := false
+			for _, existing := range record.Context {
+				if existing.LineNumber == contextLine.LineNumber && existing.Content == contextLine.Content {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				record.Context = append(record.Context, contextLine)
+			}
+		}
+		return
+	}
+}
+
+// recordDelegation records a delegation edge when the finished function's
+// subtree calls exactly one other local function — the minified
+// async-generator wrapper pattern (function A(t){...z...P(e)...}) that sits
+// between a webpack export and the real request wrapper.
+func (w *astWalker) recordDelegation(fn *sitter.Node, start uint32) {
+	if len(w.callTargets) == 0 {
+		return
+	}
+	targets := w.callTargets[len(w.callTargets)-1]
+	nameNode := fn.ChildByFieldName("name")
+	if nameNode == nil {
+		return
+	}
+	fnName := w.text(nameNode)
+	var target string
+	if len(targets) == 1 {
+		for candidate := range targets {
+			if candidate != fnName {
+				target = candidate
+			}
+		}
+	} else if len(targets) == 0 {
+		// No identifier callees: a lone member call (z.apply(this, ...))
+		// still names the delegate through its root identifier.
+		roots := w.memberRoots[len(w.memberRoots)-1]
+		if len(roots) == 1 {
+			for candidate := range roots {
+				if candidate != fnName {
+					target = candidate
+				}
+			}
+		}
+	}
+	if target == "" {
+		return
+	}
+	moduleID := w.moduleScopeOfNode(fn)
+	if moduleID == "" {
+		// Fall back to the enclosing scope chain (the function may sit inside
+		// a variable-bound generator whose module is an ancestor).
+		for i := len(w.funcStack) - 1; i >= 0; i-- {
+			if id := w.moduleIDs[w.funcStack[i]]; id != "" {
+				moduleID = id
+				break
+			}
+		}
+	}
+	if moduleID == "" {
+		return
+	}
+	w.delegates[moduleID+"/"+fnName] = target
+}
+
+// followDelegation walks delegation edges from an export's local name until a
+// registered wrapper (or the hop limit) is reached.
+func (w *astWalker) followDelegation(moduleID, localName string) (wrappedCall, bool) {
+	visited := map[string]bool{}
+	current := localName
+	for hop := 0; hop < 6; hop++ {
+		key := moduleID + "/" + current
+		if visited[key] {
+			break
+		}
+		visited[key] = true
+		if wrapped, ok := w.wrappers[key]; ok {
+			return wrapped, true
+		}
+		next, ok := w.delegates[key]
+		if !ok {
+			break
+		}
+		current = next
+	}
+	return wrappedCall{}, false
+}
+
+// countIdentifierCallees counts distinct identifier callees in a subtree
+// (excluding the Object wrapper call), for single-target delegation edges.
+func (w *astWalker) countIdentifierCallees(root *sitter.Node) map[string]int {
+	targets := map[string]int{}
+	var search func(n *sitter.Node)
+	search = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Kind() == "call_expression" {
+			if callee := unwrap(n.ChildByFieldName("function")); callee != nil && callee.Kind() == "identifier" {
+				name := w.text(callee)
+				if name != "Object" {
+					targets[name]++
+				}
+			}
+		}
+		for i := uint(0); i < n.NamedChildCount(); i++ {
+			search(n.NamedChild(i))
+		}
+	}
+	search(root)
+	return targets
+}
+
+// currentModuleID resolves the module id of the current function scope.
+func (w *astWalker) currentModuleID() string {
+	for i := len(w.funcStack) - 1; i >= 0; i-- {
+		if id := w.moduleIDs[w.funcStack[i]]; id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // currentFunc returns the start offset of the enclosing function, or 0 at
@@ -437,6 +891,18 @@ func (w *astWalker) visitCall(call *sitter.Node) {
 	}
 	method, urlArg, bodyArg := "", -1, -1
 	var urlOverride *sitter.Node
+	w.maybeRecordAliasCall(call, callee)
+	if callee.Kind() == "identifier" && len(w.callTargets) > 0 {
+		name := w.text(callee)
+		if name != "Object" {
+			w.callTargets[len(w.callTargets)-1][name]++
+		}
+	}
+	if callee.Kind() == "member_expression" && len(w.memberRoots) > 0 {
+		if root := unwrap(callee.ChildByFieldName("object")); root != nil && root.Kind() == "identifier" {
+			w.memberRoots[len(w.memberRoots)-1][w.text(root)]++
+		}
+	}
 
 	if object, property, ok := w.memberParts(callee); ok {
 		receiver := w.outermostIdentifier(object)
@@ -452,6 +918,27 @@ func (w *astWalker) visitCall(call *sitter.Node) {
 				}
 				name := w.text(unwrap(object))
 				w.appends[name] = append(w.appends[name], appendPair{key: key, value: value})
+			}
+		}
+		// Webpack export registration: a.d(e, "KEY", function(){return local})
+		// inside a module scope builds the module's export table.
+		if property == "d" && len(args) >= 3 {
+			// webpack semantics: require.d(exports, "KEY", getter) — the
+			// callee's object is the require function parameter.
+			if moduleID := w.moduleIDs[w.currentFunc()]; moduleID != "" {
+				if params, ok := w.moduleParams[w.currentFunc()]; ok &&
+					kind(unwrap(object)) == "identifier" && w.text(unwrap(object)) == params.require {
+					keyNode := unwrap(args[1])
+					fnNode := unwrap(args[2])
+					if keyNode != nil && keyNode.Kind() == "string" && fnNode != nil {
+						if local := w.returnIdentifier(fnNode); local != "" {
+							if w.moduleExports[moduleID] == nil {
+								w.moduleExports[moduleID] = map[string]string{}
+							}
+							w.moduleExports[moduleID][decodeJSString(w.text(keyNode))] = local
+						}
+					}
+				}
 			}
 		}
 		// Promise chains: obj.then(function(res){...}) links the callback's
@@ -638,29 +1125,112 @@ func (w *astWalker) recordWrapper(callee *sitter.Node, raw, method string, args 
 	if fn == nil {
 		return
 	}
-	if _, exists := w.wrappers[fnName]; exists {
+	moduleID := w.moduleScopeOfNode(fn)
+	key := moduleID + "/" + fnName
+	if _, exists := w.wrappers[key]; exists {
 		return
 	}
 	payloads := w.payloadNodesFor(args, bodyArg)
 	if len(payloads) == 0 {
 		// No payload slot: still a nameable request wrapper, but callers
 		// cannot contribute parameters to it.
-		w.wrappers[fnName] = wrappedCall{Raw: raw, Method: method, Line: line, Column: column}
+		w.wrappers[key] = wrappedCall{Raw: raw, Method: method, Line: line, Column: column, ModuleID: moduleID}
 		return
 	}
 	for _, payload := range payloads {
 		node := unwrap(payload.node)
-		if kind(node) != "identifier" {
+		// Two forwardable shapes: data:t (identifier) and
+		// data:t.SomeDTO (member rooted at the parameter — service
+		// functions often pick one DTO field out of an aggregate arg).
+		sym, memberPath := "", ""
+		switch kind(node) {
+		case "identifier":
+			sym = w.text(node)
+		case "member_expression":
+			root := unwrap(node.ChildByFieldName("object"))
+			if root == nil || root.Kind() != "identifier" {
+				continue
+			}
+			sym = w.text(root)
+			memberPath = w.memberPathOf(node)
+		default:
 			continue
 		}
-		if !w.declaredParam(fn, w.text(node)) {
+		if !w.declaredParam(fn, sym) {
 			continue
 		}
-		w.wrappers[fnName] = wrappedCall{
-			Raw: raw, Method: method, Line: line, Column: column, HasPayload: true,
+		w.wrappers[key] = wrappedCall{
+			Raw: raw, Method: method, Line: line, Column: column,
+			ModuleID: moduleID, HasPayload: true, MemberPath: memberPath,
 		}
 		return
 	}
+}
+
+// moduleScopeOfNode climbs from a node to the nearest enclosing webpack
+// module's id ("" when the node lives outside any detected module).
+func (w *astWalker) moduleScopeOfNode(node *sitter.Node) string {
+	for p := node; p != nil; p = p.Parent() {
+		if id := w.moduleIDs[uint32(p.StartByte())]; id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+// memberPathOf flattens a member/subscript chain into dot-separated literal
+// property names ("ManageOrderParamDTO", "a.b"); any computed segment
+// disqualifies the path.
+func (w *astWalker) memberPathOf(node *sitter.Node) string {
+	var parts []string
+	cur := unwrap(node)
+	for cur != nil {
+		switch cur.Kind() {
+		case "member_expression":
+			property := unwrap(cur.ChildByFieldName("property"))
+			if property == nil {
+				return ""
+			}
+			if property.Kind() == "property_identifier" {
+				parts = append([]string{w.text(property)}, parts...)
+			} else if property.Kind() == "string" {
+				parts = append([]string{decodeJSString(w.text(property))}, parts...)
+			} else {
+				return ""
+			}
+			cur = unwrap(cur.ChildByFieldName("object"))
+		case "identifier":
+			return strings.Join(parts, ".")
+		default:
+			return ""
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
+// navigateMemberPath walks an object-literal node down a dot path, returning
+// the value node of the final segment (nil when any segment is missing or
+// computed).
+func (w *astWalker) navigateMemberPath(object *sitter.Node, path string) *sitter.Node {
+	cur := unwrap(object)
+	for _, segment := range strings.Split(path, ".") {
+		if segment == "" || cur == nil || cur.Kind() != "object" {
+			return nil
+		}
+		var next *sitter.Node
+		for i := uint(0); i < cur.NamedChildCount(); i++ {
+			pair := cur.NamedChild(i)
+			if pair.Kind() != "pair" {
+				continue
+			}
+			if w.propertyName(pair.ChildByFieldName("key")) == segment {
+				next = unwrap(pair.ChildByFieldName("value"))
+				break
+			}
+		}
+		cur = next
+	}
+	return cur
 }
 
 // enclosingNamedFunction climbs from a node to the nearest named function
@@ -756,7 +1326,8 @@ func (w *astWalker) resolveWrapperCallers(n *sitter.Node) {
 	if kind(n) == "call_expression" {
 		callee := unwrap(n.ChildByFieldName("function"))
 		if callee != nil && callee.Kind() == "identifier" {
-			if wrapped, ok := w.wrappers[w.text(callee)]; ok && wrapped.HasPayload {
+			wrapped, ok := w.wrappers[w.moduleScopeOfNode(callee)+"/"+w.text(callee)]
+			if ok && wrapped.HasPayload {
 				args := w.arguments(n)
 				if len(args) > 0 {
 					first := unwrap(args[0])
@@ -962,7 +1533,7 @@ func (w *astWalker) requestURLFromCallNode(n *sitter.Node) string {
 	}
 	args := w.arguments(n)
 	if callee.Kind() == "identifier" {
-		if wrapped, ok := w.wrappers[w.text(callee)]; ok {
+		if wrapped, ok := w.wrappers[w.moduleScopeOfNode(callee)+"/"+w.text(callee)]; ok {
 			return wrapped.Raw
 		}
 	}
@@ -1544,7 +2115,11 @@ func (w *astWalker) arrayPairs(array *sitter.Node, prefix string, depth int) []m
 		default:
 			value, evidence := w.valueOf(element)
 			if value == "" {
-				value, evidence = "{}", model.EvidencePlaceholder
+				if symbol := w.payloadSymbol(element); symbol != "" {
+					value, evidence = "{"+symbol+"}", model.EvidencePlaceholder
+				} else {
+					value, evidence = "{}", model.EvidencePlaceholder
+				}
 			}
 			params = appendParams(params,
 				[]model.Param{{Key: name, Value: value, Evidence: evidence}})
@@ -1563,6 +2138,7 @@ func (w *astWalker) objectPairs(object *sitter.Node, prefix string, depth int) [
 	for i := uint(0); i < object.NamedChildCount() && len(params) < maxBodyParams; i++ {
 		child := object.NamedChild(i)
 		var key, value, evidence string
+		var valueNode *sitter.Node
 		switch child.Kind() {
 		case "pair":
 			keyNode := child.ChildByFieldName("key")
@@ -1570,7 +2146,7 @@ func (w *astWalker) objectPairs(object *sitter.Node, prefix string, depth int) [
 				continue // dynamic key: nothing stable to fuzz
 			}
 			key = w.propertyName(keyNode)
-			valueNode := unwrap(child.ChildByFieldName("value"))
+			valueNode = unwrap(child.ChildByFieldName("value"))
 			value, evidence = w.valueOf(valueNode)
 			if value == "" {
 				name := key
@@ -1588,6 +2164,7 @@ func (w *astWalker) objectPairs(object *sitter.Node, prefix string, depth int) [
 			}
 		case "shorthand_property_identifier", "shorthand_property_identifier_pattern":
 			key = w.text(child)
+			valueNode = child
 			value, evidence = w.valueOf(child)
 		default:
 			continue // spread_element, methods, comments
@@ -1599,7 +2176,11 @@ func (w *astWalker) objectPairs(object *sitter.Node, prefix string, depth int) [
 			key = prefix + "." + key
 		}
 		if value == "" {
-			value, evidence = "{}", model.EvidencePlaceholder
+			if symbol := w.payloadSymbol(valueNode); symbol != "" {
+				value, evidence = "{"+symbol+"}", model.EvidencePlaceholder
+			} else {
+				value, evidence = "{}", model.EvidencePlaceholder
+			}
 		}
 		params = append(params, model.Param{Key: key, Value: value, Evidence: evidence})
 	}
