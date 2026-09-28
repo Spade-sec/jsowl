@@ -177,7 +177,9 @@ func ensureWritableDirectory(path string) error {
 // taken from the highest layer that sets it: the project config.yml in the
 // working directory, then the user-level ~/.jsowl/config.yml (auto-created
 // with a commented template on first run, its path announced on stderr), then
-// the built-in defaults.
+// the built-in defaults. Rules resolve through their own chain: an explicit
+// rules_file, then the project config/rules.yml, then ~/.jsowl/rules.yaml
+// (seeded on first run), then the compiled-in defaults.
 func loadConfiguration(deps dependencies, explicit string) (jsowl.Config, error) {
 	if explicit != "" {
 		config, err := deps.loadConfig(explicit)
@@ -206,19 +208,49 @@ func loadConfiguration(deps dependencies, explicit string) (jsowl.Config, error)
 		}
 	}
 	// Without a home directory there is no user-level config to consult;
-	// continue with the project config and built-in defaults.
-	if info, err := os.Stat("config.yml"); err == nil && !info.IsDir() {
-		config, err = deps.loadConfigOnto(config, "config.yml")
-		if err != nil {
-			return jsowl.Config{}, fmt.Errorf("load config.yml: %w", err)
+	// continue with the project config and built-in defaults. The project
+	// config lives in config/config.yml; a top-level ./config.yml is still
+	// honoured for backward compatibility with existing layouts.
+	projectConfig := ""
+	for _, candidate := range []string{
+		filepath.Join("config", "config.yml"),
+		"config.yml",
+	} {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			projectConfig = candidate
+			break
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return jsowl.Config{}, fmt.Errorf("inspect optional %s: %w", candidate, err)
 		}
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return jsowl.Config{}, fmt.Errorf("inspect optional config.yml: %w", err)
 	}
-	// Default rules layer: when no configuration layer chose a rules_file,
-	// seed and load the user-level rules.yaml so the sensitive rules live in
-	// an editable file instead of hard-coded behavior. An explicit rules_file
-	// (user config or project config) always wins over this default.
+	if projectConfig != "" {
+		config, err = deps.loadConfigOnto(config, projectConfig)
+		if err != nil {
+			return jsowl.Config{}, fmt.Errorf("load %s: %w", projectConfig, err)
+		}
+	}
+	// Project rules layer: config/rules.yml next to the project config is the
+	// editable rules document shipped with a checkout; it wins over the
+	// user-level rules.yaml, mirroring how the project config wins over the
+	// user config. An explicit rules_file (user config or project config)
+	// always wins over both.
+	if config.RulesFile == "" && rulesConfigEmpty(config.Rules) {
+		projectRules := filepath.Join("config", "rules.yml")
+		if info, err := os.Stat(projectRules); err == nil && !info.IsDir() {
+			_, _ = fmt.Fprintf(deps.stderr, "project rules: %s\n", projectRules)
+			rules, err := deps.loadRules(projectRules)
+			if err != nil {
+				return jsowl.Config{}, fmt.Errorf("load %s: %w", projectRules, err)
+			}
+			config.Rules = rules
+		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return jsowl.Config{}, fmt.Errorf("inspect optional %s: %w", projectRules, err)
+		}
+	}
+	// Default rules layer: when no configuration layer chose a rules_file and
+	// no project rules.yml exists, seed and load the user-level rules.yaml so
+	// the sensitive rules live in an editable file instead of hard-coded
+	// behavior.
 	if hadHome && config.RulesFile == "" && rulesConfigEmpty(config.Rules) {
 		rulesPath := userRulesPath(home)
 		created, err := deps.ensureUserRules(rulesPath)

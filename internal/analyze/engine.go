@@ -103,7 +103,7 @@ func New(custom []model.Rule, disabled []string) (*Engine, error) {
 	}
 
 	byID := make(map[string]model.Rule)
-	for _, rule := range BuiltinRules() {
+	for _, rule := range DefaultRules() {
 		if _, disabled := disabledSet[rule.ID]; !disabled {
 			byID[rule.ID] = rule
 		}

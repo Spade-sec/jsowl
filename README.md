@@ -35,7 +35,7 @@ CLI 没有子命令，常用示例：
 jsowl -u https://example.com
 jsowl -u https://a.example -u https://b.example
 jsowl -l targets.txt
-jsowl -u https://example.com -c config.yml
+jsowl -u https://example.com -c config/config.yml
 jsowl -u https://example.com -o reports
 jsowl -u https://example.com -m direct
 jsowl -u https://example.com -t 32
@@ -43,7 +43,7 @@ jsowl -u https://example.com -p http://127.0.0.1:8080
 jsowl -u https://example.com --base-url https://static.example.com/assets/
 jsowl -u https://example.com --silent
 jsowl -u https://example.com -H "Authorization: Bearer token"
-jsowl --check -c config.yml
+jsowl --check -c config/config.yml
 jsowl -v
 jsowl -h
 ```
@@ -68,7 +68,7 @@ jsowl -h
 
 CLI 显式值优先于 YAML，YAML 优先于内置默认值。若未传 `-c`，jsowl 会按以下顺序叠加配置：上层设置的每个字段覆盖下层，未指定的字段保留下层值。
 
-1. 当前目录 `config.yml`（项目级；项目自带的 `config.yml` 默认引用 `rules.yml`）；
+1. 当前目录 `config/config.yml`（项目级；旧版顶层 `./config.yml` 仍兼容）；
 2. `~/.jsowl/config.yml`（用户级，对本机所有扫描生效）；
 3. 内置默认值。
 
@@ -91,7 +91,7 @@ browser:
 
 ## 配置
 
-完整模板见 [config.example.yml](config.example.yml)。关键默认值如下：
+完整模板见 [config.example.yml](config/config.example.yml)。关键默认值如下：
 
 ```yaml
 mode: auto
@@ -244,12 +244,13 @@ for item := range scanner.ScanBatch(ctx, targets) {
 
 ## 自定义规则
 
-规则独立保存在规则配置文件中。主配置通过 `rules_file` 引用它，相对路径以
-主配置文件所在目录为基准：
-
-```yaml
-rules_file: ./rules.yml
-```
+所有规则统一在 [config/rules.yml](config/rules.yml)，为 HaE 原生格式，是唯一
+规则来源，增删改规则只动这一个文件。它身兼三个角色：仓库目录下运行时自动
+加载为项目级规则（stderr 提示 `project rules: <路径>`），修改后立即生效、
+无需重新编译；编译时经 go:embed 嵌入二进制，供仓库外运行使用；首次运行时
+播种为 `~/.jsowl/rules.yaml` 作为用户级规则的底版。加载优先级：
+`rules_file`（显式指定）> `config/rules.yml`（项目级）>
+`~/.jsowl/rules.yaml`（用户级）> 内嵌默认值。
 
 匹配引擎与 [HaE](https://github.com/gh0stkey/HaE) 一致：所有规则经 regexp2
 （.NET 风格 NFA）编译，前瞻/后顾断言、反向引用、命名组开箱即用；单次匹配
@@ -257,8 +258,9 @@ rules_file: ./rules.yml
 
 规则文件支持两种格式，加载时自动识别。
 
-**HaE 原生格式**——直接复用 HaE 规则库文件，无需转换（`scope` 字段接受但
-忽略；`color` 映射为严重级别；`sensitive: false` 即默认忽略大小写）：
+**HaE 原生格式**（config/rules.yml 即此格式）——直接复用 HaE 规则库文件，
+无需转换（`scope` 字段接受但忽略；`color` 映射为严重级别；`sensitive: false`
+即默认忽略大小写）：
 
 ```yaml
 rules:
@@ -283,10 +285,10 @@ rules:
 
 ```yaml
 include:                      # 可选：合并更多规则文件（相对本文件，自动防循环）
-  - ./hae_rules.yml
-disabled: [secret.account]
+  - ./more-rules.yml
+disabled: [hae.密钥凭证.云账号配置值]
 custom:
-  - id: secret.internal-token
+  - id: my.internal-token
     name: Internal token
     category: sensitive       # url 或 sensitive
     severity: high
@@ -297,10 +299,13 @@ custom:
     # format: 'token={1}'         # 输出格式，缺省取 group 提取的文本
 ```
 
-项目根目录的 [rules.yml](rules.yml) 已加载并适配
-`正则表达式总结报告.md` 中适合 Web/JavaScript 信息收集的规则，
-[hae_rules.yml](hae_rules.yml) 则是 HaE 原生格式的常用子集（身份证、邮箱、
-内网 IP、国内 Webhook、腾讯云密钥、Shiro/Druid 指纹等）。无效正则、捕获组、
-模式、时间、并发和资源边界会在扫描前拒绝。
+config/rules.yml 已收录并适配 `正则表达式总结报告.md` 中适合
+Web/JavaScript 信息收集的规则，以及 HaE 常用子集（身份证、邮箱、内网 IP、
+国内 Webhook、云厂商密钥、Shiro/Druid 指纹等）。无效正则、捕获组、模式、
+时间、并发和资源边界会在扫描前拒绝。
 
-另外，jsowl 首次运行会在用户级配置目录（`~/.jsowl/`）自动生成 `rules.yaml`，内容即内置的 12 条敏感信息规则；之后每次扫描默认加载该文件做敏感信息匹配。规则 ID 与内置规则相同——直接编辑 `pattern`、设置 `enabled: false` 关闭某条、或追加自定义规则即可，下次扫描生效；若配置中设置了 `rules_file`，则以该文件为准，`rules.yaml` 不再加载。
+首次运行时 jsowl 会把内嵌规则集播种为 `~/.jsowl/rules.yaml`（HaE 原生格式，
+stderr 提示 `created user rules: <路径>`）；仓库外运行时默认加载它做敏感信息
+匹配——同名同组条目覆盖内嵌默认规则，`loaded: false` 关闭某条，编辑后下次
+扫描生效。项目目录下存在 `config/rules.yml` 时以项目文件为准、`rules.yaml`
+不再加载；配置中设置 `rules_file` 时以该文件为准。

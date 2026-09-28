@@ -161,6 +161,8 @@ ai:
   # model: "glm-4-flash"
   # max_requests: 20                 # 单次扫描 AI 请求上限
 
-# 相对路径以本配置文件所在目录为基准。
-# 不设置 rules_file 时，默认加载用户级 ~/.jsowl/rules.yaml（首次运行自动生成）。
-rules_file: ./rules.yml
+# 敏感信息规则默认由项目目录下的 config/rules.yml 提供（HaE 原生格式，
+# 修改即生效）；仓库外运行时回退到首次运行播种的 ~/.jsowl/rules.yaml，
+# 再回退到内嵌规则集。下面的 rules_file 用于改用其他规则文件，设置后
+# 以上来源都不再加载。相对路径以本配置文件所在目录为基准。
+# rules_file: ./rules.yml

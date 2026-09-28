@@ -175,8 +175,8 @@ func TestLoadConfigurationSeedsUserRulesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("user rules not seeded: %v", err)
 	}
-	if !strings.Contains(string(data), "id: secret.jwt") {
-		t.Fatalf("seed file missing builtin rules: %s", data[:200])
+	if !strings.Contains(string(data), "name: JWT token") {
+		t.Fatalf("seed file missing default rules: %s", data[:200])
 	}
 	if len(config.Rules.Custom) == 0 {
 		t.Fatalf("config should load the seeded rules: %#v", config.Rules)

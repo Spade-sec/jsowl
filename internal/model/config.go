@@ -184,6 +184,31 @@ func LoadRulesFile(path string) (RulesConfig, error) {
 	return loadRulesFile(path)
 }
 
+// ParseRules decodes a rule document held in memory, auto-detecting the
+// schema (JsOwl custom or HaE native) exactly as LoadRulesFile does. name is
+// used only for error messages; include chains are not resolved here because
+// there is no file to resolve them against.
+func ParseRules(name string, data []byte) (RulesConfig, error) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return RulesConfig{}, fmt.Errorf("parse rules %q: %w", name, err)
+	}
+	if isHaERulesDocument(&document) {
+		rules, err := parseHaERules(&document)
+		if err != nil {
+			return RulesConfig{}, fmt.Errorf("decode rules %q: %w", name, err)
+		}
+		return rules, nil
+	}
+	var rules RulesConfig
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(&rules); err != nil {
+		return RulesConfig{}, fmt.Errorf("decode rules %q: %w", name, err)
+	}
+	return rules, nil
+}
+
 // loadRulesFile strictly decodes the rule-specific YAML document and folds in
 // any included rule files (resolved relative to this file, cycle-safe).
 func loadRulesFile(path string) (RulesConfig, error) {

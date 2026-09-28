@@ -22,7 +22,7 @@ self.webpackChunkapp = self.webpackChunkapp || [];`)
 	got := FromJavaScript(source, body, engine)
 
 	assertCandidate(t, got.Candidates, "/api/users", KindEndpoint)
-	if !hasFinding(got, "secret.jwt") {
+	if !hasFinding(got, "hae.密钥凭证.jwt-token") {
 		t.Fatal("JWT finding not returned")
 	}
 	if !got.SPA.DynamicImport || !got.SPA.HistoryRouting || !got.SPA.Webpack {

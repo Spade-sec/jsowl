@@ -36,7 +36,7 @@ func TestEndToEndLibraryAndCLIWorkflow(t *testing.T) {
 	if !containsEndpoint(result, "/api/users", http.StatusOK) {
 		t.Fatalf("/api/users missing: %#v", result.Endpoints)
 	}
-	if !containsFinding(result, "secret.jwt") {
+	if !containsFinding(result, "hae.密钥凭证.jwt-token") {
 		t.Fatalf("JWT finding missing: %#v", result.Findings)
 	}
 	if !slices.IsSortedFunc(result.Resources, func(a, b Resource) int {
@@ -89,7 +89,7 @@ func TestEndToEndLibraryAndCLIWorkflow(t *testing.T) {
 	if err := json.Unmarshal(data, &cliResult); err != nil {
 		t.Fatal(err)
 	}
-	if !containsFinding(&cliResult, "secret.jwt") {
+	if !containsFinding(&cliResult, "hae.密钥凭证.jwt-token") {
 		t.Fatalf("CLI JSON finding missing: %#v", cliResult.Findings)
 	}
 }

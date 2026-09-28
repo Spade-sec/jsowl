@@ -1,23 +1,24 @@
 package jsowl
 
-import "github.com/youmulijiang/jsowl/internal/model"
+import (
+	_ "embed"
+	"fmt"
 
-// Rule defines one RE2-compatible extraction pattern.
-type Rule = model.Rule
-
-// RuleCategory identifies URL or sensitive-information rules.
-type RuleCategory = model.RuleCategory
-
-// Severity ranks a finding's security significance.
-type Severity = model.Severity
-
-const (
-	RuleCategoryURL       = model.RuleCategoryURL
-	RuleCategorySensitive = model.RuleCategorySensitive
-
-	SeverityInfo     = model.SeverityInfo
-	SeverityLow      = model.SeverityLow
-	SeverityMedium   = model.SeverityMedium
-	SeverityHigh     = model.SeverityHigh
-	SeverityCritical = model.SeverityCritical
+	"github.com/youmulijiang/jsowl/internal/analyze"
 )
+
+// defaultRulesYAML embeds config/rules.yml, the single source of truth for
+// sensitive-information and URL rules (HaE native format). The file on disk
+// is what developers edit; the CLI additionally loads it at runtime through
+// the project-rules layer, so edits take effect without rebuilding. The
+// embedded copy backs first-run seeding of ~/.jsowl/rules.yaml and binaries
+// run outside a checkout.
+//
+//go:embed config/rules.yml
+var defaultRulesYAML []byte
+
+func init() {
+	if err := analyze.SetDefaultRulesYAML(defaultRulesYAML); err != nil {
+		panic(fmt.Sprintf("jsowl: inject default rules: %v", err))
+	}
+}

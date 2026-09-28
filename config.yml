@@ -1,3 +1,0 @@
-# 当前目录运行 jsowl 时会自动加载本文件。
-# 其余扫描参数使用内置默认值；完整配置示例见 config.example.yml。
-rules_file: ./rules.yml

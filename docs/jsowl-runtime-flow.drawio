@@ -1,0 +1,409 @@
+<mxfile host="app.diagrams.net" agent="drawio-skill" version="24.7.17">
+  <diagram name="JsOwl 运行逻辑" id="jsowl-runtime-flow">
+    <mxGraphModel adaptiveColors="auto" dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="4720" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="T" value="JsOwl 运行逻辑流程图" style="text;html=1;align=center;verticalAlign=middle;fontSize=22;fontStyle=1;fontColor=#1F3864;" vertex="1" parent="1">
+          <mxGeometry x="60" y="0" width="1620" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="SB1" value="① 启动与配置（cmd/jsowl → 生效配置）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1F3864;strokeColor=none;fontColor=#FFFFFF;fontSize=15;fontStyle=1;align=left;spacingLeft=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="42" width="1620" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="N1" value="main() → newRootCommand(dependencies{}).Execute()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="110" width="560" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="N2" value="归一化 -aff 参数 → Cobra 解析 flags（options.register）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="190" width="560" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="N3" value="-v / --version ？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4A6785;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="170" y="270" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="N3b" value="打印 JsOwl &lt;version&gt; 后退出" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#A6A6A6;fontSize=11;align=center;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="700" y="290" width="420" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="N4" value="loadConfiguration()：解析生效配置" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="410" width="560" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="N6" value="配置分层（未传 -c 时）&lt;br&gt;1. 内置默认值&lt;br&gt;2. ~/.jsowl/config.yml（首次运行自动生成注释模板，stderr 提示路径）&lt;br&gt;3. config/config.yml（项目级；同一字段覆盖上层，旧版 ./config.yml 仍兼容）&lt;br&gt;规则分层：rules_file &amp;gt; config/rules.yml（项目级，改动即生效）&amp;gt; ~/.jsowl/rules.yaml（首次运行播种）&amp;gt; 内嵌默认值&lt;br&gt;传 -c 时完全以指定文件为准，不叠加任何层" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#A6A6A6;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="700" y="400" width="560" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="N5" value="applyOverrides：CLI 显式值 &gt; YAML &gt; 内置默认" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="500" width="560" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="N7" value="--check ？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4A6785;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="170" y="600" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="N8" value="runCheck()：校验配置与规则（jsowl.New）→ 检查输出目录可写&lt;br&gt;→ CheckBrowser：本地浏览器路径 / CDP / JS / 注入快照&lt;br&gt;任一失败即返回错误" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#A6A6A6;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="700" y="600" width="560" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="N9" value="收集目标（-u 可重复 / -l 文件）→ applyBaseURL(--base-url)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="740" width="560" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="N10" value="runScans()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=12;align=center;verticalAlign=middle;arcSize=8;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="830" width="560" height="55" as="geometry" />
+        </mxCell>
+
+        <mxCell id="SB2" value="② 批量扫描编排（runScans）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1F3864;strokeColor=none;fontColor=#FFFFFF;fontSize=15;fontStyle=1;align=left;spacingLeft=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="910" width="1620" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="N11" value="ensureOutput 创建输出目录 → jsowl.New(cfg)：Validate 配置 + analyze.New 编译规则引擎" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="980" width="560" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="N12" value="SetProbeSink + 启动 printer goroutine：probe 事件流式打印" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1080" width="560" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="N13" value="ScanBatch：concurrency.targets 个固定 worker，完成一个目标即流式返回 BatchItem" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1180" width="560" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="N14" value="生产者-消费者解耦&lt;br&gt;• 扫描器把每次 API 探测完成事件写入 256 缓冲 channel&lt;br&gt;• printer goroutine 消费并打印；慢终端只丢事件，不阻塞扫描&lt;br&gt;• synchronizedWriter 串行化 stdout，避免 probe 行与结果行交错&lt;br&gt;• --silent 时仍排空 channel，仅不打印" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#A6A6A6;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="700" y="1080" width="560" height="170" as="geometry" />
+        </mxCell>
+
+        <mxCell id="SB3" value="③ 单目标 Scan：模式编排（scanner.go）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1F3864;strokeColor=none;fontColor=#FFFFFF;fontSize=15;fontStyle=1;align=left;spacingLeft=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1290" width="1620" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="N15" value="Scan(ctx, target)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1360" width="560" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="N16" value="合并 config + target 请求头 → ua.ForTarget 选取（或随机现代桌面 UA）→ 建 cookie jar&lt;br&gt;→ direct.New（surf 客户端，同源重定向）→ target_timeout 子 ctx" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1445" width="560" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="N17" value="pipeline.New(Getter / Analyzer / Config / ProbeEvents)&lt;br&gt;-ai 开启则 aiclient.New + analyze.NewAIThird → SetEnrichers" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1565" width="560" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="N18" value="mode ？" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4A6785;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="170" y="1675" width="340" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="N19" value="direct：RunDetailed（entry=nil, seeds=nil）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1830" width="340" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="N20" value="browser：scanWithBrowser&lt;br&gt;（见 ④）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="1675" width="340" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="N21" value="auto：先扫一遍快速 direct（RunDetailed），同时收集 SPA 证据" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="1960" width="560" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="N22" value="needsBrowser(evidence) ？&lt;br&gt;root 节点 / 动态 import / history 路由 /&lt;br&gt;动态 script / 大 bundle 且无 endpoint" style="rhombus;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#4A6785;strokeWidth=2;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="170" y="2075" width="340" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="N23" value="浏览器阶段失败 → 降级&lt;br&gt;保留 direct 结果，记录&lt;br&gt;BrowserStatus{Degraded, Reason}，&lt;br&gt;扫描仍视为成功" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#A6A6A6;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="2075" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="N24" value="mergeResults 合并两轮 → normalizeHashRoutes → pipeline.Finalize → 记录 StartedAt / FinishedAt / UserAgent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="2255" width="560" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="SB4" value="④ 浏览器渲染 Collect（Rod + 本地 Chrome/Chromium；browser / auto 模式）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1F3864;strokeColor=none;fontColor=#FFFFFF;fontSize=15;fontStyle=1;align=left;spacingLeft=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="2365" width="1620" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="B1" value="resolveBrowserPath：显式解析本地 Chrome/Chromium，禁用 Rod 自动下载" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="2435" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="B2" value="临时 profile → launch → rod.Connect → 新建 page" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="380" y="2435" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="B3" value="设置 UA / Cookie / 额外头 + 请求头隔离路由 + 注入 collector 脚本" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="700" y="2435" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="B4" value="CDP 订阅 requestWillBeSent / responseReceived + 子 target（iframe / worker）观测" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="2435" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="B5" value="Navigate → WaitLoad → WaitRequestIdle（idle，idle_max 封顶）→ 再等 wait 观察异步 JS" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="2435" width="340" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="B6" value="被动快照：page.HTML() + snapshotURLs（URL / Script / Route）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="2575" width="340" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="B7" value="运行时交互（若开启）：auto_form 逐表提交 + trigger_events 点击 → interactOnce" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1020" y="2575" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="B8" value="crawl_routes：crawlRouteViews 逐个渲染路由视图，视图签名去重 + max_routes / crawl_timeout 限流" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="700" y="2575" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="B9" value="读回浏览器 Cookie → 回灌 Surf，供后续 chunk / API GET 复用" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="380" y="2575" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="B10" value="汇总 network 记录 + 注入观察 → 转成 pipeline.Seed（api seed 带 CDP 解析出的 RequestSpec）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;verticalAlign=middle;arcSize=8;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="2575" width="280" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="SB5" value="⑤ 资源发现与分析循环（internal/pipeline，三模式共用）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1F3864;strokeColor=none;fontColor=#FFFFFF;fontSize=15;fontStyle=1;align=left;spacingLeft=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="2725" width="1620" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="P1" value="scope.New(root, scope)：建立授权边界；解析 resolutionBase（--base-url 可覆盖）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="2790" width="560" height="58" as="geometry" />
+        </mxCell>
+        <mxCell id="P2" value="建 Result + scheduler.New(maxResources, maxDepth)；入口文档入队 Depth 0；MarkSeen(上一轮已见 URL)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="2875" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="P3" value="注入浏览器 seeds：route → 记录 endpoint（hash 模式改写）；api → 记录 + CanProbe 授权；script / chunk → CanFetchScript 通过后入队" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="2968" width="560" height="82" as="geometry" />
+        </mxCell>
+        <mxCell id="P4" value="drain 循环：Queue.Take(resources_per_target) → collectBatch 并发 collectOne，直到队列为空" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="3077" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="P5" value="collectOne：Getter.Get（HeadersForURL：同源保留全部头，跨域仅 UA / Accept 等安全头）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="3170" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="P6" value="按 Kind / Content-Type 分派提取器&lt;br&gt;• HTML / document → FromHTML + FromWebpack + APIFromAST + FromJavaScript，并逐个处理内联脚本&lt;br&gt;• JS / chunk → 库 banner 判定：skip_library_bundles 命中则跳过解析（仍记录资源），否则结果标 vendor&lt;br&gt;• sourcemap / .map → 还原 sourcesContent 后对每个原始文件重跑提取&lt;br&gt;• 其他文本类 → FromJavaScript 正则匹配" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=left;spacingLeft=10;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="3263" width="560" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="P7" value="JS / chunk 分支的提取器与还原链&lt;br&gt;• APIFromAST：Tree-sitter 解析调用点，恢复 method / URL / body 参数，并支持跨模块 wrapper 解析&lt;br&gt;• FromWebpack：从 webpack 3/4/5 runtime 的 chunk 映射解析出 chunk URL&lt;br&gt;• FromRequireJS：解析 RequireJS 配置模块&lt;br&gt;• absorbSourceMap：处理 //# sourceMappingURL= 与内联 base64 map&lt;br&gt;• 局部语法错误不影响文件其他位置的有效调用点" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#A6A6A6;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="700" y="3263" width="560" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="P8" value="processOutcome：记录 Resource（截断记 Issue）、合并 SPA 证据、Findings 去重合并、API 回填 StatusCode + JSONFieldNames（仅字段名）+ emit ProbeEvent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="3438" width="560" height="86" as="geometry" />
+        </mxCell>
+        <mxCell id="P9" value="download_js：脚本原子落盘 storage.SaveJSIn → 进入 pending 延迟分析（截断或保存失败则用内存体兜底）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="3549" width="560" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="P10" value="processCandidates：后缀黑名单过滤 → scope.Canonical 去重 → script / chunk / sourcemap 入队；endpoint 过滤噪声与静态资源后记录，CanProbe 则入队 GET 探测；route 记录（hash 模式改写）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="3650" width="560" height="96" as="geometry" />
+        </mxCell>
+        <mxCell id="P11" value="延迟分析循环：computeBatch 并发读盘 → FromJavaScript + APIFromAST → mergeDeferred → 再次 drain，直到 pending 为空" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="3771" width="560" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="P12" value="probeRoutes（若开启）：同源 GET 每个 route，与首页归一化 body 哈希比对 → static / server" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="3872" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="P13" value="RequestTemplate（若开启）：BuildTemplate 重建 HTTP 请求包 → AI TemplateEnricher 精修（默认 no-op）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="3963" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="P14" value="AI TaintEnricher / FindingEnricher（默认 no-op）；SPA / Webpack / RequireJS → Technologies" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="4054" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="P15" value="finalize：排序 Resources / Endpoints / Findings 并重算统计" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;arcSize=8;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="60" y="4145" width="560" height="56" as="geometry" />
+        </mxCell>
+
+        <mxCell id="SB6" value="⑥ 报告输出（JSON / HTML / TXT）" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#1F3864;strokeColor=none;fontColor=#FFFFFF;fontSize=15;fontStyle=1;align=left;spacingLeft=14;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="60" y="4230" width="1620" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="O1" value="writeReports → targetReportDirectory：主机名 + xxhash 稳定后缀，避免同主机多目标互相覆盖" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="4300" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="O2" value="report.json（完整 Result 序列化）+ report.html（自包含交互式总览，无需外部资源）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="4391" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="O3" value="txt 汇总（api 绝对/相对路径、url、路由、参数、敏感信息）+ WriteSplitReports 分项 HTML" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="4482" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="O4" value="stdout 逐资源输出 URL / 大小 / 状态 / 类型；degraded 提示走 stderr；失败计数 &gt; 0 → 返回错误，退出码 1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F8CECC;strokeColor=#B85450;fontSize=12;align=center;verticalAlign=middle;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="4573" width="560" height="66" as="geometry" />
+        </mxCell>
+        <mxCell id="O5" value="输出目录结构&lt;br&gt;jsowl-report/[host][-xxhash]/&lt;br&gt;  report.json / report.html&lt;br&gt;  API报告.html / URL报告.html / 敏感信息报告.html / 参数报告.html / 路由报告.html / 资源报告.html&lt;br&gt;  api绝对路径.txt / api相对路径.txt / url.txt / 路由.txt / 参数.txt / 敏感信息.txt&lt;br&gt;  js/ 与 js/chunks/：保存的 JS 与 chunk（API 响应正文永不保存）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#A6A6A6;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="700" y="4300" width="560" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="NOTE" value="补充&lt;br&gt;• 单目标全程独立：独立 surf 客户端、cookie jar、队列与超时；多目标只共享不可变的配置与已编译规则引擎&lt;br&gt;• JsOwl 主动发出的 API 探测一律 GET，不提交表单、不发 POST/PUT/PATCH/DELETE&lt;br&gt;• 浏览器由 Rod 按站点原生行为执行页面脚本，不改写其请求方法，因此目标脚本自身可能发出写请求&lt;br&gt;• cmd/jsowl-mcp 以 stdio 暴露 MCP 工具（scan / endpoints / sensitive / parameters），进程内复用同一 Scanner，结果驻留内存并同时落盘" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#A6A6A6;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="700" y="4470" width="560" height="169" as="geometry" />
+        </mxCell>
+
+        <mxCell id="NOTE2" value="关键约束与安全边界&lt;br&gt;• 同源凭据头（Authorization / Cookie / X-API-Key 等）只发往同源；跨域脚本仅携带 UA / Accept 等安全协商头&lt;br&gt;• 跨域脚本默认允许下载分析；跨域 API 默认不探测&lt;br&gt;• suffix_blacklist 在请求入队前按 URL path 过滤，忽略大小写、query 与 fragment&lt;br&gt;• probe_source_maps / skip_library_bundles / fetch_external_scripts 均可配置&lt;br&gt;• crawl_routes、auto_form、trigger_events 会主动与目标交互，可能触发写操作，仅在已授权范围开启&lt;br&gt;• AI 层（-ai）只精修低置信度模板 / taint / finding，字面值与 AST 恢复的键始终优先，且与扫描共享同一请求预算" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF9E6;strokeColor=#D6B656;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="2790" width="340" height="500" as="geometry" />
+        </mxCell>
+        <mxCell id="NOTE3" value="术语与模式&lt;br&gt;• direct — Surf 并发有界 GET&lt;br&gt;• browser — Rod + 本地 Chrome/Chromium 渲染，网络空闲后继续等待异步 JS&lt;br&gt;• auto（默认）— 先 direct，检测到 SPA 信号后启动浏览器；浏览器不可用则降级并保留 direct 结果&lt;br&gt;• 三模式共用同一 pipeline，报告结构一致&lt;br&gt;• 目标（Target）— 一个入口 URL（-u / -l），一次独立扫描&lt;br&gt;• seed — 浏览器 CDP 观测到的运行时 URL，带证据等级与 initiator 位置&lt;br&gt;• 证据等级 — runtime &gt; full-url &gt; static" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F5;strokeColor=#A6A6A6;fontSize=11;align=left;spacingLeft=10;verticalAlign=middle;arcSize=6;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="110" width="340" height="480" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N1" target="N2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N2" target="N3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="N3" target="N3b">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="N3" target="N4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N4" target="N5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" value="展开" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#8C9AA8;strokeWidth=1.2;endArrow=open;endFill=0;dashed=1;fontSize=11;fontColor=#5B6B7F;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="N4" target="N6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N5" target="N7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="N7" target="N8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="N7" target="N9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N9" target="N10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N10" target="N11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N11" target="N12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N12" target="N13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" value="补充" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#8C9AA8;strokeWidth=1.2;endArrow=open;endFill=0;dashed=1;fontSize=11;fontColor=#5B6B7F;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="N12" target="N14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N13" target="N15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N15" target="N16">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e17" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N16" target="N17">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e18" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N17" target="N18">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e19" value="direct" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;exitX=0.15;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="N18" target="N19">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e20" value="browser" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.25;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="N18" target="N20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e21" value="auto" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;exitX=0.85;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="N18" target="N21">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e22" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N21" target="N22">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e23" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="N22" target="N20">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e24" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="N22" target="N24">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e25" value="失败" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#8C9AA8;strokeWidth=1.2;endArrow=open;endFill=0;dashed=1;fontSize=11;fontColor=#5B6B7F;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="N20" target="N23">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e26" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N23" target="N24">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e27" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N19" target="N24">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e28" value="成功" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#33475B;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="N20" target="N24">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e29" value="进入 Collect" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#D79B00;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#8A5A00;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="N20" target="B1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e30" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="B1" target="B2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e31" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="B2" target="B3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e32" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="B3" target="B4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e33" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="B4" target="B5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e34" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="B5" target="B6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e35" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="B6" target="B7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e36" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="B7" target="B8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e37" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="B8" target="B9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e38" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="B9" target="B10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e39" value="seeds 注入" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#D79B00;strokeWidth=1.5;endArrow=block;endFill=1;fontSize=11;fontColor=#8A5A00;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="B10" target="P3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e40" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="N24" target="P1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e41" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P1" target="P2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e42" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P2" target="P3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e43" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P3" target="P4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e44" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P4" target="P5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e45" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P5" target="P6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e47" value="展开" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#8C9AA8;strokeWidth=1.2;endArrow=open;endFill=0;dashed=1;fontSize=11;fontColor=#5B6B7F;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="P6" target="P7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e48" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P6" target="P8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e49" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P8" target="P9">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e50" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P9" target="P10">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e51" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P10" target="P11">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e52" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P11" target="P12">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e53" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P12" target="P13">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e54" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P13" target="P14">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e55" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P14" target="P15">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e56" value="新候选回队（循环）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#D6B656;strokeWidth=1.5;endArrow=block;endFill=1;dashed=1;fontSize=11;fontColor=#8A6D00;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="P10" target="P4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e57" value="再次 drain" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#D6B656;strokeWidth=1.5;endArrow=block;endFill=1;dashed=1;fontSize=11;fontColor=#8A6D00;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="P11" target="P4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e58" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="P15" target="O1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e59" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="O1" target="O2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e60" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="O2" target="O3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e61" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5B6B7F;strokeWidth=1.5;endArrow=block;endFill=1;" edge="1" parent="1" source="O3" target="O4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e62" value="展开" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#8C9AA8;strokeWidth=1.2;endArrow=open;endFill=0;dashed=1;fontSize=11;fontColor=#5B6B7F;labelBackgroundColor=#FFFFFF;" edge="1" parent="1" source="O1" target="O5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

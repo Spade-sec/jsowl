@@ -80,7 +80,7 @@ func TestScannerDirectRecursivelyCollectsChunkEndpointAndSensitiveFinding(t *tes
 		!containsEndpoint(result, "/api/roles", http.StatusOK) {
 		t.Fatalf("endpoints missing: %#v", result.Endpoints)
 	}
-	if !containsFinding(result, "secret.jwt") {
+	if !containsFinding(result, "hae.密钥凭证.jwt-token") {
 		t.Fatalf("JWT finding missing: %#v", result.Findings)
 	}
 	for path, count := range requests {

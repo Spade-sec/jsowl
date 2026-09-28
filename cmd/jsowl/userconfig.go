@@ -27,7 +27,7 @@ const (
 // commented because setting it would replace the default ~/.jsowl/rules.yaml.
 const userConfigTemplate = `# JsOwl 用户级配置文件（首次运行时自动生成，已预置全部默认值）。
 # 直接修改各项数值即可生效，对本机所有 jsowl 扫描生效。
-# 优先级：命令行参数 > 当前目录 config.yml > 本文件 > 内置默认值。
+# 优先级：命令行参数 > 当前目录 config/config.yml > 本文件 > 内置默认值。
 # 各项含义与完整示例见 jsowl 仓库中的 config.example.yml。
 
 mode: auto
@@ -161,9 +161,10 @@ ai:
   model: ""                        # 例如 glm-4-flash
   max_requests: 20                 # 单次扫描 AI 请求上限
 
-# 敏感信息规则默认位于 ~/.jsowl/rules.yaml（首次运行自动生成，可直接编辑）。
-# 下面的 rules_file 用于改用其他规则文件（HaE 原生格式亦可），设置后
-# rules.yaml 不再加载。相对路径以本文件所在目录（~/.jsowl）为基准。
+# 敏感信息规则默认从内嵌的 HaE 规则集加载。项目目录下存在 config/rules.yml
+# 时以它为项目级规则（改动即生效）；否则首次运行会播种 ~/.jsowl/rules.yaml
+# 供全局编辑。下面的 rules_file 用于改用其他规则文件（HaE 原生格式亦可），
+# 设置后以上来源都不再加载。相对路径以本文件所在目录（~/.jsowl）为基准。
 # rules_file: ./rules.yml
 `
 
@@ -189,7 +190,7 @@ func ensureUserRulesFile(path string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return false, fmt.Errorf("create user config directory: %w", err)
 	}
-	seed, err := analyze.BuiltinRulesYAML()
+	seed, err := analyze.DefaultRulesYAML()
 	if err != nil {
 		return false, fmt.Errorf("render user rules seed: %w", err)
 	}

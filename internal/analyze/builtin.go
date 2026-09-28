@@ -3,13 +3,46 @@ package analyze
 import (
 	"fmt"
 
-	"go.yaml.in/yaml/v3"
-
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
 // RulesConfig re-exported for the YAML marshal below.
 type RulesConfig = model.RulesConfig
+
+// defaultRulesYAML holds the default rules document (config/rules.yml, HaE
+// native format). go:embed cannot reach ../config from this package, so the
+// root jsowl package embeds the file and injects the bytes via
+// SetDefaultRulesYAML from its init; internal test binaries load the same
+// file from the repository in their TestMain.
+var defaultRulesYAML []byte
+
+// SetDefaultRulesYAML installs the default rules document parsed by
+// DefaultRules and returned by DefaultRulesYAML. It is called once at
+// process start by the root jsowl package's init.
+func SetDefaultRulesYAML(data []byte) error {
+	if _, err := model.ParseRules("config/rules.yml", data); err != nil {
+		return err
+	}
+	defaultRulesYAML = data
+	return nil
+}
+
+// DefaultRules returns the default sensitive and URL rules parsed from the
+// rules document injected via SetDefaultRulesYAML (config/rules.yml in the
+// repository). URL extraction also lives in APIRules and is always compiled
+// separately.
+func DefaultRules() []model.Rule {
+	if len(defaultRulesYAML) == 0 {
+		panic("analyze: default rules not injected; import the root jsowl package or call SetDefaultRulesYAML")
+	}
+	config, err := model.ParseRules("config/rules.yml", defaultRulesYAML)
+	if err != nil {
+		// The injected document is compiled and tested with the package, so a
+		// parse failure here indicates a build-time regression, not input.
+		panic(fmt.Sprintf("parse default rules: %v", err))
+	}
+	return config.Custom
+}
 
 // APIRules returns the URL-extraction rules hard-wired into JsOwl. They are
 // compiled unconditionally and cannot be disabled or replaced through rule
@@ -91,97 +124,6 @@ func APIRules() []model.Rule {
 	}
 }
 
-// BuiltinRules returns the sensitive-information rules shipped with JsOwl.
-// URL extraction lives in APIRules and is always compiled separately.
-func BuiltinRules() []model.Rule {
-	return []model.Rule{
-		sensitiveRule(
-			"secret.account",
-			"Cloud account value",
-			model.SeverityMedium,
-			`(?i)account[_-]?(?:name|key)?\s*[:=]\s*["']?([\w-]+)`,
-			1,
-		),
-		sensitiveRule(
-			"secret.private-key-id",
-			"Private key identifier",
-			model.SeverityHigh,
-			`(?i)private[_-]?key[_-]?(?:id)?\s*[:=]\s*["']?([\w-]+)`,
-			1,
-		),
-		sensitiveRule(
-			"secret.jwt",
-			"JWT token",
-			model.SeverityHigh,
-			`["'](ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]{10,}\.[A-Za-z0-9._-]{10,})["']`,
-			1,
-		),
-		sensitiveRule(
-			"secret.credential",
-			"Credential value",
-			model.SeverityHigh,
-			`(?i)(?:password|username|access[_-]?key|access[_-]?token|secret|pwd)\s*[:=]\s*["']?([^"',\s]+)`,
-			1,
-		),
-		sensitiveRule(
-			"secret.huawei-oss",
-			"Huawei OSS credential",
-			model.SeverityHigh,
-			`(?i)huawei\.oss\.(?:ak|sk|bucket\.name|endpoint|local\.path)\s*[:=]\s*["']?([\w.-]+)`,
-			1,
-		),
-		sensitiveRule(
-			"secret.aws-access-key",
-			"AWS access key",
-			model.SeverityCritical,
-			`\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Za-z0-9]{16}\b`,
-			0,
-		),
-		sensitiveRule(
-			"secret.alibaba-access-key",
-			"Alibaba Cloud access key",
-			model.SeverityCritical,
-			`\bLTAI[A-Za-z0-9]{12,20}\b`,
-			0,
-		),
-		sensitiveRule(
-			"secret.github-token",
-			"GitHub token",
-			model.SeverityCritical,
-			`\b(?:ghp|ghu)_[A-Za-z0-9]{36}\b`,
-			0,
-		),
-		sensitiveRule(
-			"secret.google-oauth",
-			"Google OAuth token",
-			model.SeverityCritical,
-			`\bya29\.[0-9A-Za-z_-]+\b`,
-			0,
-		),
-		sensitiveRule(
-			"secret.private-key-block",
-			"Private key block",
-			model.SeverityCritical,
-			`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`,
-			0,
-		),
-		sensitiveRule(
-			"secret.jdbc",
-			"JDBC connection string",
-			model.SeverityHigh,
-			`(?i)\bjdbc:[a-z0-9]+://[a-z0-9._:@/?&=;-]+`,
-			0,
-		),
-		sensitiveRule(
-			"pii.cn-mobile",
-			"Chinese mobile number",
-			model.SeverityMedium,
-			`\b1(?:3[0-9]|4[5-9]|5[0-35-9]|6[6]|7[0-8]|8[0-9]|9[0-9])[0-9]{8}\b`,
-			0,
-		),
-	}
-}
-
 func urlRule(id, name, pattern string, group int) model.Rule {
 	return model.Rule{
 		ID: id, Name: name, Category: model.RuleCategoryURL,
@@ -199,33 +141,20 @@ func urlMethodRule(id, name, pattern string, group, methodGroup int) model.Rule 
 
 // rulesFileHeader explains the generated user-level rules file.
 const rulesFileHeader = `# JsOwl 用户级敏感信息规则（首次运行时自动生成，可自由编辑）。
-# - id 与内置规则同名时覆盖内置定义；enabled: false 关闭该条；
-#   从文件中删除某条规则不会关闭同名内置规则，请用 enabled: false。
-# - 修改 pattern / 新增规则后，下次扫描即生效，无需其他配置。
-# - 若配置文件设置了 rules_file，则以该规则文件为准，本文件不再加载。
+# 本文件由 config/rules.yml 播种生成，为 HaE 原生格式；编辑后下次扫描即生效。
+# - 规则 ID 由 组名/规则名 自动生成（hae.<组名>.<规则名>）；同名同组的
+#   条目覆盖内嵌默认规则，loaded: false 关闭该条。
+# - 项目目录下的 config/rules.yml 存在时优先生效，本文件不再加载；
+#   配置文件设置 rules_file 时则以该规则文件为准。
 `
 
-// BuiltinRulesYAML renders the built-in sensitive rules as a user-editable
-// rules file: the seed content of ~/.jsowl/rules.yaml. Built-in IDs are
-// preserved so an edited entry overrides its built-in counterpart through
-// the custom-rule override path in Engine.New.
-func BuiltinRulesYAML() ([]byte, error) {
-	encoded, err := yaml.Marshal(RulesConfig{Custom: BuiltinRules()})
-	if err != nil {
-		return nil, fmt.Errorf("marshal builtin rules: %w", err)
+// DefaultRulesYAML returns the injected rules document (config/rules.yml),
+// prefixed with the user-facing header. It is the seed content of
+// ~/.jsowl/rules.yaml, so the editable default is byte-identical to the
+// compiled-in default.
+func DefaultRulesYAML() ([]byte, error) {
+	if len(defaultRulesYAML) == 0 {
+		return nil, fmt.Errorf("default rules not injected; import the root jsowl package or call SetDefaultRulesYAML")
 	}
-	return append([]byte(rulesFileHeader), encoded...), nil
-}
-
-func sensitiveRule(
-	id string,
-	name string,
-	severity model.Severity,
-	pattern string,
-	group int,
-) model.Rule {
-	return model.Rule{
-		ID: id, Name: name, Category: model.RuleCategorySensitive,
-		Severity: severity, Pattern: pattern, Group: group, Enabled: true,
-	}
+	return append([]byte(rulesFileHeader), defaultRulesYAML...), nil
 }

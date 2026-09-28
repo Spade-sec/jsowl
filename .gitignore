@@ -1,7 +1,14 @@
 .superpowers/
 .worktrees/
 .cache/
+
+# Agent / editor scratch
+.zcode/
+.pi/
+
+# Scan output directories (relative to the working directory jsowl ran in)
 jsowl-report/
+jsowl-check/
 
 # Build artifacts
 bin/

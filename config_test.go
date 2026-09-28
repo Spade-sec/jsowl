@@ -137,18 +137,18 @@ func TestLoadConfigRejectsInlineRules(t *testing.T) {
 	}
 }
 
-func TestExampleConfigurationLoadsAndCompilesExternalRules(t *testing.T) {
-	for _, path := range []string{"config.yml", "config.example.yml"} {
+func TestExampleConfigurationLoadsAndCompiles(t *testing.T) {
+	for _, path := range []string{
+		filepath.Join("config", "config.yml"),
+		filepath.Join("config", "config.example.yml"),
+	} {
 		t.Run(path, func(t *testing.T) {
 			cfg, err := LoadConfig(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(cfg.Rules.Custom) < 20 {
-				t.Fatalf("loaded custom rules = %d, want at least 20", len(cfg.Rules.Custom))
-			}
 			if _, err := New(cfg); err != nil {
-				t.Fatalf("compile external rules: %v", err)
+				t.Fatalf("compile configuration: %v", err)
 			}
 		})
 	}

@@ -12,7 +12,7 @@ func TestNFAEngineSupportsLookarounds(t *testing.T) {
 		ID: "test.nfa-idcard", Name: "nfa", Category: model.RuleCategorySensitive,
 		Severity: model.SeverityHigh, Engine: "nfa", Group: 0, Enabled: true,
 		Pattern: `(?<![0-9Xx])[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx](?![0-9Xx])`,
-	}}, nil)
+	}}, builtinIDs())
 	if err != nil {
 		t.Fatalf("compile NFA rule: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestSRegexFiltersFalsePositives(t *testing.T) {
 		Severity: model.SeverityMedium, Engine: "nfa", Group: 0, Enabled: true,
 		Pattern: `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z]{2,6}\b`,
 		SRegex:  `(?i)^(?![A-Za-z0-9.-]+\.(?:png|jpe?g|gif|svg)).+`,
-	}}, nil)
+	}}, builtinIDs())
 	if err != nil {
 		t.Fatalf("compile rule: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestSRegexGroupReplacesValue(t *testing.T) {
 		Pattern: `Authorization["']?\s*[:=]\s*["']?Basic\s+([A-Za-z0-9=+/-]{16,})`,
 		SRegex:  `Basic\s+([A-Za-z0-9=+/-]+)`,
 		SGroup:  1,
-	}}, nil)
+	}}, builtinIDs())
 	if err != nil {
 		t.Fatalf("compile rule: %v", err)
 	}
