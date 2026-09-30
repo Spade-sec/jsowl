@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/spf13/cobra"
@@ -29,6 +31,7 @@ type scanService interface {
 type dependencies struct {
 	stdout         io.Writer
 	stderr         io.Writer
+	stdin          io.Reader
 	defaultConfig  func() jsowl.Config
 	loadConfig     func(string) (jsowl.Config, error)
 	loadConfigOnto func(jsowl.Config, string) (jsowl.Config, error)
@@ -78,14 +81,16 @@ func newRootCommand(deps dependencies) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if len(targets) == 0 {
+			// --login can run without targets: it opens a browser for manual
+			// sign-in and then scans whatever page the user navigates to.
+			if len(targets) == 0 && !opts.login {
 				return errors.New("at least one target is required; use -u or -l")
 			}
 			if err := applyBaseURL(targets, opts.baseURL); err != nil {
 				return err
 			}
 			return runScans(
-				command.Context(), deps, config, targets, opts.silent,
+				command.Context(), deps, config, targets, opts.silent, opts.login,
 			)
 		},
 	}
@@ -104,6 +109,9 @@ func completeDependencies(deps dependencies) dependencies {
 	}
 	if deps.stderr == nil {
 		deps.stderr = os.Stderr
+	}
+	if deps.stdin == nil {
+		deps.stdin = os.Stdin
 	}
 	if deps.defaultConfig == nil {
 		deps.defaultConfig = jsowl.DefaultConfig
@@ -310,6 +318,7 @@ func runScans(
 	config jsowl.Config,
 	targets []jsowl.Target,
 	silent bool,
+	login bool,
 ) error {
 	if err := deps.ensureOutput(config.Output.Directory); err != nil {
 		return fmt.Errorf("create output directory: %w", err)
@@ -317,6 +326,13 @@ func runScans(
 	scanner, err := deps.newScanner(config)
 	if err != nil {
 		return err
+	}
+	if login {
+		targets, err = startLoginBeforeScan(ctx, deps, scanner, targets)
+		if err != nil {
+			return err
+		}
+		defer closeLoginAfterScan(scanner)
 	}
 	// Producer-consumer printing: the scanner (producer) pushes one probe
 	// event per completed API probe into a buffered channel; a dedicated
@@ -363,6 +379,107 @@ func runScans(
 		return fmt.Errorf("%d target or report task(s) failed", failures)
 	}
 	return nil
+}
+
+// loginSessionStarter is the optional capability a scanService exposes for
+// manual-login scans; *jsowl.Scanner implements it.
+type loginSessionStarter interface {
+	StartLoginSession(ctx context.Context, targetURL string, waitForUser func(context.Context) error) error
+	LoginSessionURL() (string, error)
+	CloseLoginSession()
+}
+
+// loginWaitTimeout bounds how long the user may take signing in before the
+// scan continues with whatever browser state exists.
+const loginWaitTimeout = 5 * time.Minute
+
+// startLoginBeforeScan opens the headed login browser and blocks until the
+// user confirms (or times out), so every subsequent collection runs with the
+// authenticated session. With targets it renders the first one; without any
+// it opens a blank tab and, after the user confirms, adopts whatever page
+// they navigated to as the single scan target. It returns the targets the
+// batch should scan.
+func startLoginBeforeScan(
+	ctx context.Context,
+	deps dependencies,
+	scanner scanService,
+	targets []jsowl.Target,
+) ([]jsowl.Target, error) {
+	starter, ok := scanner.(loginSessionStarter)
+	if !ok {
+		return nil, errors.New("--login is not supported by this scanner")
+	}
+	initial := ""
+	if len(targets) > 0 {
+		initial = targets[0].URL
+		_, _ = fmt.Fprintf(deps.stderr,
+			"[login] opening a visible browser for %s — sign in there, then press Enter here (timeout %s)\n",
+			initial, loginWaitTimeout)
+	} else {
+		_, _ = fmt.Fprintf(deps.stderr,
+			"[login] opening a visible browser — navigate to the target and sign in, then press Enter here (timeout %s)\n",
+			loginWaitTimeout)
+	}
+	wait := func(waitCtx context.Context) error {
+		entered := make(chan struct{})
+		go func() {
+			_, _ = bufio.NewReader(deps.stdin).ReadString('\n')
+			close(entered)
+		}()
+		timer := time.NewTimer(loginWaitTimeout)
+		defer timer.Stop()
+		select {
+		case <-entered:
+			return nil
+		case <-timer.C:
+			_, _ = fmt.Fprintln(deps.stderr,
+				"[login] wait timed out; continuing with the current browser state")
+			return nil
+		case <-waitCtx.Done():
+			return waitCtx.Err()
+		}
+	}
+	if err := starter.StartLoginSession(ctx, initial, wait); err != nil {
+		return nil, err
+	}
+	if len(targets) == 0 {
+		current, err := starter.LoginSessionURL()
+		if err != nil {
+			return nil, err
+		}
+		target, err := loginTarget(current)
+		if err != nil {
+			return nil, err
+		}
+		targets = []jsowl.Target{target}
+		_, _ = fmt.Fprintf(deps.stderr, "[login] scanning the page you are on: %s\n", target.URL)
+	}
+	_, _ = fmt.Fprintf(deps.stderr,
+		"[login] scanning %d target(s) inside the authenticated browser\n", len(targets))
+	return targets, nil
+}
+
+// loginTarget turns the login browser's current page into a scan target,
+// rejecting anything that is not an absolute http(s) URL — a blank tab, a
+// chrome:// page, or an about: page — so a --login run that never navigated
+// anywhere fails with a clear message instead of scanning nothing.
+func loginTarget(raw string) (jsowl.Target, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return jsowl.Target{}, fmt.Errorf(
+			"login browser is on %q, which is not an http(s) page; pass -u or navigate to the target before pressing Enter",
+			raw,
+		)
+	}
+	return jsowl.Target{URL: raw}, nil
+}
+
+// closeLoginAfterScan tears the login browser down once the batch finishes.
+func closeLoginAfterScan(scanner scanService) {
+	if starter, ok := scanner.(loginSessionStarter); ok {
+		starter.CloseLoginSession()
+	}
 }
 
 // synchronizedWriter serializes concurrent writes so probe lines from the

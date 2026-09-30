@@ -3,6 +3,7 @@ package jsowl
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -13,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/youmulijiang/jsowl/internal/analyze"
 	"github.com/youmulijiang/jsowl/internal/aiclient"
+	"github.com/youmulijiang/jsowl/internal/analyze"
 	"github.com/youmulijiang/jsowl/internal/collect"
 	"github.com/youmulijiang/jsowl/internal/collect/browser"
 	"github.com/youmulijiang/jsowl/internal/collect/direct"
@@ -30,6 +31,7 @@ type Scanner struct {
 	analyzer       *analyze.Engine
 	browserFactory func(model.BrowserConfig) (collect.BrowserCollector, error)
 	probeSink      chan<- model.ProbeEvent
+	loginSession   *browser.LoginSession
 }
 
 // SetProbeSink registers a channel that receives one event per completed API
@@ -38,6 +40,63 @@ type Scanner struct {
 // Pass nil to detach the sink.
 func (s *Scanner) SetProbeSink(sink chan<- ProbeEvent) {
 	s.probeSink = sink
+}
+
+// StartLoginSession launches a headed browser for the user to sign into
+// manually; waitForUser blocks until the user signals the login is done
+// (typically a terminal Enter prompt with its own timeout). A non-empty
+// targetURL opens that page; an empty one leaves the browser on a blank tab
+// so the user can navigate freely. All browser-mode collection afterwards
+// runs inside that authenticated session — one process, one tab, cookies
+// migrated across periodic browser recycles — until CloseLoginSession. Scan
+// batch concurrency should be set to 1 (the CLI does this for --login) so
+// targets queue through the single browser instead of fighting over it.
+func (s *Scanner) StartLoginSession(
+	ctx context.Context,
+	targetURL string,
+	waitForUser func(context.Context) error,
+) error {
+	var parsed *url.URL
+	if targetURL != "" {
+		value, err := url.Parse(targetURL)
+		if err != nil || !value.IsAbs() || value.Host == "" {
+			return fmt.Errorf("login target URL %q is not absolute", targetURL)
+		}
+		parsed = value
+	}
+	if s.loginSession != nil {
+		s.loginSession.Close()
+	}
+	session, err := browser.StartLogin(
+		ctx, s.config.Browser, s.config.Request, parsed, waitForUser,
+	)
+	if err != nil {
+		return fmt.Errorf("start login session: %w", err)
+	}
+	s.loginSession = session
+	s.browserFactory = func(model.BrowserConfig) (collect.BrowserCollector, error) {
+		return session.NewCollector()
+	}
+	return nil
+}
+
+// CloseLoginSession tears the login browser down and removes its profile.
+// It is safe to call when no session was started.
+func (s *Scanner) CloseLoginSession() {
+	if s.loginSession != nil {
+		s.loginSession.Close()
+		s.loginSession = nil
+	}
+}
+
+// LoginSessionURL reports the page the login browser is currently showing,
+// so a --login run with no explicit target can scan whatever page the user
+// navigated to before confirming.
+func (s *Scanner) LoginSessionURL() (string, error) {
+	if s.loginSession == nil {
+		return "", errors.New("no login session is active")
+	}
+	return s.loginSession.CurrentURL()
 }
 
 // New validates configuration and constructs a reusable Scanner.

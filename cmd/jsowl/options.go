@@ -36,6 +36,7 @@ type options struct {
 	autoFormFill    bool
 	maxInteractions int
 	ai              bool
+	login           bool
 }
 
 // register binds all flags. The declaration order is the --help order.
@@ -63,6 +64,8 @@ func (o *options) register(flags *pflag.FlagSet) {
 		"cap form submits plus event clicks per page (default 20)")
 	flags.BoolVar(&o.ai, "ai", false,
 		"enable AI-assisted analysis (needs ai.api_key in config): parameter completeness/authenticity review, unknown-taint origin inference, sensitive-finding value rating")
+	flags.BoolVar(&o.login, "login", false,
+		"open a visible browser to log in manually first, then scan with that authenticated session (forces browser mode, serial targets; session cookies are reused across browser recycles); works with or without -u — without a target it opens a blank tab and scans the page you navigate to")
 }
 
 // applyOverrides folds the flags the user passed into the layered
@@ -92,6 +95,14 @@ func (o *options) applyOverrides(command *cobra.Command, config *jsowl.Config) e
 	}
 	if command.Flags().Changed("max-interactions") {
 		config.Browser.MaxInteractions = o.maxInteractions
+	}
+	if command.Flags().Changed("login") && o.login {
+		// The login browser is the whole point: visible, browser-rendered,
+		// and fed one target at a time so they queue through its single tab
+		// instead of fighting over one shared renderer.
+		config.Mode = jsowl.ModeBrowser
+		config.Browser.Headless = false
+		config.Concurrency.Targets = 1
 	}
 	if config.Request.Headers == nil {
 		config.Request.Headers = make(map[string]string)

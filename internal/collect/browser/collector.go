@@ -33,10 +33,13 @@ var ErrBrowserNotFound = errors.New("Chromium-compatible browser not found")
 var errPreNavigation = errors.New("browser failed before navigation")
 
 // Collector renders entry pages with Rod and records runtime resource URLs.
+// When bound to a LoginSession, collections run inside that session's
+// headed browser instead of spawning a throwaway one.
 type Collector struct {
 	config  model.BrowserConfig
 	request model.RequestConfig
 	script  string
+	session *LoginSession
 }
 
 // New constructs a Rod collector without launching or downloading a browser.
@@ -99,35 +102,49 @@ func (c *Collector) collectOnce(
 		}
 	}()
 
-	userDataDir, err := os.MkdirTemp("", "jsowl-rod-*")
-	if err != nil {
-		return collect.BrowserResult{}, fmt.Errorf("create browser profile: %w", err)
-	}
-	defer os.RemoveAll(userDataDir)
+	var rodBrowser *rod.Browser
+	var page *rod.Page
+	if c.session != nil {
+		// Managed (--login) mode: reuse the session's browser and its single
+		// tab. The login state lives in the session's profile, so no fresh
+		// user data dir and no fresh process per collect.
+		rodBrowser, page, err = c.session.acquire(ctx)
+		if err != nil {
+			return collect.BrowserResult{}, err
+		}
+		defer c.session.afterCollect()
+	} else {
+		userDataDir, dirErr := os.MkdirTemp("", "jsowl-rod-*")
+		if dirErr != nil {
+			return collect.BrowserResult{}, fmt.Errorf("create browser profile: %w", dirErr)
+		}
+		defer os.RemoveAll(userDataDir)
 
-	control, browserLauncher, err := launch(
-		ctx, c.config, c.request.Proxy, bin, userDataDir,
-	)
-	if err != nil {
-		return collect.BrowserResult{}, err
-	}
-	defer browserLauncher.Cleanup()
-	defer browserLauncher.Kill()
+		control, browserLauncher, launchErr := launch(
+			ctx, c.config, c.request.Proxy, bin, userDataDir,
+		)
+		if launchErr != nil {
+			return collect.BrowserResult{}, launchErr
+		}
+		defer browserLauncher.Cleanup()
+		defer browserLauncher.Kill()
 
-	rodBrowser := rod.New().
-		Context(ctx).
-		ControlURL(control).
-		NoDefaultDevice()
-	if err := rodBrowser.Connect(); err != nil {
-		return collect.BrowserResult{}, fmt.Errorf("connect to browser: %w", err)
-	}
-	defer rodBrowser.Close()
+		rodBrowser = rod.New().
+			Context(ctx).
+			ControlURL(control).
+			NoDefaultDevice()
+		if connectErr := rodBrowser.Connect(); connectErr != nil {
+			return collect.BrowserResult{}, fmt.Errorf("connect to browser: %w", connectErr)
+		}
+		defer rodBrowser.Close()
 
-	page, err := rodBrowser.Page(proto.TargetCreateTarget{})
-	if err != nil {
-		return collect.BrowserResult{}, fmt.Errorf("create browser page: %w", err)
+		page, err = rodBrowser.Page(proto.TargetCreateTarget{})
+		if err != nil {
+			return collect.BrowserResult{}, fmt.Errorf("create browser page: %w", err)
+		}
 	}
-	defer page.Close()
+	// Managed mode intentionally does not close the page: the tab is the
+	// session's and is navigated to the next target.
 
 	if userAgent := headers.Get("User-Agent"); userAgent != "" {
 		if err := page.SetUserAgent(&proto.NetworkSetUserAgentOverride{
@@ -152,6 +169,15 @@ func (c *Collector) collectOnce(
 	}
 	go headerRouter.Run()
 	defer headerRouter.Stop()
+
+	if authScript := authHookScript(target.String(), headers); authScript != "" {
+		removeAuth, injectErr := page.EvalOnNewDocument(authScript)
+		if injectErr != nil {
+			return collect.BrowserResult{}, fmt.Errorf(
+				"inject auth header hook: %w", injectErr)
+		}
+		defer removeAuth()
+	}
 
 	if !c.config.DisableInjection {
 		removeScript, injectErr := page.EvalOnNewDocument(c.script)
@@ -224,8 +250,13 @@ func (c *Collector) collectOnce(
 	// Cross-origin iframes and workers are separate CDP targets: their
 	// traffic never reaches the page session. Auto-attach plus a
 	// browser-level subscription mirrors it into the same recorders.
-	stopChildTargets := observeChildTargets(ctx, rodBrowser, page, recordResponse, recordRequest)
+	stopChildTargets, closeChildTargets := observeChildTargets(ctx, rodBrowser, page, recordResponse, recordRequest)
 	defer stopChildTargets()
+	// SPA route switches leave orphaned workers and detached frames alive
+	// as separate targets; close them so a long-lived managed browser does
+	// not accumulate them across collections. Owned browsers die right
+	// after the collect, where this is merely tidy.
+	defer closeChildTargets()
 
 	idle := c.config.Idle
 	if idle <= 0 {
@@ -577,14 +608,16 @@ func (c *Collector) routeViewWait() time.Duration {
 // observeChildTargets attaches to the cross-origin iframes and workers the
 // page spawns and mirrors their Network events into the page-level recorders.
 // Those targets run in their own CDP sessions, so without auto-attach the
-// scripts and endpoints they load are invisible to the scan.
+// scripts and endpoints they load are invisible to the scan. It returns two
+// stops: one to detach the event subscription, one to close every child
+// target attached during the collect.
 func observeChildTargets(
 	ctx context.Context,
 	browser *rod.Browser,
 	page *rod.Page,
 	onResponse func(*proto.NetworkResponseReceived),
 	onRequest func(*proto.NetworkRequestWillBeSent),
-) func() {
+) (stop func(), closeChildren func()) {
 	// Attach on the page session so only targets related to this page — its
 	// frames and workers — are followed, never unrelated browser tabs.
 	if err := (proto.TargetSetAutoAttach{
@@ -592,9 +625,19 @@ func observeChildTargets(
 		WaitForDebuggerOnStart: false,
 		Flatten:                true,
 	}).Call(page); err != nil {
-		return func() {}
+		return func() {}, func() {}
 	}
-	messages := browser.Event()
+	var mu sync.Mutex
+	attached := make([]proto.TargetTargetID, 0, 4)
+	// The subscription must die with this collect: rod's Event() registers
+	// a permanent subscriber on the browser context (there is no
+	// unsubscribe API), and its pipe buffer is unbounded, so a raw
+	// subscription on a long-lived --login browser would accumulate one
+	// dead subscriber plus every later CDP message per collect until the
+	// Go process ran out of memory. Scoping it to a cancelable child
+	// context removes the subscriber when the collect stops.
+	eventCtx, cancelSubscription := context.WithCancel(ctx)
+	messages := browser.Context(eventCtx).Event()
 	done := make(chan struct{})
 	go func() {
 		for {
@@ -617,6 +660,11 @@ func observeChildTargets(
 							ctx, string(event.SessionID),
 							"Network.enable", proto.NetworkEnable{},
 						)
+						if event.TargetInfo.TargetID != "" {
+							mu.Lock()
+							attached = append(attached, event.TargetInfo.TargetID)
+							mu.Unlock()
+						}
 					}
 				case "Network.responseReceived":
 					event := &proto.NetworkResponseReceived{}
@@ -632,7 +680,20 @@ func observeChildTargets(
 			}
 		}
 	}()
-	return func() { close(done) }
+	stop = func() {
+		close(done)
+		cancelSubscription()
+	}
+	closeChildren = func() {
+		mu.Lock()
+		targets := attached
+		attached = nil
+		mu.Unlock()
+		for _, targetID := range targets {
+			_, _ = proto.TargetCloseTarget{TargetID: targetID}.Call(browser)
+		}
+	}
+	return stop, closeChildren
 }
 
 func installHeaderIsolation(
@@ -751,9 +812,17 @@ func setBrowserCookies(
 	}
 	params := make([]*proto.NetworkCookieParam, 0, len(cookies))
 	for _, cookie := range cookies {
-		params = append(params, &proto.NetworkCookieParam{
+		param := &proto.NetworkCookieParam{
 			Name: cookie.Name, Value: cookie.Value, URL: target.String(),
-		})
+		}
+		// A fresh headless profile loses the original cookie jar, so the
+		// Secure flag has to be re-derived from the target scheme;
+		// otherwise secure cookies are rejected on plain http targets and
+		// downgraded-insecure warnings can drop them on https ones.
+		if target.Scheme == "https" {
+			param.Secure = true
+		}
+		params = append(params, param)
 	}
 	if err := page.SetCookies(params); err != nil {
 		return fmt.Errorf("set browser cookies: %w", err)
