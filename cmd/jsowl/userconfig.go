@@ -157,7 +157,12 @@ ai:
   enabled: false
   api_key: ""
   base_url: ""                     # 例如 https://open.bigmodel.cn/api/paas/v4
-  path: "/chat/completions"        # OpenAI 兼容路径
+  # 上游协议格式（图片中选择器的落盘形式）：
+  #   openai-chat          OpenAI Chat Completions（默认，GLM/one-api/vLLM）
+  #   openai-responses     OpenAI Responses API
+  #   anthropic-messages   Anthropic Messages（原生，Claude）
+  #   gemini-native        Gemini generateContent（原生）
+  format: "openai-chat"
   model: ""                        # 例如 glm-4-flash
   max_requests: 20                 # 单次扫描 AI 请求上限
 

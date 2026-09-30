@@ -269,19 +269,24 @@ type Config struct {
 	AI AIConfig `yaml:"ai" json:"ai"`
 }
 
-// AIConfig points at an OpenAI-compatible chat completions endpoint. Any
-// provider exposing that protocol works (GLM, one-api proxies, vLLM, ...).
+// AIConfig points at one AI upstream selected by Format. Any provider
+// exposing one of the supported protocols works (GLM, one-api proxies,
+// vLLM, Anthropic-native endpoints, Gemini, ...).
 type AIConfig struct {
 	// Enabled is flipped by the -ai CLI flag; scans run the AI enrichers
 	// only when set.
 	Enabled bool `yaml:"enabled" json:"enabled"`
-	// APIKey authenticates as a Bearer token.
+	// APIKey authenticates the upstream (Bearer for OpenAI-compatible
+	// formats, x-api-key for Anthropic, x-goog-api-key for Gemini).
 	APIKey string `yaml:"api_key" json:"-"`
 	// BaseURL is the provider root, e.g. https://open.bigmodel.cn/api/paas/v4.
 	BaseURL string `yaml:"base_url" json:"-"`
-	// Path is the chat completions route appended to BaseURL
-	// (default /chat/completions).
-	Path string `yaml:"path" json:"-"`
+	// Format selects the upstream wire protocol:
+	//   openai-chat (default)   OpenAI Chat Completions
+	//   openai-responses        OpenAI Responses API
+	//   anthropic / anthropic-messages  Anthropic Messages (native)
+	//   gemini / gemini-native  Gemini generateContent (native)
+	Format string `yaml:"format" json:"format"`
 	// Model is the model id requested in the payload.
 	Model string `yaml:"model" json:"model"`
 	// MaxRequests caps AI calls per scan (default 20) so a large target

@@ -147,7 +147,7 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 	// request budget. Without -ai they stay nil and the pipeline no-ops.
 	if s.config.AI.Enabled {
 		aiClient := aiclient.New(
-			s.config.AI.BaseURL, s.config.AI.APIKey, s.config.AI.Model, s.config.AI.Path,
+			s.config.AI.BaseURL, s.config.AI.APIKey, s.config.AI.Model, s.config.AI.Format,
 		)
 		templateAI, taintAI, findingAI := analyze.NewAIThird(aiClient, s.config.AI.MaxRequests)
 		resourcePipeline.SetEnrichers(templateAI, taintAI, findingAI)

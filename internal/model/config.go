@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/youmulijiang/jsowl/internal/aiclient"
 )
 
 // DefaultConfig returns the canonical internal defaults used by the library and CLI.
@@ -84,7 +86,7 @@ func DefaultConfig() Config {
 		// AI defaults mirror what the runtime falls back to (aiclient and
 		// NewAIThird), so the user-level config template can preset them.
 		AI: AIConfig{
-			Path:        "/chat/completions",
+			Format:      aiclient.FormatOpenAIChat,
 			MaxRequests: 20,
 		},
 		Output: OutputConfig{
@@ -291,7 +293,18 @@ func (c Config) Validate() error {
 			return errors.New("启用 -ai 需要先在配置文件的 ai.api_key 中设置模型 API Key")
 		}
 		if strings.TrimSpace(c.AI.BaseURL) == "" {
-			return errors.New("启用 -ai 需要设置 ai.base_url（OpenAI 兼容接口地址）")
+			return errors.New("启用 -ai 需要设置 ai.base_url（AI 上游接口地址）")
+		}
+		// Unknown format values fall back to the OpenAI default at client
+		// build time; validation only rejects clearly unsupported input so
+		// a typo does not silently scan against the wrong protocol.
+		format := strings.ToLower(strings.TrimSpace(c.AI.Format))
+		switch format {
+		case "", aiclient.FormatOpenAIChat, aiclient.FormatOpenAIResponses,
+			aiclient.FormatAnthropic, "anthropic", aiclient.FormatGemini, "gemini":
+		default:
+			return fmt.Errorf(
+				"ai.format 不支持 %q（可选 openai-chat / openai-responses / anthropic-messages / gemini-native）", format)
 		}
 		if c.AI.MaxRequests < 0 {
 			return errors.New("ai.max_requests must not be negative")
