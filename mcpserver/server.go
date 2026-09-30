@@ -18,7 +18,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	jsowl "github.com/youmulijiang/jsowl"
-	"github.com/youmulijiang/jsowl/internal/model"
 )
 
 // Version is reported to MCP clients during initialization.
@@ -29,14 +28,20 @@ const Version = "0.1.0"
 type Store struct {
 	mu    sync.Mutex
 	next  int
-	scans map[string]*model.Result
+	scans map[string]*jsowl.Result
 	// Dir receives one sub-directory of report files per scan. Empty means a
 	// per-process temporary directory.
 	Dir string
+	// Base is the starting scan configuration; nil means jsowl.DefaultConfig.
+	// Per-scan tool inputs (mode, headers, timeout) override individual
+	// fields on top of it.
+	Base *jsowl.Config
 }
 
-func NewStore(dir string) *Store {
-	return &Store{scans: map[string]*model.Result{}, Dir: dir}
+// NewStore builds a Store whose scans start from the given configuration.
+// A nil base means jsowl.DefaultConfig.
+func NewStore(dir string, base *jsowl.Config) *Store {
+	return &Store{scans: map[string]*jsowl.Result{}, Dir: dir, Base: base}
 }
 
 // Server builds the MCP server with all JsOwl tools registered.
@@ -79,17 +84,24 @@ type scanInput struct {
 }
 
 type scanOutput struct {
-	ScanID          string   `json:"scan_id"`
-	Target          string   `json:"target"`
-	Mode            string   `json:"mode"`
-	ReportDir       string   `json:"report_dir"`
-	Resources       int      `json:"resources"`
-	Endpoints       int      `json:"endpoints"`
-	Routes          int      `json:"routes"`
-	Sensitive       int      `json:"sensitive_findings"`
-	RuntimeEvidence int      `json:"runtime_endpoints"`
-	FullURLEvidence int      `json:"full_url_endpoints"`
-	TopEndpoints    []string `json:"top_endpoints,omitempty"`
+	ScanID          string `json:"scan_id"`
+	Target          string `json:"target"`
+	Mode            string `json:"mode"`
+	ReportDir       string `json:"report_dir"`
+	Resources       int    `json:"resources"`
+	Endpoints       int    `json:"endpoints"`
+	Routes          int    `json:"routes"`
+	Sensitive       int    `json:"sensitive_findings"`
+	RuntimeEvidence int    `json:"runtime_endpoints"`
+	FullURLEvidence int    `json:"full_url_endpoints"`
+	// Browser collection outcome. Degraded means the browser phase failed
+	// and the result carries direct-mode evidence only, so the caller knows
+	// runtime extraction was lost.
+	BrowserAttempted bool     `json:"browser_attempted"`
+	BrowserUsed      bool     `json:"browser_used"`
+	BrowserDegraded  bool     `json:"browser_degraded,omitempty"`
+	BrowserReason    string   `json:"browser_reason,omitempty"`
+	TopEndpoints     []string `json:"top_endpoints,omitempty"`
 }
 
 func (s *Store) scanTool(ctx context.Context, req *mcp.CallToolRequest, input scanInput) (*mcp.CallToolResult, scanOutput, error) {
@@ -101,14 +113,18 @@ func (s *Store) scanTool(ctx context.Context, req *mcp.CallToolRequest, input sc
 	if err != nil || parsed.Host == "" {
 		return nil, scanOutput{}, fmt.Errorf("invalid url %q", raw)
 	}
-	if input.Mode == "" {
-		input.Mode = string(model.ModeAuto)
-	}
 
 	config := jsowl.DefaultConfig()
-	config.Mode = model.Mode(input.Mode)
+	if s.Base != nil {
+		config = *s.Base
+	}
+	if input.Mode != "" {
+		config.Mode = jsowl.Mode(input.Mode)
+	}
 	config.Output.Directory = s.reportRoot()
-	config.Request.TargetTimeout = 5 * time.Minute
+	if s.Base == nil || input.TimeoutSeconds > 0 {
+		config.Request.TargetTimeout = 5 * time.Minute
+	}
 	if input.TimeoutSeconds > 0 {
 		config.Request.TargetTimeout = time.Duration(input.TimeoutSeconds) * time.Second
 	}
@@ -136,13 +152,17 @@ func (s *Store) scanTool(ctx context.Context, req *mcp.CallToolRequest, input sc
 		ScanID: id, Target: result.Target, Mode: string(result.Mode),
 		ReportDir: reportDir,
 		Resources: len(result.Resources), Endpoints: len(result.Endpoints),
-		Routes:          countRoutes(result),
-		Sensitive:       countSensitive(result),
-		RuntimeEvidence: countEvidence(result, model.EvidenceRuntime),
-		FullURLEvidence: countEvidence(result, model.EvidenceFullURL),
+		Routes:           countRoutes(result),
+		Sensitive:        countSensitive(result),
+		RuntimeEvidence:  countEvidence(result, jsowl.EvidenceRuntime),
+		FullURLEvidence:  countEvidence(result, jsowl.EvidenceFullURL),
+		BrowserAttempted: result.BrowserStatus.Attempted,
+		BrowserUsed:      result.BrowserStatus.Used,
+		BrowserDegraded:  result.BrowserStatus.Degraded,
+		BrowserReason:    result.BrowserStatus.Reason,
 	}
 	for _, endpoint := range result.Endpoints {
-		if endpoint.Evidence == model.EvidenceRuntime || endpoint.Evidence == model.EvidenceFullURL {
+		if endpoint.Evidence == jsowl.EvidenceRuntime || endpoint.Evidence == jsowl.EvidenceFullURL {
 			output.TopEndpoints = append(output.TopEndpoints,
 				strings.TrimSpace(endpoint.Method+" "+endpoint.URL))
 			if len(output.TopEndpoints) >= 10 {
@@ -176,7 +196,7 @@ type endpointRow struct {
 	Line       int                `json:"line,omitempty"`
 	Status     int                `json:"status_code,omitempty"`
 	BodyParams []string           `json:"body_params,omitempty"`
-	Spec       *model.RequestSpec `json:"spec,omitempty"`
+	Spec       *jsowl.RequestSpec `json:"spec,omitempty"`
 	Context    []string           `json:"context,omitempty"`
 }
 
@@ -252,7 +272,7 @@ func (s *Store) sensitiveTool(ctx context.Context, req *mcp.CallToolRequest, inp
 	}
 	rows := make([]sensitiveRow, 0, limit)
 	for _, finding := range result.Findings {
-		if finding.Category != model.RuleCategorySensitive {
+		if finding.Category != jsowl.RuleCategorySensitive {
 			continue
 		}
 		if severityRank(string(finding.Severity)) < minimum {
@@ -337,7 +357,7 @@ func (s *Store) parametersTool(ctx context.Context, req *mcp.CallToolRequest, in
 	return nil, rows, nil
 }
 
-func (s *Store) put(result *model.Result) string {
+func (s *Store) put(result *jsowl.Result) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.next++
@@ -346,7 +366,7 @@ func (s *Store) put(result *model.Result) string {
 	return id
 }
 
-func (s *Store) get(id string) (*model.Result, error) {
+func (s *Store) get(id string) (*jsowl.Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result, ok := s.scans[id]
@@ -368,7 +388,7 @@ func (s *Store) reportRoot() string {
 	return dir
 }
 
-func (s *Store) writeReports(id string, result *model.Result) (string, error) {
+func (s *Store) writeReports(id string, result *jsowl.Result) (string, error) {
 	directory := filepath.Join(s.reportRoot(), id)
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return "", err
@@ -382,7 +402,7 @@ func (s *Store) writeReports(id string, result *model.Result) (string, error) {
 	return directory, nil
 }
 
-func countRoutes(result *model.Result) int {
+func countRoutes(result *jsowl.Result) int {
 	count := 0
 	for _, endpoint := range result.Endpoints {
 		if endpoint.Type == "route" {
@@ -392,17 +412,17 @@ func countRoutes(result *model.Result) int {
 	return count
 }
 
-func countSensitive(result *model.Result) int {
+func countSensitive(result *jsowl.Result) int {
 	count := 0
 	for _, finding := range result.Findings {
-		if finding.Category == model.RuleCategorySensitive {
+		if finding.Category == jsowl.RuleCategorySensitive {
 			count++
 		}
 	}
 	return count
 }
 
-func countEvidence(result *model.Result, evidence string) int {
+func countEvidence(result *jsowl.Result, evidence string) int {
 	count := 0
 	for _, endpoint := range result.Endpoints {
 		if endpoint.Evidence == evidence {
@@ -414,20 +434,20 @@ func countEvidence(result *model.Result, evidence string) int {
 
 func evidenceOr(evidence string) string {
 	if evidence == "" {
-		return model.EvidenceStatic
+		return jsowl.EvidenceStatic
 	}
 	return evidence
 }
 
 func severityRank(severity string) int {
-	switch model.Severity(strings.ToLower(severity)) {
-	case model.SeverityCritical:
+	switch jsowl.Severity(strings.ToLower(severity)) {
+	case jsowl.SeverityCritical:
 		return 4
-	case model.SeverityHigh:
+	case jsowl.SeverityHigh:
 		return 3
-	case model.SeverityMedium:
+	case jsowl.SeverityMedium:
 		return 2
-	case model.SeverityLow:
+	case jsowl.SeverityLow:
 		return 1
 	default:
 		return 0

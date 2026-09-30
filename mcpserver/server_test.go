@@ -7,20 +7,20 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/youmulijiang/jsowl/internal/model"
+	"github.com/youmulijiang/jsowl"
 )
 
-func sampleResult() *model.Result {
-	return &model.Result{
+func sampleResult() *jsowl.Result {
+	return &jsowl.Result{
 		Target: "https://example.test",
-		Mode:   model.ModeAuto,
-		Endpoints: []model.Endpoint{
+		Mode:   jsowl.ModeAuto,
+		Endpoints: []jsowl.Endpoint{
 			{
 				Raw: "/api/users", URL: "https://example.test/api/users?id=1",
 				SourceURL: "https://example.test/app.js", Authorized: true,
-				Method: "POST", Evidence: model.EvidenceRuntime,
+				Method: "POST", Evidence: jsowl.EvidenceRuntime,
 				Line: 42, Column: 9,
-				ContextLines: []model.ContextLine{
+				ContextLines: []jsowl.ContextLine{
 					{LineNumber: 41, Content: "const api = client;", MatchStart: -1, MatchEnd: -1},
 					{LineNumber: 42, Content: "client.post(\"/api/users\", body)", MatchStart: 0, MatchEnd: 31},
 				},
@@ -28,24 +28,24 @@ func sampleResult() *model.Result {
 			{
 				Raw: "/v2/order", URL: "https://api.example.test/v2/order",
 				SourceURL: "https://example.test/app.js", Authorized: false,
-				Method: "GET", Evidence: model.EvidenceFullURL,
+				Method: "GET", Evidence: jsowl.EvidenceFullURL,
 				Line: 7, Column: 2,
 			},
 			{
 				Raw: "/static/app.js", URL: "https://example.test/static/app.js",
 				SourceURL: "https://example.test/index.html", Authorized: true,
-				Evidence: model.EvidenceStatic,
+				Evidence: jsowl.EvidenceStatic,
 			},
 		},
-		Findings: []model.Finding{
+		Findings: []jsowl.Finding{
 			{
 				RuleID: "secret.token", RuleName: "Token",
-				Category: model.RuleCategorySensitive, Severity: model.SeverityHigh,
+				Category: jsowl.RuleCategorySensitive, Severity: jsowl.SeverityHigh,
 				Value: "sk-live-123", SourceURL: "https://example.test/app.js", Line: 12,
 			},
 			{
 				RuleID: "report.url.http", RuleName: "HTTP URL",
-				Category: model.RuleCategoryURL, Severity: model.SeverityInfo,
+				Category: jsowl.RuleCategoryURL, Severity: jsowl.SeverityInfo,
 				Value: "http://example.test/", SourceURL: "https://example.test/app.js", Line: 15,
 			},
 		},
@@ -53,7 +53,7 @@ func sampleResult() *model.Result {
 }
 
 func TestServerListsAndCallsTools(t *testing.T) {
-	store := NewStore(t.TempDir())
+	store := NewStore(t.TempDir(), nil)
 	id := store.put(sampleResult())
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
