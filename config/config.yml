@@ -1,4 +1,163 @@
-# 当前目录运行 jsowl 时会自动加载本文件（项目级配置）。
-# 其余扫描参数使用内置默认值；完整配置示例见同目录 config.example.yml。
-# 敏感信息规则由同目录 rules.yml 提供（HaE 原生格式），修改后立即生效；
-# 如需改用其他规则文件，设置 rules_file 即可。
+mode: auto
+
+request:
+  timeout: 15s
+  target_timeout: 5m
+  retry: 1
+  proxy: ""
+  user_agent: ""
+  headers: {}
+  cookies: {}
+
+browser:
+  # 留空时只搜索已安装的本地 Chrome/Chromium，永不自动下载。
+  path: ""
+  # 页面 load 与网络空闲后，继续等待异步 JavaScript 的时间。
+  wait: 3s
+  # 判定"网络空闲"所需的最短静止时长。
+  idle: 800ms
+  # 空闲等待的上限：轮询型 SPA 的网络永远不会静止 idle 时长，
+  # 到达上限后放弃等待、直接用已收集内容拍快照。0 表示不限制（旧行为）。
+  idle_max: 5s
+  timeout: 45s
+  headless: true
+  # 运行时自动填表并提交（算法适配自 projectdiscovery/katana，MIT）。
+  # 提交产生的请求会被 CDP 捕获，其真实参数（键、值、类型）以 runtime
+  # 置信度回填进报告的 RequestSpec——这是补齐 data:t 等动态 payload
+  # 字段的主要手段。默认关闭：提交可能触发目标自身的写操作。
+  auto_form: false
+  # 运行时点击按钮和带内联事件的元素，触发 SPA 隐藏的 API 调用。
+  # 默认关闭，风险同上。
+  trigger_events: false
+  # 单次页面渲染中"填表提交 + 事件点击"的总次数上限。
+  max_interactions: 20
+  # 激进模式：disabled/隐藏的控件也写入值（DOM 直写并派发事件），
+  # 不可见元素也点击。攻击面更大，但更嘈杂、更易扰动目标。
+  aggressive: false
+  # 仅在受限容器/靶场中 Chrome 沙箱无法启动时开启；默认保持 false。
+  no_sandbox: false
+  # 可覆盖为 collect_resource_urls.js 的绝对路径。
+  collector_script: ""
+  disable_injection: false
+  # 发现框架路由后逐个渲染，采集每个视图自己的请求/相对路径/敏感信息。
+  # 前端路由守卫常常不是鉴权，直接导航往往能渲染出视图并触发其接口调用。
+  # 默认关闭：它会成倍放大请求量，并可能触发目标自身的写操作。
+  # 默认 true：渲染发现的每个框架路由视图，观测该视图自身发出的请求。
+  crawl_routes: false
+  # 单次扫描最多渲染多少个路由视图。0 表示不限制，仅由 crawl_timeout 和视图签名去重约束。
+  max_routes: 0
+  # 路由渲染的总时长上限。
+  crawl_timeout: 60s
+
+concurrency:
+  targets: 4
+  resources_per_target: 16
+
+limits:
+  max_depth: 5
+  # 0 表示不限制：所有可达的脚本与 chunk 都会被下载并解析。
+  max_resources: 0
+  # 0 表示不限制：完整下载响应体，避免截断破坏 AST chunk 提取。
+  max_body_size: 0
+
+scope:
+  allow_domains: []
+  # 非空时只爬取根目标与列表内域名：列表外的脚本不抓取、端点不探测。
+  # 精确域名直接写，子域名前加点，例如 .static.example。
+  restrict_domains: []
+  # 请求队列会忽略 URL path 以这些后缀结尾的资源；匹配忽略大小写和 query。
+  suffix_blacklist:
+    - .png
+    - .jpg
+    - .jpeg
+    - .gif
+    - .webp
+    - .svg
+    - .ico
+    - .bmp
+    - .tif
+    - .tiff
+    - .woff
+    - .woff2
+    - .ttf
+    - .otf
+    - .eot
+    - .mp3
+    - .wav
+    - .ogg
+    - .flac
+    - .mp4
+    - .webm
+    - .avi
+    - .mov
+    - .mkv
+    - .zip
+    - .rar
+    - .7z
+    - .tar
+    - .gz
+    - .bz2
+    - .xz
+    - .pdf
+    - .wasm
+    - .exe
+    - .dll
+    - .dmg
+    - .iso
+    - .css
+  fetch_external_scripts: true
+  probe_external_endpoints: false
+  # 识别版权注释（/*! ... */、@license、Copyright 等）判定第三方库 bundle 并跳过
+  # 正则/AST 解析：库代码体量大但不含目标业务接口，跳过可显著提速并降噪。默认开启。
+  # 设为 false 时仍解析，但结果会打上 vendor 标记（JSON: "vendor": true，报告显示徽标）。
+  skip_library_bundles: true
+  # 探测 JS source map（.map）并把 sourcesContent 里还原出的源码重新喂给提取器。
+  # 生产站点多半忘了删 .map，拿到它基本等于拿到未压缩的整套前端源码。默认开启。
+  probe_source_maps: true
+  # 命中的 map 不探测：路径包含任一片段即跳过（库/厂商 bundle 的 map 又大又没用）。
+  source_map_blacklist:
+    - chunk-vendors
+    - chunk-libs
+    - vendors~
+    - /vendor
+    - node_modules
+    - /polyfills
+    - /runtime.
+    - /libs/
+    - axios
+    - lodash
+    - jquery
+    - moment
+    - echarts
+    - element-ui
+    - elementui
+    - antd
+    - highlight.js
+    - /umd/
+    - core-js
+    - regenerator-runtime
+    - zone.js
+    - bootstrap
+
+output:
+  directory: ./jsowl-report
+  json: true
+  html: true
+  # 只保存普通 JavaScript 和 chunk；API 正文不会保存。
+  # 默认开启：开启后会先把所有 JS 下载完成，再统一做正则匹配和 AST 解析。
+  download_js: true
+  js_directory: js
+  # 在 API 报告的接口详情里复原 HTTP 请求包：源码有字面量值的参数保真，
+  # 其余参数生成 {{fuzz:...}} 占位符，可直接复制进 burp/yakit 重放。
+  request_template: true
+
+# AI 辅助分析（配合 -ai 开关）：基于静态提取的证据做参数完整性/真实性判断、
+# 未知污点来源推理、敏感信息价值评级。必须设置 api_key 和 base_url 后 -ai 才能生效。
+ai:
+  api_key: "your-api-key"
+  base_url: "https://open.bigmodel.cn/api/paas/v4"
+  # 上游协议格式：openai-chat（默认，GLM/one-api/vLLM）/ openai-responses /
+  # anthropic-messages（Anthropic Messages 原生）/ gemini-native（Gemini 原生）。
+  format: "openai-chat"
+  model: "glm-4-flash"
+  max_requests: 20                 # 单次扫描 AI 请求上限
