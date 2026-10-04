@@ -16,7 +16,7 @@ go test ./...
 
 ```text
 ├── cmd/jsowl          # CLI 入口（Cobra）
-├── cmd/jsowl-mcp      # MCP Server 入口（stdio）
+├── cmd/jsowl-mcp      # MCP Server 入口（默认 stdio，--listen 可切 HTTP）
 ├── mcpserver/         # 公开的 MCP Server 子包（可被其他项目内嵌）
 ├── internal/
 │   ├── analyze/       # 正则 + Tree-sitter AST 提取引擎

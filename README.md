@@ -7,6 +7,8 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)](docs/development.md)
 [![MCP](https://img.shields.io/badge/MCP-Server-20c997)](docs/library.md)
 
+![](img/jsowl.png)
+
 **JsOwl** 是一个使用 Go 编写的高性能 JavaScript 信息收集与安全分析工具，同时也是一个可复用的 Go 库。它自动收集目标站点的页面、JavaScript、Webpack/RequireJS chunk 与 SPA 运行时资源，通过正则与 AST（Tree-sitter）提取 API 端点、参数、路由和敏感信息（密钥、Token、身份证、内网 IP 等），并生成 JSON 与自包含的交互式 HTML 报告——是 Web 安全测试、渗透测试信息收集阶段和攻击面梳理的自动化利器。
 
 > **免责声明**：仅可用于已获得明确授权的安全测试环境。报告会保留完整敏感值，请严格限制访问并妥善清理。

@@ -48,18 +48,28 @@ JsOwl 还提供一个公开子包 `github.com/youmulijiang/jsowl/mcpserver`，�
 go build -o jsowl-mcp ./cmd/jsowl-mcp
 ```
 
-在 MCP 客户端中配置（`-config` 可选，用于注入代理、浏览器路径、作用域、规则等基础配置）：
+在 MCP 客户端中配置（`-c`/`--config` 可选，用于注入代理、浏览器路径、作用域、规则等基础配置；`-d`/`--dir` 指定报告目录）：
 
 ```json
 {
   "mcpServers": {
     "jsowl": {
       "command": "/path/to/jsowl-mcp",
-      "args": ["-dir", "/path/to/jsowl-reports", "-config", "/path/to/config.yml"]
+      "args": ["-d", "/path/to/jsowl-reports", "-c", "/path/to/config.yml"]
     }
   }
 }
 ```
+
+### 以 HTTP 方式共享一个 MCP Server
+
+默认走 stdio；加 `--listen <ip:端口>` 后改为监听 HTTP，供多个客户端共用：
+
+```bash
+jsowl-mcp --listen 127.0.0.1:8080 -c config.yml
+```
+
+MCP 端点为 Streamable HTTP（端点即根路径 `http://127.0.0.1:8080/`），同时兼容旧版客户端的 SSE（`/sse`）。
 
 可用工具：
 
@@ -78,4 +88,7 @@ go build -o jsowl-mcp ./cmd/jsowl-mcp
 base, err := jsowl.LoadConfig("config.yml") // 或 nil 使用内置默认值
 store := mcpserver.NewStore(reportDir, base)
 go store.Run(ctx) // stdio 方式服务 LLM 客户端
+// 或监听 HTTP：
+// listener, _ := net.Listen("tcp", "127.0.0.1:8080")
+// go store.Serve(ctx, listener)
 ```
