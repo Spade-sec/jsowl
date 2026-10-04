@@ -78,7 +78,7 @@ jobs:
           done
 
       - name: Clean up icon resources
-        if: matrix.goos == 'windows'
+        shell: bash
         run: rm -f cmd/jsowl/rsrc_windows_*.syso cmd/jsowl-mcp/rsrc_windows_*.syso
 
       - name: Package
