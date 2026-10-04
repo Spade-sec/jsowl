@@ -5,7 +5,9 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -73,6 +75,56 @@ func (s *Store) Server() *mcp.Server {
 // Run serves MCP over stdio until the context is cancelled.
 func (s *Store) Run(ctx context.Context) error {
 	return s.Server().Run(ctx, &mcp.StdioTransport{})
+}
+
+// RunHTTP serves MCP over Streamable HTTP (plus legacy SSE at /sse for older
+// clients) on the given listen address, e.g. 127.0.0.1:8080. It runs until
+// the context is cancelled, then drains in-flight requests.
+func (s *Store) RunHTTP(ctx context.Context, listen string) error {
+	listener, err := net.Listen("tcp", listen)
+	if err != nil {
+		return fmt.Errorf("listen on %s: %w", listen, err)
+	}
+	return s.Serve(ctx, listener)
+}
+
+// Serve serves MCP on an existing listener until the context is cancelled,
+// then drains in-flight requests.
+func (s *Store) Serve(ctx context.Context, listener net.Listener) error {
+	server := s.Server()
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return server
+	}, nil)
+	mux := http.NewServeMux()
+	mux.Handle("/", handler)
+	mux.Handle("/sse", mcp.NewSSEHandler(func(*http.Request) *mcp.Server {
+		return server
+	}, nil))
+	httpServer := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	serveErr := make(chan error, 1)
+	go func() {
+		fmt.Fprintf(os.Stderr, "jsowl-mcp: serving MCP on http://%s (streamable HTTP; SSE at /sse)\n", listener.Addr())
+		serveErr <- httpServer.Serve(listener)
+	}()
+	select {
+	case err := <-serveErr:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		// Close client sessions first so hanging event streams end;
+		// Shutdown would otherwise wait on them indefinitely.
+		for session := range server.Sessions() {
+			session.Close()
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return httpServer.Shutdown(shutdownCtx)
+	}
 }
 
 type scanInput struct {

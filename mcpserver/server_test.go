@@ -3,6 +3,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -137,4 +138,40 @@ func callTool[Out any](t *testing.T, session *mcp.ClientSession, name string, ar
 		t.Fatalf("decode %s output %s: %v", name, data, err)
 	}
 	return out
+}
+
+func TestServeHTTPTools(t *testing.T) {
+	store := NewStore(t.TempDir(), nil)
+	id := store.put(sampleResult())
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- store.Serve(ctx, listener) }()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	transport := &mcp.StreamableClientTransport{
+		Endpoint: "http://" + listener.Addr().String(),
+	}
+	session, err := client.Connect(context.Background(), transport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	endpoints := callTool[[]endpointRow](t, session, "jsowl_endpoints", map[string]any{
+		"scan_id": id, "evidence": "full-url",
+	})
+	if len(endpoints) != 1 || endpoints[0].Method != "GET" {
+		t.Fatalf("full-url endpoints = %+v", endpoints)
+	}
+
+	cancel()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
 }

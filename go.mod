@@ -5,11 +5,13 @@ go 1.25.0
 require (
 	github.com/PuerkitoBio/goquery v1.10.3
 	github.com/cespare/xxhash/v2 v2.3.0
+	github.com/dlclark/regexp2 v1.12.0
 	github.com/enetx/g v1.0.202
 	github.com/enetx/surf v1.0.173
 	github.com/go-rod/rod v0.116.2
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.0.9
 	github.com/tree-sitter/go-tree-sitter v0.25.0
 	github.com/tree-sitter/tree-sitter-javascript v0.25.0
 	go.yaml.in/yaml/v3 v3.0.4
@@ -18,7 +20,6 @@ require (
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
-	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/enetx/http v1.0.24 // indirect
 	github.com/enetx/http2 v1.0.24 // indirect
 	github.com/enetx/http3 v1.0.6 // indirect
@@ -33,7 +34,6 @@ require (
 	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
-	github.com/spf13/pflag v1.0.9 // indirect
 	github.com/wzshiming/socks5 v0.7.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/ysmood/fetchup v0.2.3 // indirect
