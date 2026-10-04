@@ -29,6 +29,7 @@ if (-not $Version) {
 }
 
 $ldflags = "-X main.version=$Version -s -w"
+$rsrcModule = "github.com/akavel/rsrc@v0.10.2"
 New-Item -ItemType Directory -Force -Path "bin" | Out-Null
 
 Write-Host "== JsOwl build: version $Version ==" -ForegroundColor Cyan
@@ -43,15 +44,45 @@ if (-not $SkipTest) {
     if ($LASTEXITCODE -ne 0) { throw "go test failed" }
 }
 
+# Windows executables carry img/jsowl.ico as a Win32 resource. rsrc turns
+# the .ico into an arch-tagged .syso next to each main package, which the
+# go tool links in automatically; the .syso files are build artifacts and
+# are removed after the target is built. Regenerate the .ico from the PNG
+# artwork with: python build/convert_icon.py
+function Invoke-IconResource([string]$goarch) {
+    if (-not (Test-Path "img/jsowl.ico")) {
+        throw "icon not found: img/jsowl.ico (run: python build/convert_icon.py)"
+    }
+    foreach ($dir in @("cmd/jsowl", "cmd/jsowl-mcp")) {
+        $out = Join-Path $dir "rsrc_windows_$goarch.syso"
+        Write-Host "-> icon resource $out" -ForegroundColor DarkGray
+        go run $rsrcModule -arch $goarch -ico "img/jsowl.ico" -o $out
+        if ($LASTEXITCODE -ne 0) { throw "icon resource generation failed: $out" }
+    }
+}
+
+function Remove-IconResource([string]$goarch) {
+    foreach ($dir in @("cmd/jsowl", "cmd/jsowl-mcp")) {
+        $file = Join-Path $dir "rsrc_windows_$goarch.syso"
+        if (Test-Path $file) { Remove-Item $file }
+    }
+}
+
 function Build-Target($goos, $goarch, $outName) {
     Write-Host "-> build $outName ($goos/$goarch)" -ForegroundColor DarkGray
     $mcpName = if ($outName -match '\.exe$') { $outName -replace '\.exe$', '-mcp.exe' } else { "$outName-mcp" }
     $env:GOOS = $goos
     $env:GOARCH = $goarch
-    go build -trimpath -ldflags $ldflags -o (Join-Path "bin" $outName) ./cmd/jsowl
-    if ($LASTEXITCODE -ne 0) { throw "build jsowl for $goos/$goarch failed" }
-    go build -trimpath -ldflags $ldflags -o (Join-Path "bin" $mcpName) ./cmd/jsowl-mcp
-    if ($LASTEXITCODE -ne 0) { throw "build jsowl-mcp for $goos/$goarch failed" }
+    $withIcon = ($goos -eq "windows")
+    try {
+        if ($withIcon) { Invoke-IconResource $goarch }
+        go build -trimpath -ldflags $ldflags -o (Join-Path "bin" $outName) ./cmd/jsowl
+        if ($LASTEXITCODE -ne 0) { throw "build jsowl for $goos/$goarch failed" }
+        go build -trimpath -ldflags $ldflags -o (Join-Path "bin" $mcpName) ./cmd/jsowl-mcp
+        if ($LASTEXITCODE -ne 0) { throw "build jsowl-mcp for $goos/$goarch failed" }
+    } finally {
+        if ($withIcon) { Remove-IconResource $goarch }
+    }
 }
 
 if ($AllPlatforms) {

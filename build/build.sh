@@ -35,6 +35,7 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 LDFLAGS="-X main.version=${VERSION} -s -w"
+RSRC="github.com/akavel/rsrc@v0.10.2"
 mkdir -p bin
 
 echo "== JsOwl build: version ${VERSION} =="
@@ -46,6 +47,29 @@ if [[ "$SKIP_TEST" -eq 0 ]]; then
     go test ./...
 fi
 
+# Windows executables carry img/jsowl.ico as a Win32 resource: rsrc turns
+# the .ico into an arch-tagged .syso next to each main package, which the
+# go tool links in automatically. The .syso files are build artifacts and
+# are cleaned up on exit via the trap. Regenerate the .ico from the PNG
+# artwork with: python build/convert_icon.py
+icon_resource() {
+    local arch="$1"
+    if [[ ! -f img/jsowl.ico ]]; then
+        echo "icon not found: img/jsowl.ico (run: python build/convert_icon.py)" >&2
+        exit 1
+    fi
+    local dir
+    for dir in cmd/jsowl cmd/jsowl-mcp; do
+        echo "-> icon resource ${dir}/rsrc_windows_${arch}.syso"
+        go run "$RSRC" -arch "$arch" -ico img/jsowl.ico -o "${dir}/rsrc_windows_${arch}.syso"
+    done
+}
+
+icon_resource_cleanup() {
+    rm -f cmd/jsowl/rsrc_windows_*.syso cmd/jsowl-mcp/rsrc_windows_*.syso
+}
+trap icon_resource_cleanup EXIT
+
 build_target() {
     local goos="$1" goarch="$2" out="$3"
     local mcp="$out-mcp"
@@ -53,6 +77,9 @@ build_target() {
         *.exe) mcp="${out%.exe}-mcp.exe" ;;
     esac
     echo "-> build ${out} (${goos}/${goarch})"
+    if [[ "$goos" == "windows" ]]; then
+        icon_resource "$goarch"
+    fi
     GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags "$LDFLAGS" \
         -o "bin/${out}" ./cmd/jsowl
     GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags "$LDFLAGS" \

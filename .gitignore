@@ -12,6 +12,8 @@ jsowl-check/
 
 # Build artifacts
 bin/
+# Windows icon resources generated at build time (build/build.ps1, build/build.sh)
+*.syso
 /jsowl
 /jsowl.exe
 /jsowl-mcp
