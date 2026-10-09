@@ -55,7 +55,12 @@ func sampleResult() *jsowl.Result {
 
 func TestServerListsAndCallsTools(t *testing.T) {
 	store := NewStore(t.TempDir(), nil)
-	id := store.put(sampleResult())
+	sample := sampleResult()
+	sample.Params = []jsowl.ParamHit{
+		{Name: "userId", Scenario: jsowl.ParamScenarioObjectProperty,
+			SourceURL: "https://example.test/app.js", Line: 7},
+	}
+	id := store.put(sample)
 
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	server := store.Server()
@@ -102,8 +107,18 @@ func TestServerListsAndCallsTools(t *testing.T) {
 	}
 
 	parameters := callTool[[]parameterRowOut](t, session, "jsowl_parameters", map[string]any{"scan_id": id})
-	if len(parameters) != 1 || parameters[0].Name != "id" {
+	if len(parameters) != 2 {
 		t.Fatalf("parameter rows = %+v", parameters)
+	}
+	var userRow *parameterRowOut
+	for i := range parameters {
+		if parameters[i].Name == "userId" {
+			userRow = &parameters[i]
+		}
+	}
+	if userRow == nil || len(userRow.Scenarios) != 1 ||
+		userRow.Scenarios[0] != jsowl.ParamScenarioObjectProperty {
+		t.Fatalf("userId row missing scenario: %+v", userRow)
 	}
 
 	missing, err := session.CallTool(context.Background(), &mcp.CallToolParams{

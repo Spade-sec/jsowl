@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -89,6 +90,87 @@ const (
 	TaintRoute    = "route"
 	TaintUnknown  = "unknown"
 )
+
+// Parameter extraction scenarios — the code shape a parameter name was
+// recovered from. Codes are stable identifiers; ParamScenarioLabel renders
+// the human-readable form used by the reports.
+const (
+	ParamScenarioObjectProperty     = "object_property"      // const user = { userId: 123 }
+	ParamScenarioDestructuring      = "destructuring"        // const {id, name} = user
+	ParamScenarioNestedDestructurin = "nested_destructuring" // const {profile: {email}} = data
+	ParamScenarioFunctionParam      = "function_param"       // function getUser(userId, token)
+	ParamScenarioVariable           = "variable"             // const apiKey = "xxx"
+	ParamScenarioAPIRequest         = "api_request"          // axios.post('/api', {name: "test"})
+	ParamScenarioURLQuery           = "url_query"            // /api?page=1&size=10
+	ParamScenarioConfigObject       = "config_object"        // config: { timeout: 5000 }
+	ParamScenarioRouteParam         = "route_param"          // /user/:userId/profile
+)
+
+// ParamScenarioLabel maps a scenario code to its report-facing name.
+func ParamScenarioLabel(code string) string {
+	switch code {
+	case ParamScenarioObjectProperty:
+		return "对象属性"
+	case ParamScenarioDestructuring:
+		return "解构赋值"
+	case ParamScenarioNestedDestructurin:
+		return "嵌套解构"
+	case ParamScenarioFunctionParam:
+		return "函数参数"
+	case ParamScenarioVariable:
+		return "变量赋值"
+	case ParamScenarioAPIRequest:
+		return "API请求"
+	case ParamScenarioURLQuery:
+		return "URL参数"
+	case ParamScenarioConfigObject:
+		return "配置对象"
+	case ParamScenarioRouteParam:
+		return "路由参数"
+	}
+	return code
+}
+
+// routeParamPattern matches :name and {name} placeholders in route paths.
+// The colon form requires a letter to start (ports and hash fragments never
+// match); the brace form covers alternate router syntaxes.
+var routeParamPattern = regexp.MustCompile(`(?::|\{)([A-Za-z_][A-Za-z0-9_]*)\}?`)
+
+// RouteParamNames extracts framework route placeholders from a route URL:
+// /user/:userId/profile and /user/{userId}/profile both yield userId. Hash
+// fragments are scanned too, so /#/user/:userId works.
+func RouteParamNames(raw string) []string {
+	names := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	for _, match := range routeParamPattern.FindAllStringSubmatch(raw, -1) {
+		name := match[1]
+		if _, duplicate := seen[name]; duplicate {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+// ParamHit records one parameter name extracted from source code, together
+// with the scenario (code shape) it came from and where it was found. Names
+// are kept, values only when the source carried them literally.
+type ParamHit struct {
+	Name     string `json:"name"`
+	Scenario string `json:"scenario"`
+	// Value is the literal the source carried, when it had one (e.g. the
+	// "xxx" in const apiKey = "xxx"); empty otherwise.
+	Value     string `json:"value,omitempty"`
+	Evidence  string `json:"evidence,omitempty"`
+	SourceURL string `json:"source_url"`
+	Line      int    `json:"line,omitempty"`
+	Column    int    `json:"column,omitempty"`
+	// ContextLines carries the surrounding source lines of the match.
+	ContextLines []ContextLine `json:"context_lines,omitempty"`
+	// Vendor marks a hit inside a third-party library bundle.
+	Vendor bool `json:"vendor,omitempty"`
+}
 
 // RequestSpec is the normalized shape of one request call site, merged from
 // every client library into the same vocabulary.
@@ -550,9 +632,14 @@ type Result struct {
 	Resources     []Resource    `json:"resources"`
 	Endpoints     []Endpoint    `json:"endpoints"`
 	Findings      []Finding     `json:"findings"`
-	Technologies  []string      `json:"technologies"`
-	Statistics    Statistics    `json:"statistics"`
-	Issues        []Issue       `json:"issues"`
+	// Params lists parameter names extracted from code shapes (object
+	// properties, destructuring, function signatures, ...) plus the ones
+	// derived from endpoints (API request bodies, URL queries, route
+	// placeholders), each tagged with its extraction scenario.
+	Params       []ParamHit `json:"params,omitempty"`
+	Technologies []string   `json:"technologies"`
+	Statistics   Statistics `json:"statistics"`
+	Issues       []Issue    `json:"issues"`
 }
 
 type BatchItem struct {

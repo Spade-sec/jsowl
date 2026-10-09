@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -67,6 +68,7 @@ type outcome struct {
 	err        error
 	findings   []model.Finding
 	candidates []discover.Candidate
+	params     []model.ParamHit
 	spa        discover.SPAEvidence
 	// vendor marks the body as a third-party library bundle.
 	vendor bool
@@ -79,6 +81,7 @@ type runState struct {
 	queue          *scheduler.Queue
 	endpointIndex  map[string]int
 	findingSeen    map[string]struct{}
+	paramSeen      map[string]struct{}
 	spa            *discover.SPAEvidence
 	pending        []deferredJS
 	deferJS        bool
@@ -180,7 +183,7 @@ func (p *Pipeline) sourceMapAllowed(candidate *url.URL) bool {
 // markVendor labels everything extracted from one body between the two marks
 // as vendor code, so the report can separate library noise from application
 // results when skip_library_bundles is disabled.
-func markVendor(result *outcome, vendor bool, candidatesFrom, findingsFrom int) {
+func markVendor(result *outcome, vendor bool, candidatesFrom, findingsFrom, paramsFrom int) {
 	if !vendor {
 		return
 	}
@@ -190,6 +193,27 @@ func markVendor(result *outcome, vendor bool, candidatesFrom, findingsFrom int) 
 	for index := findingsFrom; index < len(result.findings); index++ {
 		result.findings[index].Vendor = true
 	}
+	for index := paramsFrom; index < len(result.params); index++ {
+		result.params[index].Vendor = true
+	}
+}
+
+// mergeParams folds parameter hits into the result, dropping duplicates by
+// (name, scenario, source, line).
+func (state *runState) mergeParams(hits []model.ParamHit) {
+	for _, hit := range hits {
+		key := paramHitKey(hit)
+		if _, duplicate := state.paramSeen[key]; duplicate {
+			continue
+		}
+		state.paramSeen[key] = struct{}{}
+		state.result.Params = append(state.result.Params, hit)
+	}
+}
+
+func paramHitKey(hit model.ParamHit) string {
+	return hit.Name + "\x00" + hit.Scenario + "\x00" + hit.SourceURL + "\x00" +
+		strconv.Itoa(hit.Line)
 }
 
 // absorbSourceMap queues the map a bundle points at through sourceMappingURL,
@@ -251,13 +275,15 @@ func absorbRecoveredSources(
 			continue
 		}
 		candidatesFrom, findingsFrom := len(result.candidates), len(result.findings)
+		paramsFrom := len(result.params)
 		textResult := discover.FromJavaScript(source, content, engine)
 		result.findings = append(result.findings, textResult.Findings...)
 		result.candidates = append(result.candidates, textResult.Candidates...)
 		result.candidates = append(
 			result.candidates, discover.APIFromAST(source, content)...,
 		)
-		markVendor(result, isVendor, candidatesFrom, findingsFrom)
+		result.params = append(result.params, discover.ParamsFromAST(source, content)...)
+		markVendor(result, isVendor, candidatesFrom, findingsFrom, paramsFrom)
 	}
 }
 
@@ -397,6 +423,7 @@ func (p *Pipeline) RunDetailed(
 		queue:          queue,
 		endpointIndex:  endpointIndex,
 		findingSeen:    make(map[string]struct{}),
+		paramSeen:      make(map[string]struct{}),
 		spa:            &spa,
 		deferJS:        p.options.Config.Output.DownloadJS,
 		targetScope:    targetScope,
@@ -606,6 +633,7 @@ func (p *Pipeline) processOutcome(state *runState, collected outcome) error {
 		result.Findings = append(result.Findings, finding)
 	}
 
+	state.mergeParams(collected.params)
 	p.processCandidates(
 		state, collected.response.URL, collected.candidates, collected.item.Depth,
 	)
@@ -855,6 +883,7 @@ type deferredAnalysis struct {
 	item       deferredJS
 	findings   []model.Finding
 	candidates []discover.Candidate
+	params     []model.ParamHit
 	spa        discover.SPAEvidence
 	readErr    error
 }
@@ -893,6 +922,7 @@ func (p *Pipeline) computeBatch(batch []deferredJS) []deferredAnalysis {
 			analysis.findings = jsResult.Findings
 			analysis.spa = jsResult.SPA
 			analysis.candidates = discover.APIFromAST(item.source, body)
+			analysis.params = discover.ParamsFromAST(item.source, body)
 			analyses[index] = analysis
 		}()
 	}
@@ -917,6 +947,9 @@ func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
 		for index := range analysis.candidates {
 			analysis.candidates[index].Vendor = true
 		}
+		for index := range analysis.params {
+			analysis.params[index].Vendor = true
+		}
 	}
 	for _, finding := range analysis.findings {
 		key := finding.RuleID + "\x00" + finding.SourceURL + "\x00" + finding.Value
@@ -926,6 +959,7 @@ func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
 		state.findingSeen[key] = struct{}{}
 		state.result.Findings = append(state.result.Findings, finding)
 	}
+	state.mergeParams(analysis.params)
 	p.processCandidates(
 		state,
 		analysis.item.source.String(),
@@ -1010,6 +1044,7 @@ func (p *Pipeline) collectOne(
 			discoveryBase, response.Body, p.candidateLimit(),
 		)...)
 		result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
+		result.params = append(result.params, discover.ParamsFromAST(source, response.Body)...)
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, textResult.SPA)
 		result.findings = append(result.findings, textResult.Findings...)
@@ -1022,6 +1057,10 @@ func (p *Pipeline) collectOne(
 			result.candidates = append(
 				result.candidates,
 				discover.APIFromAST(source, []byte(inline))...,
+			)
+			result.params = append(
+				result.params,
+				discover.ParamsFromAST(source, []byte(inline))...,
 			)
 		}
 	case item.Kind == model.ResourceTypeScript || item.Kind == model.ResourceTypeChunk ||
@@ -1038,11 +1077,13 @@ func (p *Pipeline) collectOne(
 		// application results.
 		result.vendor = vendor
 		vendorCandidates, vendorFindings := len(result.candidates), len(result.findings)
+		vendorParams := len(result.params)
 		defer func() {
-			markVendor(&result, vendor, vendorCandidates, vendorFindings)
+			markVendor(&result, vendor, vendorCandidates, vendorFindings, vendorParams)
 		}()
 		if !deferJS {
 			result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
+			result.params = append(result.params, discover.ParamsFromAST(source, response.Body)...)
 		}
 		jsResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, jsResult.SPA)
@@ -1261,6 +1302,80 @@ func mergeSPAEvidence(target *discover.SPAEvidence, source discover.SPAEvidence)
 	target.LargeBundle = target.LargeBundle || source.LargeBundle
 }
 
+// deriveParamHits turns endpoints into parameter hits for the request-shaped
+// scenarios the AST pass cannot see: parameters of API request bodies and
+// option objects, URL query strings, and framework route placeholders.
+func deriveParamHits(result *model.Result) []model.ParamHit {
+	hits := make([]model.ParamHit, 0, 64)
+	add := func(name, scenario, sourceURL string, line int) {
+		if name == "" {
+			return
+		}
+		hits = append(hits, model.ParamHit{
+			Name: name, Scenario: scenario, SourceURL: sourceURL, Line: line,
+		})
+	}
+	for _, endpoint := range result.Endpoints {
+		if endpoint.Type == "route" {
+			for _, name := range routeParamNames(endpoint.URL) {
+				add(name, model.ParamScenarioRouteParam, endpoint.SourceURL, 0)
+			}
+			continue
+		}
+		if endpoint.Spec != nil {
+			for _, param := range endpoint.Spec.Query {
+				add(param.Key, model.ParamScenarioAPIRequest, endpoint.SourceURL, endpoint.Line)
+			}
+			for _, param := range endpoint.Spec.Body {
+				add(param.Key, model.ParamScenarioAPIRequest, endpoint.SourceURL, endpoint.Line)
+			}
+		} else {
+			for _, name := range endpoint.BodyParams {
+				add(name, model.ParamScenarioAPIRequest, endpoint.SourceURL, endpoint.Line)
+			}
+		}
+		if parsed, err := url.Parse(endpoint.URL); err == nil {
+			for key := range parsed.Query() {
+				add(key, model.ParamScenarioURLQuery, endpoint.URL, 0)
+			}
+		}
+	}
+	for _, resource := range result.Resources {
+		parsed, err := url.Parse(resource.URL)
+		if err != nil {
+			continue
+		}
+		for key := range parsed.Query() {
+			add(key, model.ParamScenarioURLQuery, resource.URL, 0)
+		}
+	}
+	return hits
+}
+
+// routeParamNames extracts framework route placeholders from a route URL:
+// /user/:userId/profile and /user/{userId}/profile both yield userId. Hash
+// fragments are scanned too, so /#/user/:userId works.
+func routeParamNames(raw string) []string {
+	return model.RouteParamNames(raw)
+}
+
+// mergeParamHits folds derived hits into result.Params, dropping duplicates
+// by (name, scenario, source, line) — idempotent across repeated finalization.
+func mergeParamHits(result *model.Result, hits []model.ParamHit) {
+	seen := make(map[string]struct{}, len(result.Params)+len(hits))
+	for _, hit := range result.Params {
+		seen[paramHitKey(hit)] = struct{}{}
+	}
+	for _, hit := range hits {
+		key := paramHitKey(hit)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		result.Params = append(result.Params, hit)
+	}
+}
+
 // Finalize sorts the result and recomputes its statistics. It is idempotent,
 // so callers that merge results from a second pass can refresh the counts the
 // report header shows.
@@ -1269,6 +1384,19 @@ func Finalize(result *model.Result) {
 }
 
 func finalize(result *model.Result) {
+	mergeParamHits(result, deriveParamHits(result))
+	sort.SliceStable(result.Params, func(i, j int) bool {
+		if result.Params[i].SourceURL != result.Params[j].SourceURL {
+			return result.Params[i].SourceURL < result.Params[j].SourceURL
+		}
+		if result.Params[i].Line != result.Params[j].Line {
+			return result.Params[i].Line < result.Params[j].Line
+		}
+		if result.Params[i].Scenario != result.Params[j].Scenario {
+			return result.Params[i].Scenario < result.Params[j].Scenario
+		}
+		return result.Params[i].Name < result.Params[j].Name
+	})
 	sort.SliceStable(result.Resources, func(i, j int) bool {
 		if result.Resources[i].URL != result.Resources[j].URL {
 			return result.Resources[i].URL < result.Resources[j].URL

@@ -187,6 +187,13 @@ func renderParameters(result *model.Result) []byte {
 	for _, resource := range result.Resources {
 		collect(resource.URL)
 	}
+	// Code-shape hits (object properties, destructuring, function params, ...)
+	// join the list so the plain-text file feeds tools the full inventory.
+	for _, hit := range result.Params {
+		if hit.Name != "" {
+			params[hit.Name] = struct{}{}
+		}
+	}
 	names := make([]string, 0, len(params))
 	for name := range params {
 		names = append(names, name)

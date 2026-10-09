@@ -20,6 +20,27 @@ type Endpoint = model.Endpoint
 // Finding records one URL or sensitive-information rule match.
 type Finding = model.Finding
 
+// ParamHit records one parameter name extracted from source code together
+// with its extraction scenario (object property, destructuring, function
+// parameter, ...).
+type ParamHit = model.ParamHit
+
+// Parameter extraction scenarios; see ParamHit.Scenario.
+const (
+	ParamScenarioObjectProperty     = model.ParamScenarioObjectProperty
+	ParamScenarioDestructuring      = model.ParamScenarioDestructuring
+	ParamScenarioNestedDestructurin = model.ParamScenarioNestedDestructurin
+	ParamScenarioFunctionParam      = model.ParamScenarioFunctionParam
+	ParamScenarioVariable           = model.ParamScenarioVariable
+	ParamScenarioAPIRequest         = model.ParamScenarioAPIRequest
+	ParamScenarioURLQuery           = model.ParamScenarioURLQuery
+	ParamScenarioConfigObject       = model.ParamScenarioConfigObject
+	ParamScenarioRouteParam         = model.ParamScenarioRouteParam
+)
+
+// ParamScenarioLabel renders a scenario code in its report-facing form.
+func ParamScenarioLabel(code string) string { return model.ParamScenarioLabel(code) }
+
 // Statistics summarizes a scan result.
 type Statistics = model.Statistics
 

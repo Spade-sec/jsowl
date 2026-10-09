@@ -348,9 +348,15 @@ func (s *Store) sensitiveTool(ctx context.Context, req *mcp.CallToolRequest, inp
 }
 
 type parameterRowOut struct {
-	Name      string `json:"name"`
-	Example   string `json:"example,omitempty"`
-	FirstSeen string `json:"first_seen,omitempty"`
+	Name      string   `json:"name"`
+	Example   string   `json:"example,omitempty"`
+	FirstSeen string   `json:"first_seen,omitempty"`
+	// Scenarios lists how the name was recovered: object_property,
+	// destructuring, nested_destructuring, function_param, variable,
+	// api_request, url_query, config_object, route_param.
+	Scenarios []string `json:"scenarios,omitempty"`
+	// Vendor marks a name recovered from a third-party library bundle.
+	Vendor bool `json:"vendor,omitempty"`
 }
 
 func (s *Store) parametersTool(ctx context.Context, req *mcp.CallToolRequest, input struct {
@@ -365,11 +371,13 @@ func (s *Store) parametersTool(ctx context.Context, req *mcp.CallToolRequest, in
 	if limit <= 0 {
 		limit = 100
 	}
-	type entry struct {
-		value  string
-		source string
+	type entryStruct struct {
+		value     string
+		source    string
+		scenarios []string
+		vendor    bool
 	}
-	params := map[string]entry{}
+	params := map[string]entryStruct{}
 	collect := func(raw string) {
 		parsed, parseErr := url.Parse(raw)
 		if parseErr != nil {
@@ -383,7 +391,7 @@ func (s *Store) parametersTool(ctx context.Context, req *mcp.CallToolRequest, in
 			if len(values) > 0 {
 				value = values[0]
 			}
-			params[key] = entry{value: value, source: raw}
+			params[key] = entryStruct{value: value, source: raw}
 		}
 	}
 	for _, endpoint := range result.Endpoints {
@@ -391,6 +399,39 @@ func (s *Store) parametersTool(ctx context.Context, req *mcp.CallToolRequest, in
 	}
 	for _, resource := range result.Resources {
 		collect(resource.URL)
+	}
+	// Merge the code-shape parameter inventory: names recovered from object
+	// properties, destructuring, function signatures and friends, each with
+	// its extraction scenario. Names found only in URLs carry no scenarios;
+	// callers can treat a missing field as url_query.
+	for _, hit := range result.Params {
+		if hit.Name == "" {
+			continue
+		}
+		entry, exists := params[hit.Name]
+		if !exists {
+			entry = entryStruct{}
+		}
+		duplicate := false
+		for _, scenario := range entry.scenarios {
+			if scenario == hit.Scenario {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			entry.scenarios = append(entry.scenarios, hit.Scenario)
+		}
+		if hit.Vendor {
+			entry.vendor = true
+		}
+		if entry.source == "" && hit.SourceURL != "" {
+			entry.source = hit.SourceURL
+		}
+		if entry.value == "" && hit.Value != "" {
+			entry.value = hit.Value
+		}
+		params[hit.Name] = entry
 	}
 	names := make([]string, 0, len(params))
 	for name := range params {
@@ -404,6 +445,7 @@ func (s *Store) parametersTool(ctx context.Context, req *mcp.CallToolRequest, in
 	for _, name := range names {
 		rows = append(rows, parameterRowOut{
 			Name: name, Example: params[name].value, FirstSeen: params[name].source,
+			Scenarios: params[name].scenarios, Vendor: params[name].vendor,
 		})
 	}
 	return nil, rows, nil

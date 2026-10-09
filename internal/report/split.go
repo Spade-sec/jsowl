@@ -118,6 +118,7 @@ code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;b
 .sev.medium{background:#fdf3e3;color:var(--warn)}
 .sev.low{background:var(--accent-soft);color:var(--accent)}
 .sev.info,.sev.static{background:#f0f1f3;color:var(--muted)}
+.sev.scen{background:var(--accent-soft);color:var(--accent);text-transform:none}
 .sev.runtime{background:#e6f6ef;color:var(--success)}
 .sev.full-url{background:#fdf3e3;color:var(--warn)}
 .sev.vendor{background:#f0f1f3;color:var(--muted);border:1px dashed var(--line)}
@@ -928,6 +929,11 @@ type parameterStat struct {
 	FirstSeen string
 	Body      bool
 	Response  bool
+	// Scenarios lists the extraction scenarios the name was recovered from
+	// (对象属性 / 解构赋值 / ...), ordered by model.ParamScenarioLabel.
+	Scenarios []string
+	// CodeLocs carries up to a few "source:line" locations of code-shape hits.
+	CodeLocs []string
 }
 
 // collectParameterStats merges URL query parameters and AST body parameters
@@ -968,6 +974,29 @@ func collectParameterStats(result *model.Result) []parameterStat {
 			stat.sources[extractor] = true
 		}
 	}
+	// Scenario badges for the URL-derivable shapes; code-shape scenarios
+	// come from result.Params further down.
+	urlScenario := map[string]bool{}
+	bodyScenario := map[string]bool{}
+	routeScenario := map[string]map[string]bool{}
+	for _, endpoint := range result.Endpoints {
+		if endpoint.Type == "route" {
+			set := map[string]bool{}
+			for _, name := range model.RouteParamNames(endpoint.URL) {
+				set[name] = true
+			}
+			routeScenario[endpoint.URL] = set
+			continue
+		}
+		if parsed, err := url.Parse(endpoint.URL); err == nil {
+			for key := range parsed.Query() {
+				urlScenario[key] = true
+			}
+		}
+		for _, name := range endpoint.BodyParams {
+			bodyScenario[name] = true
+		}
+	}
 	endpointExtractor := func(endpoint model.Endpoint) string {
 		if endpoint.Source != "" {
 			return endpoint.Source
@@ -983,6 +1012,12 @@ func collectParameterStats(result *model.Result) []parameterStat {
 	}
 	for _, endpoint := range result.Endpoints {
 		extractor := endpointExtractor(endpoint)
+		if endpoint.Type == "route" {
+			for name := range routeScenario[endpoint.URL] {
+				add(name, "", endpoint.URL, extractor, false, false)
+			}
+			continue
+		}
 		if parsed, err := url.Parse(endpoint.URL); err == nil {
 			for key, values := range parsed.Query() {
 				value := ""
@@ -1013,9 +1048,57 @@ func collectParameterStats(result *model.Result) []parameterStat {
 		}
 	}
 
+	// Merge the scenario-tagged parameter inventory (result.Params) into the
+	// same per-name statistics: scenario badges plus code locations.
+	scenarios := map[string]map[string]bool{}
+	for name := range urlScenario {
+		scenarios[name] = map[string]bool{model.ParamScenarioURLQuery: true}
+	}
+	for name := range bodyScenario {
+		if scenarios[name] == nil {
+			scenarios[name] = map[string]bool{}
+		}
+		scenarios[name][model.ParamScenarioAPIRequest] = true
+	}
+	for _, sets := range routeScenario {
+		for name := range sets {
+			if scenarios[name] == nil {
+				scenarios[name] = map[string]bool{}
+			}
+			scenarios[name][model.ParamScenarioRouteParam] = true
+		}
+	}
+	locations := map[string][]string{}
+	for _, hit := range result.Params {
+		if hit.Name == "" {
+			continue
+		}
+		set, exists := scenarios[hit.Name]
+		if !exists {
+			set = map[string]bool{}
+			scenarios[hit.Name] = set
+		}
+		set[hit.Scenario] = true
+		if hit.Line > 0 && len(locations[hit.Name]) < 3 {
+			loc := hit.SourceURL
+			locations[hit.Name] = append(locations[hit.Name],
+				fmt.Sprintf("%s:%d", loc, hit.Line))
+		}
+	}
+
 	names := make([]string, 0, len(stats))
 	for name := range stats {
 		names = append(names, name)
+	}
+	for name := range scenarios {
+		if _, exists := stats[name]; !exists {
+			// Code-shape-only parameters (destructuring, function params, ...)
+			// never appear in a URL; they still deserve a row.
+			names = append(names, name)
+			stats[name] = &entry{
+				hosts: map[string]bool{}, sources: map[string]bool{},
+			}
+		}
 	}
 	sort.Strings(names)
 	rows := make([]parameterStat, 0, len(names))
@@ -1025,7 +1108,15 @@ func collectParameterStats(result *model.Result) []parameterStat {
 			Name: name, Count: stat.count,
 			Example: stat.example, FirstSeen: stat.firstSeen,
 			Body: stat.body, Response: stat.response,
+			CodeLocs: locations[name],
 		}
+		for scenario := range scenarios[name] {
+			row.Scenarios = append(row.Scenarios, scenario)
+		}
+		sort.Slice(row.Scenarios, func(i, j int) bool {
+			return model.ParamScenarioLabel(row.Scenarios[i]) <
+				model.ParamScenarioLabel(row.Scenarios[j])
+		})
 		for host := range stat.hosts {
 			row.Hosts = append(row.Hosts, host)
 		}
@@ -1064,7 +1155,7 @@ func renderParameterReport(result *model.Result) (int, string, error) {
 <label>搜索 <input type="search" id="param-search" placeholder="参数名或值..."></label>
 <span class="muted" id="param-count"></span>
 </div>
-<table id="param-table"><thead><tr><th style="width:180px">参数名</th><th style="width:70px">次数</th><th style="width:220px">域名</th><th style="width:150px">提取方式</th><th style="width:240px">示例值</th><th>首次出现</th></tr></thead><tbody>`)
+<table id="param-table"><thead><tr><th style="width:180px">参数名</th><th style="width:190px">场景</th><th style="width:70px">次数</th><th style="width:220px">域名</th><th style="width:150px">提取方式</th><th style="width:240px">示例值</th><th>首次出现</th></tr></thead><tbody>`)
 	for _, row := range rows {
 		markers := ""
 		if row.Body {
@@ -1073,9 +1164,19 @@ func renderParameterReport(result *model.Result) (int, string, error) {
 		if row.Response {
 			markers += ` <span class="sev runtime">response</span>`
 		}
+		var scenarioBadges strings.Builder
+		for _, scenario := range row.Scenarios {
+			scenarioBadges.WriteString(
+				`<span class="sev scen">` + htmlEscape(model.ParamScenarioLabel(scenario)) + `</span> `)
+		}
+		codeLoc := ""
+		if len(row.CodeLocs) > 0 {
+			codeLoc = `<div class="muted">` + htmlEscape(row.CodeLocs[0]) + `</div>`
+		}
 		fmt.Fprintf(&b,
-			"<tr data-hosts=%q><td><code>%s</code>%s</td><td>%d</td><td class=\"muted\">%s</td><td>%s</td><td><code>%s</code></td><td><code>%s</code></td></tr>",
-			strings.Join(row.Hosts, " "), htmlEscape(row.Name), markers,
+			"<tr data-hosts=%q><td><code>%s</code>%s</td><td>%s</td><td>%d</td><td class=\"muted\">%s</td><td>%s</td><td><code>%s</code></td><td><code>%s</code></td></tr>",
+			strings.Join(row.Hosts, " "), htmlEscape(row.Name), codeLoc,
+			scenarioBadges.String(),
 			row.Count, htmlEscape(strings.Join(row.Hosts, ", ")),
 			htmlEscape(strings.Join(row.Sources, ", ")),
 			htmlEscape(row.Example), htmlEscape(row.FirstSeen))

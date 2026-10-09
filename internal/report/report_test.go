@@ -460,3 +460,58 @@ func TestHighlightFragmentsHighlightsEveryOccurrence(t *testing.T) {
 		t.Fatalf("marks must never nest: %s", got)
 	}
 }
+
+// TestParameterReportMarksScenarios checks the parameter report renders the
+// extraction-scenario badges for code-shape hits and keeps URL-derived rows.
+func TestParameterReportMarksScenarios(t *testing.T) {
+	result := sampleResult()
+	result.Params = []model.ParamHit{
+		{
+			Name: "userId", Scenario: model.ParamScenarioObjectProperty,
+			Value: "123", Evidence: model.EvidenceLiteral,
+			SourceURL: "https://example.test/app.js", Line: 7, Column: 15,
+			ContextLines: []model.ContextLine{
+				{LineNumber: 7, Content: "const user = { userId: 123 };", MatchStart: 13, MatchEnd: 19},
+			},
+		},
+		{
+			Name: "apiKey", Scenario: model.ParamScenarioVariable,
+			Value: "xxx", SourceURL: "https://example.test/app.js", Line: 9,
+		},
+	}
+	result.Endpoints = append(result.Endpoints, model.Endpoint{
+		Raw: "/search", URL: "https://example.test/search?q=hello",
+		SourceURL: "https://example.test/app.js", Authorized: true,
+	})
+	directory := t.TempDir()
+	if err := WriteSplitReports(directory, result); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "参数报告.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		"userId", "apiKey", "q",
+		"对象属性", "变量赋值", "URL参数",
+		"app.js:7",
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("parameter report missing %q", want)
+		}
+	}
+	// The plain-text list carries code-shape names too.
+	if err := WriteTextReports(directory, result); err != nil {
+		t.Fatal(err)
+	}
+	text, err := os.ReadFile(filepath.Join(directory, "参数.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"userId", "apiKey", "q"} {
+		if !strings.Contains(string(text), want) {
+			t.Fatalf("参数.txt missing %q", want)
+		}
+	}
+}
