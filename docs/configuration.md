@@ -104,7 +104,33 @@ Rod 的路径、等待、网络空闲、超时、窗口模式和注入脚本只�
 - `scope.skip_library_bundles` 默认 `true`。开启后扫描读取脚本头部的版权注释（`/*! ... */` 形式或含 `@license`、`@preserve`、`Copyright`、`licensed under` 的注释），若注释里出现已知库名（jQuery、lodash、axios、Vue、React、Element UI、echarts、core-js 等），就判定该脚本是第三方库 bundle，**跳过它的正则与 AST 解析**——库文件体量极大却不含目标业务接口，跳过既提速又降噪；资源本身仍会记录在资源报告里。source map 还原出的原始文件走同一判定。把 `skip_library_bundles` 设为 `false` 时**仍会解析**这些库文件，但结果全部打上 `vendor` 标记：API 报告与敏感信息报告的对应行会显示虚线 `vendor` 徽标，JSON 里为 `"vendor": true`——便于把库噪声与业务结果分开看。同一路径若同时被业务代码引用，标记会被清除（业务引用优先）。
 - `scope.probe_source_maps` 默认 `true`。开启后扫描会探测 JS source map：既解析脚本里 `//# sourceMappingURL=` 指向的 `.map`（含内联 base64 形式），也直接抓取以 `.map` 结尾的资源；拿到 map 后按 shuji 的方式把 `sourcesContent` 里的**原始未压缩源码**取出，重新跑一遍正则与 AST 提取，因此路径、参数与敏感信息都按还原后的源码统计。`source_map_blacklist` 里的片段命中 map 路径时跳过下载，默认覆盖 `chunk-vendors`、`chunk-libs`、`node_modules`、`axios`、`lodash`、`element-ui` 等库 bundle，避免为体积巨大的厂商 map 浪费请求与磁盘。
 - `scope.suffix_blacklist` 在请求入队前按 URL path 过滤，忽略后缀大小写、query 和 fragment；`.css` 与 `.svg` 默认过滤，`.js`、`.json`、`.map`、`.txt`、`.xml` 默认不会过滤。
-- `--base-url` 不会替换入口目标，只改变相对资源和 API 的解析基准，绝对 URL 保持原值。
+- `--base-url` 不会替换入口目标，只改变相对引用（script / chunk / API / route）的解析基准，绝对 URL 与协议相对引用保持原值。
+  **带路径的 base URL 按“前缀”处理**：`--base-url https://host/api` 时，源码里的 `/users` 解析为
+  `https://host/api/users`（而不是 `https://host/users`）；已经是 `/api/users` 的引用不会再叠加前缀，
+  无前导斜杠的相对引用按目录拼接（`users` → `/api/users`）。不设 `--base-url` 时解析行为完全不变。
+- `scope.explore_base_paths` 默认 `true`。开启后，扫描会收集 JavaScript 里声明的接口前缀
+  （`axios.create({ baseURL: /api })`、`apiPrefix = /v1`，以及 `"baseUrl":"/api"` 这类配置文本），
+  把每个以 `/` 开头的相对引用在这些前缀下各拼一次并**探测**，因此“应用实际把接口挂在哪个前缀下”
+  由响应结果给出，而不是靠猜。每个目标最多沿用 8 个前缀、最多增加 200 条探测端点，超出会写入
+  `base_path_probe_capped` 诊断；这些端点以 `提取方式 = 前缀拼接`（`source: prefix`）标注，原引用仍然保留。
+
+## 主机资产（`hosts`）
+
+主机提取（域名 / IPv4 / IPv6 / 内部主机候选）默认开启，无需配置即可离线运行：域名层级固定使用
+随二进制内嵌的 Public Suffix List 快照。这里只用于补充本环境专有的内部后缀：
+
+```yaml
+hosts:
+  internal_suffixes:
+    - corp        # 覆盖 corp 与 svc.corp
+    - lan
+```
+
+- 后缀按尾部标签匹配，只影响内部主机判定，**不会修改共享的 PSL 快照**；
+- `.test`、`.example`、`.invalid`、`.local`、`.localhost` 已内置为特殊用途后缀，无需重复配置；
+- 提取不执行目标代码、不发 DNS 查询、不做连通性探测，也不改变抓取范围与请求地址。
+
+提取来源、分类规则、输出口径与静态分析限制见 [主机资产提取](host-extraction.md)。
 
 ## 外部收集器
 

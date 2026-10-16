@@ -32,7 +32,7 @@ jsowl -h
 | `-o, --output` | 覆盖报告目录 |
 | `-m, --mode` | `auto`、`direct` 或 `browser` |
 | `-p, --proxy` | 覆盖 Surf 与 Rod 使用的 HTTP(S)/SOCKS5 代理 |
-| `--base-url` | 覆盖发现的相对 script、chunk、API 和 route 的解析基准 |
+| `--base-url` | 覆盖相对引用的解析基准；带路径时作为前缀拼接（`/users` → `/base/users`），绝对 URL 不受影响 |
 | `-H, --header` | `Name: value` 请求头，可重复 |
 | `--scope` | 限制只能爬取的域名，逗号分隔、可重复；根目标始终允许 |
 | `-t, --threads` | 覆盖单目标资源并发数 |
