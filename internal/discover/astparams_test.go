@@ -156,3 +156,50 @@ func TestParamsFromASTDeduplicatesPerLine(t *testing.T) {
 		t.Fatalf("distinct lines should each produce one hit, got %d in %+v", count, hits)
 	}
 }
+
+func TestIsEnglishParamName(t *testing.T) {
+	valid := []string{
+		"userId", "access_token", "UPPER_CASE", "_id", "2fa", "x1", "a",
+	}
+	for _, name := range valid {
+		if !isEnglishParamName(name) {
+			t.Errorf("isEnglishParamName(%q) = false, want true", name)
+		}
+	}
+	invalid := []string{
+		"", "123", "用户ID", "中文参数", "$scope", "a.b", "kebab-case",
+		"emoji😀", "a b", "a=b", "a/b", "名前",
+	}
+	for _, name := range invalid {
+		if isEnglishParamName(name) {
+			t.Errorf("isEnglishParamName(%q) = true, want false", name)
+		}
+	}
+}
+
+// TestParamsFromASTRejectsNonEnglishNames ensures only plain English
+// identifiers survive extraction: CJK keys, symbol-bearing names and
+// hyphenated/dotted identifiers are dropped, while real English parameters
+// keep flowing through.
+func TestParamsFromASTRejectsNonEnglishNames(t *testing.T) {
+	hits := paramHits(t, `
+		const obj = {
+			用户ID: 1, $scope: 2, "a.b": 3, "kebab-case": 4,
+			"emoji😀": 5, userId: 6, access_token: 7, UPPER_CASE: 8,
+		};
+		function 登录(userId, 名字) { return null; }
+		const { 中文键 } = data;
+	`)
+	for _, bad := range []string{"用户ID", "$scope", "a.b", "kebab-case", "emoji😀", "名字", "中文键"} {
+		for _, hit := range hits {
+			if hit.Name == bad {
+				t.Fatalf("non-English name %q leaked: %+v", bad, hit)
+			}
+		}
+	}
+	for _, name := range []string{"userId", "access_token", "UPPER_CASE"} {
+		if findHits(hits, name, model.ParamScenarioObjectProperty) == nil {
+			t.Fatalf("English name %q dropped from %+v", name, hits)
+		}
+	}
+}

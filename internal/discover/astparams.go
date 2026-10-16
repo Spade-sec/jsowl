@@ -341,7 +341,10 @@ func (c *paramCollector) recordVariable(name, value *sitter.Node) {
 }
 
 // usableParamName filters names that carry no parameter signal: minified
-// single letters, reserved words, and language internals.
+// single letters, reserved words, language internals, and — per the report's
+// requirement — anything that is not a plain English identifier. Names
+// carrying CJK text or other symbols (用户ID, $scope, a.b, kebab-case) are
+// dropped so the extracted inventory stays ASCII-only.
 func usableParamName(name string) bool {
 	if len(name) < minParamNameLen || name != strings.TrimSpace(name) {
 		return false
@@ -353,7 +356,25 @@ func usableParamName(name string) bool {
 	case "prototype", "constructor", "__proto__", "length", "arguments":
 		return false
 	}
-	return true
+	return isEnglishParamName(name)
+}
+
+// isEnglishParamName reports whether a name is a plausible English parameter
+// identifier: only ASCII letters, digits and underscores, with at least one
+// letter. A leading digit is tolerated (2fa_code) but a name made of digits
+// alone is not, and any non-ASCII rune or symbol fails.
+func isEnglishParamName(name string) bool {
+	letters := false
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+			letters = true
+		case r >= '0' && r <= '9', r == '_':
+		default:
+			return false
+		}
+	}
+	return letters
 }
 
 // usableFunctionName gates function-parameter extraction on a meaningful
@@ -456,10 +477,10 @@ func (c *paramCollector) add(name, scenario, value, evidence string, at *sitter.
 		source = c.sourceURL.String()
 	}
 	c.hits = append(c.hits, model.ParamHit{
-		Name:     name,
-		Scenario: scenario,
-		Value:    value,
-		Evidence: evidence,
+		Name:      name,
+		Scenario:  scenario,
+		Value:     value,
+		Evidence:  evidence,
 		SourceURL: source,
 		Line:      line,
 		Column:    column,
