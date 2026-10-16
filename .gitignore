@@ -20,9 +20,11 @@ bin/
 /jsowl-mcp.exe
 /tools.exe
 
-# Scan outputs and reports
-report/
-report-test/
+# Scan outputs and reports. Anchored to the repository root on purpose: an
+# unanchored "report/" would also swallow internal/report/, hiding new source
+# files from git.
+/report/
+/report-test/
 
 # Runtime logs
 *.log
