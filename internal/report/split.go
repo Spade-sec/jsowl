@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/youmulijiang/jsowl/internal/analyze"
+	"github.com/youmulijiang/jsowl/internal/extract"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
@@ -33,6 +34,7 @@ func WriteSplitReports(directory string, result *model.Result) error {
 		{"参数报告.html", "请求参数报告", renderParameterReport},
 		{"路由报告.html", "路由探测报告", renderRouteReport},
 		{"资源报告.html", "资源报告", renderResourceReport},
+		{"主机资产报告.html", "主机资产报告", renderHostReport},
 	}
 	// Build the full navigation first so every page shares the same nav bar.
 	links := []linkItem{
@@ -48,6 +50,9 @@ func WriteSplitReports(directory string, result *model.Result) error {
 		linkItem{File: "路由.txt", Name: "路由", Desc: "纯文本路由列表"},
 		linkItem{File: "参数.txt", Name: "请求参数", Desc: "纯文本参数名列表"},
 		linkItem{File: "敏感信息.txt", Name: "敏感信息", Desc: "纯文本命中列表"},
+		linkItem{File: "domain.txt", Name: "域名清单", Desc: "纯文本域名列表（标准化、去重）"},
+		linkItem{File: "ip.txt", Name: "IP 清单", Desc: "纯文本 IPv4/IPv6 列表"},
+		linkItem{File: "internal_hosts.txt", Name: "内部主机", Desc: "纯文本内部主机候选列表"},
 	)
 	for _, report := range reports {
 		count, body, err := report.render(result)
@@ -173,44 +178,69 @@ footer{padding:12px 24px;color:var(--muted);font-size:12px;border-top:1px solid 
 <footer>JsOwl 安全信息收集报告 · 敏感数据，请妥善保管</footer>
 <script>
 (function(){
-  // Table pagination: every table.paginated shows data-page-size rows per
-  // page with a prev/next pager appended after it.
-  document.querySelectorAll('table.paginated').forEach(function(table){
-    var pageSize = parseInt(table.getAttribute('data-page-size') || '50', 10);
+  {{interactions}}
+  document.querySelectorAll('table').forEach(function(table){
     var tbody = table.tBodies[0];
     if (!tbody) return;
-    // Data rows only: full-width context rows ride along with their
-    // endpoint row and must not consume page slots.
-    var rows = Array.prototype.slice.call(tbody.rows).filter(function(row){
-      return row.className.indexOf('ctx-row') === -1;
-    });
-    var totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
-    var page = 1;
+    var rows = Array.from(tbody.rows).filter(function(row){ return !row.classList.contains('ctx-row'); });
+    var details = new Map(rows.map(function(row){
+      var next = row.nextElementSibling;
+      return [row, next && next.classList.contains('ctx-row') ? next : null];
+    }));
+    var paginated = table.classList.contains('paginated');
+    var pageSize = Number(table.dataset.pageSize || 50), page = 1, totalPages = 1;
     var pager = document.createElement('div');
     pager.className = 'pager';
-    table.parentNode.insertBefore(pager, table.nextSibling);
-    function apply(){
-      var first = (page - 1) * pageSize;
-      rows.forEach(function(row, index){
-        var visible = index >= first && index < first + pageSize;
-        row.style.display = visible ? '' : 'none';
-        var ctxRow = row.nextElementSibling;
-        if (ctxRow && ctxRow.className.indexOf('ctx-row') !== -1) {
-          ctxRow.style.display = visible && ctxRow.className.indexOf(' open') !== -1 ? '' : 'none';
-        }
+    if (paginated) table.after(pager);
+    var filters = table.id === 'sensitive-table' ? document.getElementById('sensitive-filters') : null;
+    if (filters) {
+      ['severity', 'rule', 'source'].forEach(function(key){
+        var select = filters.querySelector('[data-filter="' + key + '"]');
+        Array.from(new Set(rows.map(function(row){ return row.dataset[key]; }))).sort(reportCollator.compare).forEach(function(value){
+          var option = document.createElement('option'); option.value = value; option.textContent = value; select.appendChild(option);
+        });
       });
-      var start = rows.length === 0 ? 0 : first + 1;
-      var end = Math.min(first + pageSize, rows.length);
-      pager.innerHTML = totalPages <= 1 ? '' :
+      filters.addEventListener('change', function(){ page = 1; apply(); });
+      filters.addEventListener('input', function(){ page = 1; apply(); });
+      filters.querySelector('button').addEventListener('click', function(){
+        filters.querySelectorAll('select,input').forEach(function(control){ control.value = ''; }); page = 1; apply();
+      });
+    }
+    function apply(){
+      var filtered = rows.filter(function(row){
+        if (!filters) return true;
+        var matches = Array.from(filters.querySelectorAll('[data-filter]')).every(function(control){
+          return !control.value || row.dataset[control.dataset.filter] === control.value;
+        });
+        var query = filters.querySelector('input').value.trim().toLowerCase();
+        return matches && (!query || row.textContent.toLowerCase().includes(query));
+      });
+      totalPages = Math.max(1, Math.ceil(filtered.length / pageSize)); page = Math.min(page, totalPages);
+      var first = (page - 1) * pageSize;
+      var visible = new Set(paginated ? filtered.slice(first, first + pageSize) : filtered);
+      rows.forEach(function(row){
+        row.style.display = visible.has(row) ? '' : 'none';
+        var detail = details.get(row);
+        if (detail) detail.style.display = visible.has(row) && detail.classList.contains('open') ? '' : 'none';
+      });
+      if (filters) document.getElementById('sensitive-count').textContent = '显示 ' + filtered.length + ' / ' + rows.length + ' 条';
+      pager.innerHTML = !paginated || totalPages <= 1 ? '' :
         '<button data-go="prev"' + (page <= 1 ? ' disabled' : '') + '>上一页</button>' +
-        '<span class="page-info">' + start + '-' + end + ' / ' + rows.length + '</span>' +
+        '<span class="page-info">' + (filtered.length ? first + 1 : 0) + '-' + Math.min(first + pageSize, filtered.length) + ' / ' + filtered.length + '</span>' +
         '<button data-go="next"' + (page >= totalPages ? ' disabled' : '') + '>下一页</button>';
     }
+    bindReportSort(table, function(column, direction){
+      rows.sort(function(a,b){ return direction * compareReportValues(reportCellValue(a,column), reportCellValue(b,column)); });
+      rows.forEach(function(row){ tbody.appendChild(row); if (details.get(row)) tbody.appendChild(details.get(row)); });
+      page = 1; if (table.id !== 'param-table') apply();
+    });
     pager.addEventListener('click', function(event){
-      var go = event.target.getAttribute && event.target.getAttribute('data-go');
+      var go = event.target.dataset.go;
       if (go === 'prev' && page > 1) { page--; apply(); }
       if (go === 'next' && page < totalPages) { page++; apply(); }
     });
+    // Existing parameter controls own their visibility; sorting must preserve it.
+    if (table.id === 'param-table') return;
     apply();
   });
 
@@ -257,7 +287,7 @@ footer{padding:12px 24px;color:var(--muted);font-size:12px;border-top:1px solid 
 `
 
 func renderSplitPage(result *model.Result, title string, links []linkItem, count int, tableHTML string) (string, error) {
-	tmpl, err := template.New("split").Parse(splitBase)
+	tmpl, err := template.New("split").Funcs(reportFuncs).Parse(splitBase)
 	if err != nil {
 		return "", err
 	}
@@ -836,7 +866,13 @@ func renderSensitiveReport(result *model.Result) (int, string, error) {
 		}
 	}
 	var b strings.Builder
-	b.WriteString(`<table><thead><tr><th style="width:90px">严重性</th><th style="width:200px">规则</th><th>完整值</th><th style="width:280px">来源</th><th style="width:220px">AI 评估</th></tr></thead><tbody>`)
+	b.WriteString(`<div class="filterbar" id="sensitive-filters">
+<label>严重性 <select data-filter="severity"><option value="">全部</option></select></label>
+<label>规则 <select data-filter="rule"><option value="">全部</option></select></label>
+<label>来源 <select data-filter="source"><option value="">全部</option></select></label>
+<label>关键词 <input type="search" placeholder="搜索规则、值、来源或 AI 评估"></label>
+<button type="button">重置筛选</button><span class="muted" id="sensitive-count" aria-live="polite"></span>
+</div><table id="sensitive-table" class="paginated" data-page-size="50"><thead><tr><th style="width:90px">严重性</th><th style="width:200px">规则</th><th>完整值</th><th style="width:280px">来源</th><th style="width:220px">AI 评估</th></tr></thead><tbody>`)
 	for _, finding := range findings {
 		vendorMark := ""
 		if finding.Vendor {
@@ -861,7 +897,8 @@ func renderSensitiveReport(result *model.Result) (int, string, error) {
 			aiCell += ` <span class="sev vendor">AI</span>`
 		}
 		fmt.Fprintf(&b,
-			"<tr><td><span class=\"sev %s\">%s</span></td><td>%s%s<div class=\"muted\">%s</div></td><td><code>%s</code></td><td><code>%s</code><div class=\"muted\">行 %d 列 %d</div></td><td>%s</td></tr>",
+			"<tr data-severity=\"%s\" data-rule=\"%s\" data-source=\"%s\"><td><span class=\"sev %s\">%s</span></td><td>%s%s<div class=\"muted\">%s</div></td><td><code>%s</code></td><td><code>%s</code><div class=\"muted\">行 %d 列 %d</div></td><td>%s</td></tr>",
+			htmlEscape(string(finding.Severity)), htmlEscape(finding.RuleName+" ("+finding.RuleID+")"), htmlEscape(finding.SourceURL),
 			htmlEscape(string(finding.Severity)), htmlEscape(string(finding.Severity)),
 			htmlEscape(finding.RuleName), vendorMark, htmlEscape(finding.RuleID),
 			htmlEscape(finding.Value), htmlEscape(finding.SourceURL),
@@ -921,41 +958,52 @@ func collectParameterRows(result *model.Result) []parameterRow {
 // parameterStat aggregates one parameter name across every URL that
 // carries it: which hosts, how often, and which extractor surfaced it.
 type parameterStat struct {
-	Name      string
-	Count     int
-	Hosts     []string
-	Sources   []string
-	Example   string
-	FirstSeen string
-	Body      bool
-	Response  bool
+	Name     string
+	Count    int
+	Hosts    []string
+	Sources  []string
+	Body     bool
+	Response bool
 	// Scenarios lists the extraction scenarios the name was recovered from
 	// (对象属性 / 解构赋值 / ...), ordered by model.ParamScenarioLabel.
 	Scenarios []string
-	// CodeLocs carries up to a few "source:line" locations of code-shape hits.
+	// CodeLocs carries the distinct JS files a name was found in (no line
+	// numbers), for the 来源 column.
 	CodeLocs []string
+}
+
+// maxSourceLinks caps how many distinct JS files the 来源 column lists for one
+// parameter, so a name spread across a bundle farm cannot bloat the cell.
+const maxSourceLinks = 3
+
+// codeShapeScenarios lists the ParamHit scenarios that exist only as source
+// shapes. They never appear in a URL, so the endpoint pass below cannot see
+// them and their count/host/extractor cells would render empty unless the
+// inventory merge counts them itself.
+var codeShapeScenarios = map[string]bool{
+	model.ParamScenarioObjectProperty:     true,
+	model.ParamScenarioDestructuring:      true,
+	model.ParamScenarioNestedDestructurin: true,
+	model.ParamScenarioFunctionParam:      true,
+	model.ParamScenarioVariable:           true,
+	model.ParamScenarioConfigObject:       true,
 }
 
 // collectParameterStats merges URL query parameters and AST body parameters
 // into per-name statistics.
 func collectParameterStats(result *model.Result) []parameterStat {
 	type entry struct {
-		count     int
-		hosts     map[string]bool
-		sources   map[string]bool
-		example   string
-		firstSeen string
-		body      bool
-		response  bool
+		count    int
+		hosts    map[string]bool
+		sources  map[string]bool
+		body     bool
+		response bool
 	}
 	stats := map[string]*entry{}
-	add := func(name, value, sourceURL, extractor string, isBody, isResponse bool) {
+	add := func(name, sourceURL, extractor string, isBody, isResponse bool) {
 		stat, exists := stats[name]
 		if !exists {
-			stat = &entry{
-				hosts: map[string]bool{}, sources: map[string]bool{},
-				example: value, firstSeen: sourceURL,
-			}
+			stat = &entry{hosts: map[string]bool{}, sources: map[string]bool{}}
 			stats[name] = stat
 		}
 		stat.count++
@@ -1014,24 +1062,20 @@ func collectParameterStats(result *model.Result) []parameterStat {
 		extractor := endpointExtractor(endpoint)
 		if endpoint.Type == "route" {
 			for name := range routeScenario[endpoint.URL] {
-				add(name, "", endpoint.URL, extractor, false, false)
+				add(name, endpoint.URL, extractor, false, false)
 			}
 			continue
 		}
 		if parsed, err := url.Parse(endpoint.URL); err == nil {
-			for key, values := range parsed.Query() {
-				value := ""
-				if len(values) > 0 {
-					value = values[0]
-				}
-				add(key, value, endpoint.URL, extractor, false, false)
+			for key := range parsed.Query() {
+				add(key, endpoint.URL, extractor, false, false)
 			}
 		}
 		for _, name := range endpoint.BodyParams {
-			add(name, "(body)", endpoint.URL, extractor, true, false)
+			add(name, endpoint.URL, extractor, true, false)
 		}
 		for _, name := range endpoint.ResponseParams {
-			add(name, "(response)", endpoint.URL, extractor, false, true)
+			add(name, endpoint.URL, extractor, false, true)
 		}
 	}
 	for _, resource := range result.Resources {
@@ -1039,12 +1083,8 @@ func collectParameterStats(result *model.Result) []parameterStat {
 		if err != nil {
 			continue
 		}
-		for key, values := range parsed.Query() {
-			value := ""
-			if len(values) > 0 {
-				value = values[0]
-			}
-			add(key, value, resource.URL, "url", false, false)
+		for key := range parsed.Query() {
+			add(key, resource.URL, "url", false, false)
 		}
 	}
 
@@ -1069,6 +1109,7 @@ func collectParameterStats(result *model.Result) []parameterStat {
 		}
 	}
 	locations := map[string][]string{}
+	located := map[string]map[string]bool{}
 	for _, hit := range result.Params {
 		if hit.Name == "" {
 			continue
@@ -1079,10 +1120,26 @@ func collectParameterStats(result *model.Result) []parameterStat {
 			scenarios[hit.Name] = set
 		}
 		set[hit.Scenario] = true
-		if hit.Line > 0 && len(locations[hit.Name]) < 3 {
-			loc := hit.SourceURL
-			locations[hit.Name] = append(locations[hit.Name],
-				fmt.Sprintf("%s:%d", loc, hit.Line))
+		// Request-shaped hits (url_query / api_request / route_param) were
+		// already counted from the endpoints above, so re-adding them here
+		// would double the count. Code-shape hits have no endpoint row, so
+		// this is the only place that fills their count, hosts and extractor.
+		if codeShapeScenarios[hit.Scenario] {
+			add(hit.Name, hit.SourceURL, "ast", false, false)
+		}
+		// 来源 keeps the JS file the name was found in, one link per distinct
+		// file and no line number. hits without a located line (url_query)
+		// point at an API URL rather than a JS file, so they are skipped.
+		if hit.Line > 0 && hit.SourceURL != "" {
+			seen := located[hit.Name]
+			if seen == nil {
+				seen = map[string]bool{}
+				located[hit.Name] = seen
+			}
+			if !seen[hit.SourceURL] && len(locations[hit.Name]) < maxSourceLinks {
+				seen[hit.SourceURL] = true
+				locations[hit.Name] = append(locations[hit.Name], hit.SourceURL)
+			}
 		}
 	}
 
@@ -1106,7 +1163,6 @@ func collectParameterStats(result *model.Result) []parameterStat {
 		stat := stats[name]
 		row := parameterStat{
 			Name: name, Count: stat.count,
-			Example: stat.example, FirstSeen: stat.firstSeen,
 			Body: stat.body, Response: stat.response,
 			CodeLocs: locations[name],
 		}
@@ -1152,10 +1208,10 @@ func renderParameterReport(result *model.Result) (int, string, error) {
 		b.WriteString(`<option value="` + htmlEscape(host) + `">` + htmlEscape(host) + `</option>`)
 	}
 	b.WriteString(`</select></label>
-<label>搜索 <input type="search" id="param-search" placeholder="参数名或值..."></label>
+<label>搜索 <input type="search" id="param-search" placeholder="参数名、域名或来源..."></label>
 <span class="muted" id="param-count"></span>
 </div>
-<table id="param-table"><thead><tr><th style="width:180px">参数名</th><th style="width:190px">场景</th><th style="width:70px">次数</th><th style="width:220px">域名</th><th style="width:150px">提取方式</th><th style="width:240px">示例值</th><th>首次出现</th></tr></thead><tbody>`)
+<table id="param-table"><thead><tr><th style="width:160px">参数名</th><th style="width:200px">场景</th><th style="width:60px">次数</th><th style="width:200px">域名</th><th style="width:110px">提取方式</th><th>来源</th></tr></thead><tbody>`)
 	for _, row := range rows {
 		markers := ""
 		if row.Body {
@@ -1169,17 +1225,20 @@ func renderParameterReport(result *model.Result) (int, string, error) {
 			scenarioBadges.WriteString(
 				`<span class="sev scen">` + htmlEscape(model.ParamScenarioLabel(scenario)) + `</span> `)
 		}
-		codeLoc := ""
-		if len(row.CodeLocs) > 0 {
-			codeLoc = `<div class="muted">` + htmlEscape(row.CodeLocs[0]) + `</div>`
+		// The JS source location lives in its own column, not under the name:
+		// every code-shape hit contributes one source:line entry (capped
+		// upstream), each on its own line.
+		var sourceLocs strings.Builder
+		for _, loc := range row.CodeLocs {
+			sourceLocs.WriteString(`<div><code>` + htmlEscape(loc) + `</code></div>`)
 		}
 		fmt.Fprintf(&b,
-			"<tr data-hosts=%q><td><code>%s</code>%s</td><td>%s</td><td>%d</td><td class=\"muted\">%s</td><td>%s</td><td><code>%s</code></td><td><code>%s</code></td></tr>",
-			strings.Join(row.Hosts, " "), htmlEscape(row.Name), codeLoc,
+			"<tr data-hosts=%q><td><code>%s</code>%s</td><td>%s</td><td>%d</td><td class=\"muted\">%s</td><td>%s</td><td>%s</td></tr>",
+			strings.Join(row.Hosts, " "), htmlEscape(row.Name), markers,
 			scenarioBadges.String(),
 			row.Count, htmlEscape(strings.Join(row.Hosts, ", ")),
 			htmlEscape(strings.Join(row.Sources, ", ")),
-			htmlEscape(row.Example), htmlEscape(row.FirstSeen))
+			sourceLocs.String())
 	}
 	b.WriteString(`</tbody></table>
 <script>
@@ -1268,6 +1327,8 @@ func extractorLabel(source string) string {
 		return "AST"
 	case "regex":
 		return "正则"
+	case "prefix":
+		return "前缀拼接"
 	}
 	if source == "" {
 		return "—"
@@ -1287,6 +1348,357 @@ func renderResourceReport(result *model.Result) (int, string, error) {
 	}
 	b.WriteString("</tbody></table>")
 	return len(resources), b.String(), nil
+}
+
+// hostReportEvidence is one evidence entry with the population it came from.
+type hostReportEvidence struct {
+	source model.HostEvidence
+	origin string
+}
+
+// hostReportRow merges one host as seen in both populations.
+type hostReportRow struct {
+	asset    model.HostAsset
+	origins  []string
+	evidence []hostReportEvidence
+}
+
+// renderHostReport lists the discovered host assets, grouped by kind. It reads
+// the classification the scan already computed — the same one the interactive
+// report and the plain-text lists use — so every output agrees on what is a
+// domain, an address or an internal-host candidate.
+func renderHostReport(result *model.Result) (int, string, error) {
+	index := map[string]*hostReportRow{}
+	order := make([]string, 0, len(result.Hosts)+8)
+	add := func(asset model.HostAsset) {
+		if asset.Value == "" {
+			return
+		}
+		// Host values are validated LDH text, so "|" cannot appear in one and
+		// is safe as a composite key separator.
+		key := string(asset.Kind) + "|" + asset.Value
+		entry, exists := index[key]
+		if !exists {
+			entry = &hostReportRow{asset: asset}
+			entry.asset.Sources = nil
+			index[key] = entry
+			order = append(order, key)
+		}
+		origin := "内容发现"
+		if asset.Origin == model.HostOriginScan {
+			origin = "扫描关联"
+		}
+		known := false
+		for _, existing := range entry.origins {
+			if existing == origin {
+				known = true
+			}
+		}
+		if !known {
+			entry.origins = append(entry.origins, origin)
+		}
+		entry.asset.Occurrences += asset.Occurrences
+		entry.asset.Vendor = entry.asset.Vendor && asset.Vendor
+		if entry.asset.Zone == "" {
+			entry.asset.Zone = asset.Zone
+		}
+		if len(entry.asset.Attributes) == 0 {
+			entry.asset.Attributes = asset.Attributes
+		}
+		for _, source := range asset.Sources {
+			entry.evidence = append(entry.evidence, hostReportEvidence{source: source, origin: origin})
+		}
+	}
+	for _, asset := range result.Hosts {
+		add(asset)
+	}
+	for _, asset := range ensureScanHosts(result) {
+		add(asset)
+	}
+
+	rows := make([]*hostReportRow, 0, len(order))
+	for _, key := range order {
+		rows = append(rows, index[key])
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		left, right := rows[i].asset, rows[j].asset
+		if left.Kind != right.Kind {
+			return hostKindRank(left.Kind) < hostKindRank(right.Kind)
+		}
+		return left.Value < right.Value
+	})
+
+	summary := buildHostSummary(result, newHostIndex(nil))
+
+	var b strings.Builder
+	b.WriteString(`<div class="filterbar"><span class="muted">`)
+	b.WriteString(htmlEscape(
+		"本页列出本次扫描发现的主机资产：域名、IPv4、IPv6 与内部主机候选。" +
+			"“内容发现”指出现在被分析内容（JavaScript、内联脚本、文档、source map）中的主机值；" +
+			"“扫描关联”指本次扫描实际访问或被引用对象所属主机（目标、资源、端点、发现来源）。" +
+			"两类使用同一套归一化与公共后缀分类规则，分别计数、不合并汇总。" +
+			"提取不执行目标代码、不做 DNS 查询、不做连通性探测：出现在本页不代表主机可访问或存在漏洞；" +
+			"内部主机候选不计入域名统计。",
+	))
+	b.WriteString(`</span></div>`)
+
+	b.WriteString(`<h2 class="section-title">主机类型统计</h2><table><thead><tr>` +
+		`<th style="width:220px">类型</th><th style="width:160px">内容发现</th>` +
+		`<th style="width:160px">扫描关联</th></tr></thead><tbody>`)
+	for _, metric := range summary.Metrics {
+		fmt.Fprintf(&b, "<tr><td>%s</td><td>%d</td><td>%d</td></tr>",
+			htmlEscape(metric.Label), metric.Content, metric.Scan)
+	}
+	fmt.Fprintf(&b, "<tr><td>合计（去重前）</td><td>%d</td><td>%d</td></tr>"+
+		"<tr><td>两类重合主机</td><td colspan=\"2\">%d</td></tr></tbody></table>",
+		summary.ContentTotal, summary.ScanTotal, summary.Correlated)
+	if unresolved := unresolvedReferenceCount(result); unresolved > 0 {
+		fmt.Fprintf(&b, `<p class="muted">另有 %d 条扫描引用（端点、资源或发现来源）无法解析出主机，`+
+			`通常是相对路径；它们不归属目标域名，也不计入上面的主机统计。</p>`, unresolved)
+	}
+
+	currentKind := model.HostKind("")
+	for _, entry := range rows {
+		asset := entry.asset
+		if asset.Kind != currentKind {
+			if currentKind != "" {
+				b.WriteString(`</tbody></table>`)
+			}
+			currentKind = asset.Kind
+			fmt.Fprintf(&b, `<h2 class="section-title">%s（%d）</h2>`+
+				`<table class="paginated" data-page-size="50"><thead><tr>`+
+				`<th>主机</th><th style="width:170px">可注册域</th>`+
+				`<th style="width:120px">公共后缀</th><th style="width:100px">子域</th>`+
+				`<th style="width:130px">后缀状态</th><th style="width:150px">地址属性</th>`+
+				`<th style="width:90px">出现次数</th><th style="width:130px">数据来源</th>`+
+				`<th style="width:80px">来源数</th><th style="width:280px">首个来源位置</th>`+
+				`</tr></thead><tbody>`,
+				htmlEscape(hostKindLabel(string(asset.Kind))), rowsForKind(rows, asset.Kind))
+		}
+		b.WriteString("<tr>")
+		fmt.Fprintf(&b, `<td><code>%s</code><button class="copy-btn" data-copy="%s">复制</button>`,
+			htmlEscape(asset.Value), htmlEscape(asset.Value))
+		if asset.Zone != "" {
+			fmt.Fprintf(&b, `<div class="muted">区域: %s</div>`, htmlEscape(asset.Zone))
+		}
+		if asset.Vendor {
+			b.WriteString(` <span class="sev vendor">vendor</span>`)
+		}
+		b.WriteString("</td>")
+		fmt.Fprintf(&b, "<td><code>%s</code></td>", htmlEscape(asset.RegistrableDomain))
+		fmt.Fprintf(&b, "<td><code>%s</code></td>", htmlEscape(asset.PublicSuffix))
+		fmt.Fprintf(&b, "<td><code>%s</code></td>", htmlEscape(asset.Subdomain))
+		fmt.Fprintf(&b, "<td>%s</td>", htmlEscape(hostSuffixStatusLabel(asset.SuffixStatus)))
+		attributes := make([]string, 0, len(asset.Attributes))
+		for _, attribute := range asset.Attributes {
+			attributes = append(attributes, hostAttributeLabel(attribute))
+		}
+		fmt.Fprintf(&b, `<td class="muted">%s</td>`, htmlEscape(strings.Join(attributes, ", ")))
+		fmt.Fprintf(&b, "<td>%d</td>", asset.Occurrences)
+		fmt.Fprintf(&b, `<td class="muted">%s</td>`, htmlEscape(strings.Join(entry.origins, " / ")))
+		fmt.Fprintf(&b, "<td>%d</td>", len(entry.evidence))
+		b.WriteString("<td>")
+		if len(entry.evidence) == 0 {
+			b.WriteString(`<span class="muted">无来源记录</span>`)
+		} else {
+			first := entry.evidence[0]
+			location := first.source.SourceURL
+			if first.source.Line > 0 {
+				location = fmt.Sprintf("%s:%d:%d", location, first.source.Line, first.source.Column)
+			}
+			fmt.Fprintf(&b, "<code>%s</code>", htmlEscape(location))
+			fmt.Fprintf(&b, `<div class="muted">%s · %s%s</div>`,
+				htmlEscape(hostMethodLabel(first.source.Method)),
+				htmlEscape(first.origin),
+				htmlEscape(hostNoteSuffix(first.source.Note)))
+			if first.source.Raw != "" && first.source.Raw != asset.Value {
+				fmt.Fprintf(&b, `<div class="muted">原始值: <code>%s</code></div>`,
+					htmlEscape(first.source.Raw))
+			}
+			if len(first.source.ContextLines) > 0 {
+				b.WriteString(renderContextBlock(first.source.ContextLines, first.source.Raw, asset.Value))
+			}
+			if len(entry.evidence) > 1 {
+				fmt.Fprintf(&b, `<details class="ctx"><summary>其余 %d 条来源</summary><pre>`,
+					len(entry.evidence)-1)
+				for _, extra := range entry.evidence[1:] {
+					source := extra.source
+					line := source.SourceURL
+					if source.Line > 0 {
+						line = fmt.Sprintf("%s:%d:%d", line, source.Line, source.Column)
+					}
+					fmt.Fprintf(&b, "%s  [%s · %s%s]\n", htmlEscape(line),
+						htmlEscape(hostMethodLabel(source.Method)),
+						htmlEscape(extra.origin), htmlEscape(hostNoteSuffix(source.Note)))
+				}
+				b.WriteString("</pre></details>")
+			}
+		}
+		b.WriteString("</td></tr>")
+	}
+	if currentKind != "" {
+		b.WriteString(`</tbody></table>`)
+	}
+	if len(rows) == 0 {
+		b.WriteString(`<p class="muted">本次未发现主机。</p>`)
+	}
+	b.WriteString(`<h2 class="section-title">统计口径与限制</h2><ul class="muted">`)
+	for _, note := range summary.Notes {
+		fmt.Fprintf(&b, "<li>%s</li>", htmlEscape(note))
+	}
+	if summary.PSLVersion != "" {
+		status := "正常"
+		if summary.PSLStatus != "ok" {
+			status = "未解析（域名层级未计算）"
+		}
+		fmt.Fprintf(&b, "<li>公共后缀列表快照：%s（%s），状态 %s</li>",
+			htmlEscape(summary.PSLVersion), htmlEscape(summary.PSLCommit), htmlEscape(status))
+	}
+	b.WriteString("</ul>")
+	return len(rows), b.String(), nil
+}
+
+// unresolvedReferenceCount counts the scan references that carry no host at
+// all, so the page can say how much of the scan is not represented in a host
+// list instead of silently omitting it.
+func unresolvedReferenceCount(result *model.Result) int {
+	count := 0
+	seen := map[string]bool{}
+	note := func(raw string) {
+		if raw == "" || seen[raw] {
+			return
+		}
+		seen[raw] = true
+		if hostOf(raw) == "" {
+			count++
+		}
+	}
+	for _, endpoint := range result.Endpoints {
+		note(endpointKey(endpoint))
+	}
+	for _, resource := range result.Resources {
+		note(resource.URL)
+	}
+	for _, finding := range result.Findings {
+		note(finding.SourceURL)
+	}
+	return count
+}
+
+// rowsForKind counts the rows one kind contributes, for its section heading.
+func rowsForKind(rows []*hostReportRow, kind model.HostKind) int {
+	count := 0
+	for _, entry := range rows {
+		if entry.asset.Kind == kind {
+			count++
+		}
+	}
+	return count
+}
+
+// hostKindRank fixes the section order: domains first, then addresses, then
+// internal-host candidates.
+func hostKindRank(kind model.HostKind) int {
+	switch kind {
+	case model.HostKindDomain:
+		return 0
+	case model.HostKindIPv4:
+		return 1
+	case model.HostKindIPv6:
+		return 2
+	case model.HostKindInternal:
+		return 3
+	}
+	return 4
+}
+
+// hostSuffixStatusLabel renders the suffix resolution outcome for readers.
+func hostSuffixStatusLabel(status string) string {
+	switch status {
+	case model.SuffixRecognized:
+		return "已识别后缀"
+	case model.SuffixCustom:
+		return "自定义/保留后缀"
+	case model.SuffixUnknown:
+		return "无后缀规则"
+	case model.SuffixUnresolved:
+		return "层级未解析"
+	case model.SuffixNotApplicable:
+		return "不适用"
+	}
+	return status
+}
+
+// hostAttributeLabel renders one address attribute. The wording never claims
+// reachability: an unclassified address is simply not classified.
+func hostAttributeLabel(attribute string) string {
+	switch attribute {
+	case model.HostAttrPrivate:
+		return "私网"
+	case model.HostAttrLoopback:
+		return "回环"
+	case model.HostAttrLinkLocal:
+		return "链路本地"
+	case model.HostAttrMulticast:
+		return "组播"
+	case model.HostAttrUnspecified:
+		return "未指定"
+	case model.HostAttrUnclassified:
+		return "未分类（未判定可达性）"
+	}
+	return attribute
+}
+
+// hostMethodLabel renders how one host value was recovered.
+func hostMethodLabel(method string) string {
+	switch method {
+	case model.HostMethodURL:
+		return "URL 解析"
+	case model.HostMethodASTLiteral:
+		return "AST 字面量"
+	case model.HostMethodStaticExpression:
+		return "静态表达式"
+	case model.HostMethodRegex:
+		return "正则兜底"
+	}
+	return method
+}
+
+// hostNoteLabel renders the notes attached to one evidence entry.
+func hostNoteLabel(note string) string {
+	labels := map[string]string{
+		extract.HostRoleTarget:        "扫描目标",
+		extract.HostRoleResource:      "资源",
+		extract.HostRoleEndpoint:      "端点",
+		extract.HostRoleEndpointFrom:  "端点来源",
+		extract.HostRoleFindingSource: "发现来源",
+		"email_domain":                "邮箱域名",
+		"comment":                     "注释",
+		"dynamic_host":                "动态表达式",
+		"reserved":                    "保留/特殊用途",
+		"public_suffix_only":          "公共后缀本身",
+	}
+	rendered := make([]string, 0, 4)
+	for _, part := range strings.Split(note, ",") {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		if label, ok := labels[trimmed]; ok {
+			rendered = append(rendered, label)
+			continue
+		}
+		rendered = append(rendered, trimmed)
+	}
+	return strings.Join(rendered, "、")
+}
+
+// hostNoteSuffix renders a note as an inline suffix, empty when there is none.
+func hostNoteSuffix(note string) string {
+	if strings.TrimSpace(note) == "" {
+		return ""
+	}
+	return " · " + hostNoteLabel(note)
 }
 
 func evidenceClass(evidence string) string {

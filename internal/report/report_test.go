@@ -495,11 +495,14 @@ func TestParameterReportMarksScenarios(t *testing.T) {
 	for _, want := range []string{
 		"userId", "apiKey", "q",
 		"对象属性", "变量赋值", "URL参数",
-		"app.js:7",
+		"app.js",
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("parameter report missing %q", want)
 		}
+	}
+	if strings.Contains(html, "app.js:") {
+		t.Fatalf("来源 column should link the JS file without a line suffix")
 	}
 	// The plain-text list carries code-shape names too.
 	if err := WriteTextReports(directory, result); err != nil {
@@ -512,6 +515,76 @@ func TestParameterReportMarksScenarios(t *testing.T) {
 	for _, want := range []string{"userId", "apiKey", "q"} {
 		if !strings.Contains(string(text), want) {
 			t.Fatalf("参数.txt missing %q", want)
+		}
+	}
+}
+
+// TestParameterReportFillsCodeShapeColumns guards the fix for code-shape-only
+// rows, whose 次数 / 域名 / 提取方式 cells used to render empty because the
+// inventory pass never fed them through the aggregator.
+func TestParameterReportFillsCodeShapeColumns(t *testing.T) {
+	result := sampleResult()
+	result.Params = []model.ParamHit{
+		{
+			Name: "userId", Scenario: model.ParamScenarioObjectProperty,
+			SourceURL: "https://app.example.test/static/app.js", Line: 12,
+		},
+		// Same file, another line: must not add a second 来源 link.
+		{
+			Name: "userId", Scenario: model.ParamScenarioFunctionParam,
+			SourceURL: "https://app.example.test/static/app.js", Line: 40,
+		},
+		// A different file is a distinct source and is listed too.
+		{
+			Name: "userId", Scenario: model.ParamScenarioDestructuring,
+			SourceURL: "https://cdn.example.test/vendor.js", Line: 5,
+		},
+	}
+	directory := t.TempDir()
+	if err := WriteSplitReports(directory, result); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(directory, "参数报告.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(data)
+
+	// The code-shape hit now contributes its host and extractor, so the row is
+	// no longer blank in those columns. 来源 holds the plain JS link, no line.
+	for _, want := range []string{"app.example.test", "ast", "app.example.test/static/app.js"} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("parameter report missing %q for code-shape row", want)
+		}
+	}
+	if strings.Contains(html, "app.example.test/static/app.js:12") {
+		t.Fatalf("来源 column should not carry the line number")
+	}
+	// One link per distinct file: the same file wired twice stays a single
+	// link, while a second file is listed as its own source.
+	if got := strings.Count(html, `<code>https://app.example.test/static/app.js</code>`); got != 1 {
+		t.Fatalf("same-file sources not deduplicated: %d links", got)
+	}
+	if !strings.Contains(html, `<code>https://cdn.example.test/vendor.js</code>`) {
+		t.Fatalf("second JS file missing from 来源 column")
+	}
+	// The header carries exactly the six kept columns, including the split-out
+	// 来源 column.
+	header := `<th style="width:160px">参数名</th><th style="width:200px">场景</th><th style="width:60px">次数</th><th style="width:200px">域名</th><th style="width:110px">提取方式</th><th>来源</th>`
+	if !strings.Contains(html, header) {
+		t.Fatalf("parameter report header changed unexpectedly")
+	}
+	// The JS location moved out of the name cell into the 来源 column.
+	if !strings.Contains(html, `<td><code>userId</code></td>`) {
+		t.Fatalf("param name cell should hold the bare name, no JS location")
+	}
+	if strings.Contains(html, `<code>userId</code><div`) {
+		t.Fatalf("JS location still appended under the param name")
+	}
+	// The 示例值 and 首次出现 columns were removed.
+	for _, unwanted := range []string{"示例值", "首次出现"} {
+		if strings.Contains(html, unwanted) {
+			t.Fatalf("parameter report still contains removed column %q", unwanted)
 		}
 	}
 }

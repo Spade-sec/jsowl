@@ -22,6 +22,9 @@ func WriteTextReports(directory string, result *model.Result) error {
 		{"api相对路径.txt", func() []byte { return renderAPIRelative(result) }},
 		{"url.txt", func() []byte { return renderURLs(result) }},
 		{"参数.txt", func() []byte { return renderParameters(result) }},
+		{"domain.txt", func() []byte { return renderHostValues(result, model.HostKindDomain) }},
+		{"ip.txt", func() []byte { return renderHostValues(result, model.HostKindIPv4, model.HostKindIPv6) }},
+		{"internal_hosts.txt", func() []byte { return renderHostValues(result, model.HostKindInternal) }},
 		{"敏感信息.txt", func() []byte { return renderSensitive(result) }},
 		{"路由.txt", func() []byte { return renderRoutes(result) }},
 	}
@@ -160,47 +163,11 @@ func renderRoutes(result *model.Result) []byte {
 }
 
 // renderParameters lists every unique query or body parameter name, one per
-// line, with no values or annotations so the file can feed tools directly.
+// line, with no values or annotations so the file can feed tools directly. It
+// shares collectParameterNames with the report summary so the two agree.
 func renderParameters(result *model.Result) []byte {
-	params := map[string]struct{}{}
-	collect := func(raw string) {
-		if raw == "" {
-			return
-		}
-		parsed, err := url.Parse(raw)
-		if err != nil {
-			return
-		}
-		for key := range parsed.Query() {
-			params[key] = struct{}{}
-		}
-	}
-	for _, endpoint := range result.Endpoints {
-		collect(endpoint.URL)
-		for _, name := range endpoint.BodyParams {
-			params[name] = struct{}{}
-		}
-		for _, name := range endpoint.ResponseParams {
-			params[name] = struct{}{}
-		}
-	}
-	for _, resource := range result.Resources {
-		collect(resource.URL)
-	}
-	// Code-shape hits (object properties, destructuring, function params, ...)
-	// join the list so the plain-text file feeds tools the full inventory.
-	for _, hit := range result.Params {
-		if hit.Name != "" {
-			params[hit.Name] = struct{}{}
-		}
-	}
-	names := make([]string, 0, len(params))
-	for name := range params {
-		names = append(names, name)
-	}
-	sort.Strings(names)
 	var out strings.Builder
-	for _, name := range names {
+	for _, name := range collectParameterNames(result) {
 		out.WriteString(name + "\n")
 	}
 	return []byte(out.String())
@@ -227,4 +194,56 @@ func renderSensitive(result *model.Result) []byte {
 		return append(out, []byte("（未发现敏感信息）\n")...)
 	}
 	return out
+}
+
+// renderHostValues writes the normalized, deduplicated values of the requested
+// host kinds, one per line: the union of the hosts found in content and the
+// hosts the scan touched. Values are exactly what the report and the JSON
+// carry, so a tool consuming the list sees the same identity the report does.
+func renderHostValues(result *model.Result, kinds ...model.HostKind) []byte {
+	wanted := make(map[model.HostKind]struct{}, len(kinds))
+	for _, kind := range kinds {
+		wanted[kind] = struct{}{}
+	}
+	seen := make(map[string]struct{})
+	var values []string
+	collect := func(assets []model.HostAsset) {
+		for _, asset := range assets {
+			if _, ok := wanted[asset.Kind]; !ok {
+				continue
+			}
+			if asset.Value == "" {
+				continue
+			}
+			if _, duplicate := seen[asset.Value]; duplicate {
+				continue
+			}
+			seen[asset.Value] = struct{}{}
+			values = append(values, asset.Value)
+		}
+	}
+	collect(result.Hosts)
+	collect(ensureScanHosts(result))
+	sort.Strings(values)
+
+	title := hostValuesTitle(kinds)
+	out := textHeader(title, result.Target)
+	for _, value := range values {
+		out = append(out, []byte(value+"\n")...)
+	}
+	if len(values) == 0 {
+		return append(out, []byte("（本次未发现"+title+"）\n")...)
+	}
+	return out
+}
+
+func hostValuesTitle(kinds []model.HostKind) string {
+	switch {
+	case len(kinds) == 1 && kinds[0] == model.HostKindDomain:
+		return "域名"
+	case len(kinds) == 1 && kinds[0] == model.HostKindInternal:
+		return "内部主机候选"
+	default:
+		return "IP 地址"
+	}
 }

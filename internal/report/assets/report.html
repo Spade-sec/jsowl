@@ -1,742 +1,660 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>JsOwl 安全信息收集报告</title>
-  <style>
-    :root{
-      color-scheme:light;
-      --bg:#f5f6f8;
-      --panel:#ffffff;
-      --line:#e4e7ec;
-      --text:#1f2329;
-      --muted:#8a919c;
-      --accent:#2f6fed;
-      --accent-soft:#eaf1fe;
-      --warn:#b7791f;
-      --warn-soft:#fdf3e3;
-      --danger:#d64545;
-      --danger-soft:#fdecec;
-      --success:#2f9e6e;
-      --success-soft:#e6f6ef;
-      --info:#8a919c;
-      --info-soft:#f0f1f3;
-    }
-    *{box-sizing:border-box}
-    body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;height:100vh;display:flex;overflow:hidden}
-    button{font:inherit;cursor:pointer}
-    a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
-    code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>JsOwl 安全信息收集报告</title>
+<style>
+  :root{
+    color-scheme:light;
+    --bg:#f4f6f9;
+    --panel:#ffffff;
+    --line:#e2e6ec;
+    --line-soft:#eef1f5;
+    --text:#1c222b;
+    --muted:#6d7683;
+    --accent:#1d4ed8;
+    --accent-dark:#16357f;
+    --accent-soft:#eaf0fe;
+    --critical:#a3291f;
+    --critical-soft:#f9e6e4;
+    --high:#d64545;
+    --high-soft:#fdecec;
+    --medium:#b7791f;
+    --medium-soft:#fdf4e3;
+    --low:#2f6fed;
+    --low-soft:#eaf1fe;
+    --info:#6d7683;
+    --info-soft:#f0f2f5;
+    --ok:#2f9e6e;
+    --ok-soft:#e8f6f0;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  h1,h2,h3{line-height:1.3}
+  a{color:var(--accent)}
+  button{font:inherit;cursor:pointer}
+  code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12.5px}
 
-    .app{display:flex;width:100%;height:100%}
-    .sidebar{order:2;flex:0 0 340px;max-width:45vw;background:var(--panel);border-left:1px solid var(--line);display:flex;flex-direction:column;transition:flex-basis .2s,opacity .2s}
-    .sidebar.collapsed{flex:0 0 0;opacity:0;overflow:hidden;border-left:none}
-    .sidebar-header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
-    .sidebar-header h3{margin:0;font-size:15px;font-weight:600}
-    .tree-toggle,.icon-button{width:28px;height:28px;background:var(--panel);border:1px solid var(--line);border-radius:6px;color:var(--muted);display:flex;align-items:center;justify-content:center}
-    .tree-toggle:hover,.icon-button:hover{border-color:var(--accent);color:var(--accent)}
-    .tree-panel{flex:1;overflow:auto;padding:12px}
+  /* ----------------------------------------------------------- shell */
+  .topbar{position:sticky;top:0;z-index:20;background:var(--panel);border-bottom:1px solid var(--line)}
+  .topbar-main{display:flex;align-items:center;gap:14px;padding:10px 18px;flex-wrap:wrap}
+  .report-title{margin:0;font-size:16px;font-weight:600}
+  .badge-warn{font-size:12px;padding:4px 9px;border:1px solid #efd9a9;background:var(--medium-soft);color:var(--medium);border-radius:999px}
+  .topbar-meta{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-left:auto;align-items:center}
+  .topbar-meta code{background:var(--bg);padding:1px 6px;border-radius:4px;word-break:break-all}
+  .topbar-actions{display:flex;align-items:center;gap:8px}
+  .btn{background:var(--accent);border:1px solid var(--accent);color:#fff;border-radius:8px;padding:6px 12px;font-size:13px}
+  .btn:hover{background:var(--accent-dark);border-color:var(--accent-dark)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn-ghost{background:var(--panel);border:1px solid var(--line);color:var(--text)}
+  .btn-ghost:hover{border-color:var(--accent);color:var(--accent);background:var(--panel)}
+  .print-scope{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+  .print-scope select{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12px;color:var(--text)}
 
-    .tree-node{user-select:none}
-    .tree-row{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:6px;cursor:pointer}
-    .tree-row:hover{background:var(--accent-soft)}
-    .tree-row.active{background:var(--accent-soft)}
-    .tree-caret{width:14px;height:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);transition:transform .15s;flex-shrink:0}
-    .tree-caret.collapsed{transform:rotate(-90deg)}
-    .tree-caret.leaf{visibility:hidden}
-    .tree-icon{font-size:13px;flex-shrink:0;color:var(--muted)}
-    .tree-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)}
-    .tree-label.muted{color:var(--muted)}
-    .tree-children{padding-left:18px;display:none}
-    .tree-children.open{display:block}
-    .tree-count{font-size:11px;color:var(--muted);background:var(--bg);padding:1px 6px;border-radius:10px;margin-left:auto;flex-shrink:0}
+  .mainnav{position:sticky;top:0;z-index:19;display:flex;gap:4px;padding:0 18px;background:var(--panel);border-bottom:1px solid var(--line);overflow-x:auto}
+  .mainnav button{background:none;border:none;border-bottom:2px solid transparent;padding:10px 12px;color:var(--muted);font-size:13.5px;white-space:nowrap}
+  .mainnav button:hover{color:var(--accent)}
+  .mainnav button.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
 
-    .main{order:1;flex:1;display:flex;flex-direction:column;min-width:0}
-    .topbar{position:sticky;top:0;z-index:10;background:var(--panel);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:12px;justify-content:space-between}
-    .topbar-left{display:flex;align-items:center;gap:12px}
-    .topbar-right{display:flex;align-items:center;gap:12px;min-width:0}
-    .report-title{margin:0;font-size:17px;font-weight:600}
-    .warning{font-size:12px;padding:6px 10px;border:1px solid #f0d9a8;background:var(--warn-soft);color:var(--warn);border-radius:8px}
-    .content{flex:1;overflow:auto;padding:20px}
+  .layout{display:flex;align-items:flex-start;gap:0}
+  .tree-rail{flex:0 0 300px;max-width:34vw;position:sticky;top:92px;max-height:calc(100vh - 92px);overflow:auto;background:var(--panel);border-right:1px solid var(--line);padding:12px}
+  .tree-rail.collapsed{display:none}
+  .rail-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+  .rail-head h2{margin:0;font-size:13px;color:var(--muted);font-weight:600}
+  .content{flex:1;min-width:0;padding:18px;display:block}
 
-    .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
-    .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px}
-    .card .number{font-size:26px;color:var(--accent);font-weight:600}
-    .card .label{font-size:12px;color:var(--muted);margin-top:4px}
-    .meta{color:var(--muted);font-size:12px;margin-bottom:12px}
-    .topbar .meta{margin-bottom:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  /* ------------------------------------------------------- tree panel */
+  .tree-row{display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:6px;cursor:pointer;font-size:13px}
+  .tree-row:hover,.tree-row.active{background:var(--accent-soft)}
+  .tree-caret{width:12px;color:var(--muted);flex:none;font-size:10px;transition:transform .12s}
+  .tree-caret.collapsed{transform:rotate(-90deg)}
+  .tree-caret.leaf{visibility:hidden}
+  .tree-icon{color:var(--muted);font-size:12px}
+  .tree-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tree-count{margin-left:auto;font-size:11px;color:var(--muted);background:var(--bg);border-radius:999px;padding:0 6px}
+  .tree-children{padding-left:14px;display:none}
+  .tree-children.open{display:block}
 
-    .toolbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
-    .toolbar label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
-    .toolbar select{background:var(--panel);color:var(--text);border:1px solid var(--line);padding:6px 8px;border-radius:8px;min-width:110px}
-    .toolbar input[type="search"]{background:var(--panel);color:var(--text);border:1px solid var(--line);padding:6px 10px;border-radius:8px;min-width:180px}
-    .toolbar .count{margin-left:auto;color:var(--muted);font-size:12px}
+  /* -------------------------------------------------------- overview */
+  .section{margin-bottom:22px}
+  .section-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+  .section-head h2{margin:0;font-size:15px}
+  .section-head .hint{font-size:12px;color:var(--muted)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:12px}
+  .card-label{font-size:12px;color:var(--muted);margin-bottom:4px}
+  .card-value{font-size:24px;font-weight:600;color:var(--accent)}
+  .card-sub{font-size:11.5px;color:var(--muted);margin-top:2px}
+  .card-note{margin-top:8px;font-size:11.5px}
+  .card-note summary{cursor:pointer;color:var(--accent);list-style:none}
+  .card-note summary::-webkit-details-marker{display:none}
+  .card-note summary::before{content:"▸ ";}
+  .card-note[open] summary::before{content:"▾ ";}
+  .severity-card .card-value{color:var(--text)}
+  .severity-card.sev-critical,.severity-card.sev-high{border-left:3px solid var(--critical)}
+  .severity-card.sev-medium{border-left:3px solid var(--medium)}
+  .severity-card.sev-low{border-left:3px solid var(--low)}
+  .severity-card.sev-info{border-left:3px solid var(--info)}
 
-    .table-wrap{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:auto}
-    table{width:100%;border-collapse:collapse;min-width:900px}
-    th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
-    th{background:#fafbfc;font-size:12px;color:var(--muted);font-weight:500;position:sticky;top:0;z-index:5}
-    tbody tr{cursor:pointer;transition:background .1s}
-    tbody tr:hover{background:#f8f9fb}
-    tbody tr.expanded{background:var(--accent-soft)}
-    tbody tr.hidden-row{display:none}
-    td{font-size:13px}
-    .severity{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;text-transform:uppercase}
-    .severity.critical{background:var(--danger-soft);color:var(--danger)}
-    .severity.high{background:var(--danger-soft);color:var(--danger)}
-    .severity.medium{background:var(--warn-soft);color:var(--warn)}
-    .severity.low{background:var(--accent-soft);color:var(--accent)}
-    .severity.info{background:var(--info-soft);color:var(--info)}
-    .method-tag{display:inline-block;padding:1px 8px;border-radius:6px;font-size:11px;font-weight:700}
-    .method-tag.get{background:var(--accent-soft);color:var(--accent)}
-    .method-tag.post{background:var(--success-soft);color:var(--success)}
-    .method-tag.put{background:#f3e8fd;color:#8b5cf6}
-    .method-tag.delete{background:var(--danger-soft);color:var(--danger)}
-    .method-tag.patch{background:var(--warn-soft);color:var(--warn)}
-    .rule-name{font-weight:500}
-    .rule-id{font-size:11px;color:var(--muted)}
-    .value-cell{max-width:300px;word-break:break-all}
-    .value-cell code{background:var(--bg);padding:2px 6px;border-radius:4px;font-size:12px}
-    .source-cell{max-width:260px;word-break:break-all;color:var(--muted);font-size:12px}
-    .source-cell a{font-size:12px}
-    .loc{font-size:11px;color:var(--muted);margin-top:4px}
+  .split{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
+  .panel h3{margin:0 0 4px;font-size:13.5px}
+  .panel .hint{font-size:11.5px;color:var(--muted);margin:0 0 10px}
 
-    .context-row{background:var(--bg)}
-    .context-row td{padding:0}
-    .context-cell{padding:14px 16px;border-left:3px solid var(--accent)}
-    .context-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
-    .context-title{font-size:13px;font-weight:500;color:var(--accent)}
-    .context-close{background:var(--panel);border:1px solid var(--line);color:var(--muted);padding:4px 10px;border-radius:6px;font-size:12px}
-    .context-close:hover{color:var(--text);border-color:var(--accent)}
-    .context-code{margin:0;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;overflow:auto;white-space:pre}
-    .context-code .line{display:block;padding:0 4px}
-    .context-code .line-num{display:inline-block;width:36px;color:var(--muted);text-align:right;user-select:none;margin-right:12px;flex-shrink:0}
-    .context-code .line-content{word-break:break-all;white-space:pre-wrap}
-    .context-code mark{background:#fdeea8;color:#7a5d00;border-radius:3px;padding:0 2px}
-    .context-code .line.match{background:var(--warn-soft);border-radius:4px}
+  .chart-donut{display:block;margin:0 auto}
+  .donut-total{font-size:24px;font-weight:600;fill:var(--text)}
+  .donut-label{font-size:11px;fill:var(--muted)}
+  .chart-hit{cursor:pointer}
+  .chart-hit:focus{outline:2px solid var(--accent);outline-offset:1px}
+  .chart-legend{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:2px}
+  .legend-item{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;padding:3px 4px;border-radius:6px;text-align:left;font-size:12.5px;color:var(--text)}
+  .legend-item:hover{background:var(--accent-soft)}
+  .legend-swatch{width:10px;height:10px;border-radius:3px;flex:none}
+  .legend-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .legend-value{color:var(--muted);font-variant-numeric:tabular-nums}
+  .chart-empty{color:var(--muted);font-size:12.5px;margin:6px 0}
 
-    .pagination{display:flex;align-items:center;justify-content:center;gap:8px;padding:14px}
-    .pagination button{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:6px 12px;border-radius:8px;font-size:12px}
-    .pagination button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
-    .pagination button:disabled{opacity:.4;cursor:not-allowed}
-    .pagination .page-info{font-size:12px;color:var(--muted);min-width:120px;text-align:center}
-    .page-size{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
-    .page-size select{padding:4px 6px;border-radius:6px;background:var(--panel);color:var(--text);border:1px solid var(--line)}
+  .bar-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px}
+  .bar-row{display:flex;align-items:center;gap:8px;width:100%;background:none;border:none;padding:3px 4px;border-radius:6px;text-align:left;font-size:12.5px}
+  .bar-row:hover{background:var(--accent-soft)}
+  .bar-row:focus-visible,.legend-item:focus-visible,.tree-row:focus-visible,.link-button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .bar-label{flex:0 0 42%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bar-track{flex:1;height:9px;background:var(--line-soft);border-radius:999px;overflow:hidden;min-width:40px}
+  .bar-fill{display:block;height:100%;border-radius:999px}
+  .bar-value{flex:none;min-width:34px;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
 
-    .empty{padding:40px;text-align:center;color:var(--muted)}
-    .section{margin-bottom:24px}
-    .section h2{margin:0 0 12px;font-size:16px}
-    .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:12px;background:var(--panel);border:1px solid var(--line);font-size:12px;color:var(--muted);margin:0 6px 6px 0}
-    .pill button{background:none;border:none;color:var(--muted);padding:0;font-size:14px;line-height:1}
-    .pill button:hover{color:var(--danger)}
+  /* ---------------------------------------------------------- tables */
+  .table-wrap{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:auto}
+  table{width:100%;border-collapse:collapse}
+  .key-table{min-width:760px}
+  th,td{padding:8px 10px;border-bottom:1px solid var(--line-soft);text-align:left;vertical-align:top}
+  thead th{position:sticky;top:0;background:#f8fafc;color:var(--muted);font-size:11.5px;font-weight:600;z-index:2;cursor:pointer}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr.clickable-row{cursor:pointer}
+  tbody tr.clickable-row:hover{background:#f8fafc}
+  tbody tr.clickable-row:focus{outline:2px solid var(--accent);outline-offset:-2px}
+  td{font-size:12.5px}
+  .value-cell code,td code{background:var(--bg);padding:1px 5px;border-radius:4px;word-break:break-all}
+  .value-cell{max-width:420px}
+  .source-cell,.url-cell,.path-cell{word-break:break-all;max-width:340px}
+  .rule-name{font-weight:500}
+  .rule-id,.muted{color:var(--muted)}
+  .rule-id{font-size:11px}
+  .empty{padding:28px;text-align:center;color:var(--muted)}
 
-    .tabbar{display:flex;gap:8px;margin-bottom:12px;border-bottom:1px solid var(--line)}
-    .tab{padding:8px 14px;background:none;border:none;color:var(--muted);font-size:13px;border-bottom:2px solid transparent}
-    .tab:hover{color:var(--accent)}
-    .tab.active{color:var(--accent);border-bottom-color:var(--accent);font-weight:600}
-    .split-nav{display:flex;flex-wrap:wrap;gap:8px;padding:10px 12px;margin-bottom:12px;background:var(--panel);border:1px solid var(--line);border-radius:12px}
-    .split-nav a{color:var(--muted);text-decoration:none;padding:3px 10px;border:1px solid var(--line);border-radius:999px;font-size:12px;background:var(--bg)}
-    .split-nav a:hover{color:var(--accent);border-color:var(--accent)}
+  .sev{display:inline-block;padding:1px 7px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
+  .sev.critical{background:var(--critical-soft);color:var(--critical)}
+  .sev.high{background:var(--high-soft);color:var(--high)}
+  .sev.medium{background:var(--medium-soft);color:var(--medium)}
+  .sev.low{background:var(--low-soft);color:var(--low)}
+  .sev.info,.sev.static{background:var(--info-soft);color:var(--info)}
+  .sev.runtime{background:var(--ok-soft);color:var(--ok)}
+  .sev.vendor{background:var(--info-soft);color:var(--muted);border:1px dashed var(--line)}
+  .sev.pending{background:var(--medium-soft);color:var(--medium);font-weight:500}
+  .sev.ai-badge{background:var(--accent-soft);color:var(--accent)}
+  .method-tag{display:inline-block;padding:1px 7px;border-radius:5px;font-size:11px;font-weight:700;background:var(--info-soft);color:var(--info)}
+  .method-tag.get{background:var(--low-soft);color:var(--low)}
+  .method-tag.post{background:var(--ok-soft);color:var(--ok)}
+  .method-tag.put{background:#f3e8fd;color:#7c3aed}
+  .method-tag.patch{background:var(--medium-soft);color:var(--medium)}
+  .method-tag.delete{background:var(--high-soft);color:var(--high)}
+  .method-tag.unknown{background:var(--info-soft);color:var(--muted)}
 
-    .resource-table td,.resource-table th{font-size:12px}
-    .target-filter{display:none;margin-bottom:12px}
-    .target-filter.active{display:block}
+  /* ------------------------------------------------------- workbench */
+  .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px}
+  .toolbar label{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted)}
+  .toolbar select,.toolbar input[type=search]{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 8px;font-size:12.5px;max-width:220px}
+  .toolbar .spacer{flex:1}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+  .chip{display:inline-flex;align-items:center;gap:6px;background:var(--accent-soft);color:var(--accent-dark);border-radius:999px;padding:3px 4px 3px 10px;font-size:12px;max-width:100%}
+  .chip-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}
+  .chip-clear{background:none;border:none;color:var(--accent);font-size:14px;line-height:1;padding:0 4px}
+  .chip-reset{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:12px;color:var(--muted)}
+  .chip-reset:hover{border-color:var(--accent);color:var(--accent)}
+  .count{font-size:12.5px;color:var(--muted);margin:0 0 8px}
+  .pagination{display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0}
+  .pagination button{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:5px 12px;font-size:12.5px}
+  .pagination button:disabled{opacity:.45;cursor:not-allowed}
+  .pagination .page-info{font-size:12.5px;color:var(--muted)}
+  .note-list{margin:6px 0 0;padding-left:18px;font-size:12.5px;color:var(--muted)}
+  .note-list li{margin-bottom:4px}
+  .param-list{display:flex;flex-wrap:wrap;gap:6px;max-height:340px;overflow:auto}
+  .param-chip{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:2px 7px}
+  .link-button{background:none;border:none;color:var(--accent);padding:0;font-size:12.5px;text-decoration:underline}
+  .inline-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 
-    @media(max-width:900px){
-      .sidebar{position:absolute;right:0;top:0;bottom:0;z-index:20;flex:0 0 280px;max-width:85vw;box-shadow:-12px 0 30px rgba(0,0,0,.12)}
-      .cards{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
-    }
-  </style>
+  /* ---------------------------------------------------------- drawer */
+  .drawer{position:fixed;top:0;right:0;bottom:0;width:min(720px,94vw);background:var(--panel);border-left:1px solid var(--line);box-shadow:-14px 0 32px rgba(15,23,42,.14);transform:translateX(100%);transition:transform .18s ease;z-index:40;display:flex;flex-direction:column}
+  .drawer.open{transform:none}
+  .drawer-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--line)}
+  .drawer-head h2{margin:0;font-size:14px;flex:1;min-width:0;word-break:break-all}
+  .drawer-body{padding:14px 16px;overflow:auto;flex:1}
+  .drawer-meta{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  .drawer-section{border-top:1px solid var(--line-soft);padding-top:10px;margin-top:12px}
+  .drawer-section:first-child{border-top:none;margin-top:0;padding-top:0}
+  .drawer-section.ai-section{background:#f8faff;border-radius:8px;padding:10px 12px}
+  .drawer-section-title{margin:0 0 6px;font-size:12.5px;color:var(--muted);font-weight:600}
+  .drawer-row{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;margin:4px 0;font-size:12.5px;word-break:break-all}
+  .layer-note{font-size:11.5px;color:var(--muted);margin:0 0 6px}
+  .value-block{display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+  .value-pre,.packet-pre,.context-code{margin:0;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto;width:100%}
+  .copy-btn{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:3px 9px;font-size:11.5px;color:var(--muted)}
+  .copy-btn:hover{border-color:var(--accent);color:var(--accent)}
+  .source-entry{border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin-bottom:6px}
+  .source-entry summary{cursor:pointer;font-size:12.5px;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+  .source-index{color:var(--muted);flex:none}
+  .source-body{padding-top:8px}
+  .context-code .line{display:block}
+  .context-code .line-num{display:inline-block;width:38px;color:var(--muted);text-align:right;margin-right:10px;user-select:none}
+  .context-code mark{background:#fdeea8;color:#7a5d00;border-radius:3px}
+  .param-origin{background:var(--info-soft);color:var(--muted);border-radius:4px;padding:0 5px;font-size:11px}
+  .drawer-link{font-size:12.5px}
+
+  #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(16px);background:#111827;color:#fff;padding:9px 16px;border-radius:8px;font-size:12.5px;opacity:0;pointer-events:none;transition:opacity .16s,transform .16s;z-index:60;max-width:90vw}
+  #toast.visible{opacity:1;transform:translateX(-50%)}
+
+  /* --------------------------------------------------- print document */
+  .print-doc{display:none}
+
+  @media (max-width:960px){
+    .tree-rail{position:fixed;left:0;top:0;bottom:0;z-index:30;max-width:80vw;max-height:none;box-shadow:8px 0 24px rgba(15,23,42,.12)}
+    .bar-label{flex-basis:38%}
+  }
+
+  @page{size:A4;margin:14mm}
+  @media print{
+    body{background:#fff;font-size:10.5pt;color:#000}
+    .app,.topbar,.mainnav,#toast,.drawer{display:none !important}
+    .print-doc{display:block}
+    .print-doc h1{font-size:20pt;margin:0 0 6pt}
+    .print-doc h2{font-size:13pt;margin:16pt 0 6pt;border-bottom:1px solid #999;padding-bottom:2pt}
+    .print-doc h3{font-size:11.5pt;margin:10pt 0 4pt}
+    .print-doc p{margin:4pt 0}
+    .print-cover{page-break-after:always}
+    .print-cover .print-target{font-size:12pt;font-weight:600;word-break:break-all}
+    .print-warning{border:1px solid #999;padding:5pt 7pt;font-size:9.5pt}
+    .print-table{width:100%;border-collapse:collapse;margin:6pt 0}
+    .print-table th,.print-table td{border:1px solid #bbb;padding:3pt 5pt;font-size:9.5pt;word-break:break-all;vertical-align:top;text-align:left}
+    .print-table thead{display:table-header-group}
+    .print-table tr{page-break-inside:avoid}
+    .print-table-tight td:first-child,.print-table-tight td:nth-child(2){white-space:nowrap}
+    .print-meta{display:grid;grid-template-columns:auto 1fr;gap:2pt 10pt;margin:6pt 0;font-size:10pt}
+    .print-meta dt{font-weight:600}
+    .print-meta dd{margin:0;word-break:break-all}
+    .print-finding{page-break-inside:avoid;margin-bottom:12pt}
+    .print-value-label{font-weight:600;margin-bottom:2pt}
+    .print-value,.print-doc .context-code{white-space:pre-wrap;word-break:break-all;border:1px solid #bbb;background:#fafafa;padding:4pt 6pt;font:9pt/1.4 ui-monospace,Consolas,monospace;max-height:none}
+    .print-sources{margin:2pt 0 6pt;padding-left:16pt;font-size:9.5pt;word-break:break-all}
+    .print-doc a{color:#000;text-decoration:none}
+    .print-doc .line-num{display:inline-block;width:26pt;color:#555}
+  }
+</style>
 </head>
 <body>
-<div class="app">
-  <div class="main">
-    <div class="topbar">
-      <div class="topbar-left">
-        <h1 class="report-title">JsOwl 安全信息收集报告</h1>
-        <span class="warning">敏感数据，请妥善保管</span>
+<div class="app" id="app">
+  <header class="topbar">
+    <div class="topbar-main">
+      <h1 class="report-title">JsOwl 安全信息收集报告</h1>
+      <span class="badge-warn">含完整敏感数据，请妥善保管</span>
+      <div class="topbar-meta">
+        <span>目标 <code>{{.Result.Target}}</code></span>
+        <span>模式 {{.Summary.ModeLabel}}</span>
+        {{if .Summary.HasScanTime}}
+        <span>扫描 {{.Summary.StartedAt}} ~ {{.Summary.FinishedAt}}{{if .Summary.Duration}}（耗时 {{.Summary.Duration}}）{{end}}</span>
+        {{else}}
+        <span>扫描时间：本次结果未记录（未展示推算或伪造的耗时）</span>
+        {{end}}
+        <span>报告生成时间 {{.Summary.GeneratedAt}}</span>
       </div>
-      <div class="topbar-right">
-        <div class="meta">
-          <code>{{.Target}}</code> · {{.Mode}} · {{.UserAgent}}
-        </div>
-        <button class="icon-button" id="open-sidebar" title="展开目标面板">☰</button>
+      <div class="topbar-actions">
+        <label class="print-scope">打印范围
+          <select id="print-scope">
+            <option value="full">完整打印</option>
+            <option value="summary">精简打印（前 200 条聚合发现）</option>
+          </select>
+        </label>
+        <button type="button" class="btn" id="print-button">打印 / 保存 PDF</button>
       </div>
     </div>
+    <nav class="mainnav" role="tablist" aria-label="报告导航">
+      <button type="button" data-tab="overview" class="active" role="tab" aria-selected="true">报告总览</button>
+      <button type="button" data-tab="findings" role="tab" aria-selected="false">敏感发现</button>
+      <button type="button" data-tab="endpoints" role="tab" aria-selected="false">API 端点</button>
+      <button type="button" data-tab="hosts" role="tab" aria-selected="false">主机资产</button>
+      <button type="button" data-tab="routes" role="tab" aria-selected="false">路由与参数</button>
+      <button type="button" data-tab="resources" role="tab" aria-selected="false">资源</button>
+      <button type="button" data-tab="diagnostics" role="tab" aria-selected="false">扫描诊断</button>
+      <button type="button" data-tab="attachments" role="tab" aria-selected="false">报告附件</button>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="tree-rail" id="tree-rail" aria-label="目标树">
+      <div class="rail-head">
+        <h2>目标树（来源文件）</h2>
+        <button type="button" class="btn-ghost copy-btn" id="toggle-tree">收起</button>
+      </div>
+      <div class="tree-panel" id="tree-panel"></div>
+    </aside>
 
     <main class="content">
-      <div class="cards">
-        <div class="card"><div class="number">{{.Statistics.Resources}}</div><div class="label">资源</div></div>
-        <div class="card"><div class="number">{{.Statistics.Scripts}}</div><div class="label">脚本</div></div>
-        <div class="card"><div class="number">{{.Statistics.Chunks}}</div><div class="label">Chunk</div></div>
-        <div class="card"><div class="number">{{.Statistics.Endpoints}}</div><div class="label">端点</div></div>
-        <div class="card"><div class="number">{{.Statistics.Findings}}</div><div class="label">发现</div></div>
-      </div>
+      <button type="button" class="btn-ghost copy-btn" id="open-tree" hidden>展开目标树</button>
 
-      <div class="tabbar">
-        <button class="tab active" data-tab="findings">发现 ({{.Statistics.Findings}})</button>
-        <button class="tab" data-tab="endpoints">端点 ({{len .Endpoints}})</button>
-        <button class="tab" data-tab="resources">资源 ({{len .Resources}})</button>
-        <button class="tab" data-tab="issues">诊断 ({{len .Issues}})</button>
-      </div>
+      <!-- ======================================================= 总览 -->
+      <section class="tab-panel" id="panel-overview" role="tabpanel">
+        <div class="section">
+          <div class="section-head">
+            <h2>攻击面指标</h2>
+            <span class="hint">统计“遇到过什么”，不代表已测试范围；每项口径见卡片内说明。</span>
+          </div>
+          <div class="cards" id="attack-metrics"></div>
+        </div>
 
-      <nav class="split-nav">
-        <a href="API报告.html">API 端点报告</a>
-        <a href="URL报告.html">完整 URL 报告</a>
-        <a href="敏感信息报告.html">敏感信息报告</a>
-        <a href="参数报告.html">请求参数报告</a>
-        <a href="路由报告.html">路由探测报告</a>
-        <a href="资源报告.html">资源报告</a>
-        <a href="api绝对路径.txt">API 绝对路径.txt</a>
-        <a href="api相对路径.txt">API 相对路径.txt</a>
-        <a href="url.txt">url.txt</a>
-        <a href="路由.txt">路由.txt</a>
-        <a href="参数.txt">参数.txt</a>
-        <a href="敏感信息.txt">敏感信息.txt</a>
-      </nav>
+        <div class="section">
+          <div class="section-head">
+            <h2>安全发现指标</h2>
+            <span class="hint">大数字为聚合发现数，副标题为原始命中数；等级均为规则命中等级。</span>
+          </div>
+          <div class="cards" id="security-metrics"></div>
+        </div>
 
-      <div class="tab-panel active" id="panel-findings">
-        <div class="target-filter" id="target-filter"></div>
+        <div class="section">
+          <div class="section-head">
+            <h2>主机资产</h2>
+            <span class="hint">两类主机分别计数，口径见卡片与下方说明；发现主机不等于可访问资产。</span>
+          </div>
+          <div class="split">
+            <div class="panel">
+              <h3>内容发现的主机</h3>
+              <p class="hint">口径：出现在 JavaScript、内联脚本、文档与源码映射中的主机值，去重后按类型计数。</p>
+              <div class="cards" id="host-content-metrics"></div>
+            </div>
+            <div class="panel">
+              <h3>扫描关联的主机</h3>
+              <p class="hint">口径：本次扫描实际访问或被引用对象所属的主机（目标、资源、端点、发现来源），同一套分类规则。</p>
+              <div class="cards" id="host-scan-metrics"></div>
+            </div>
+          </div>
+          <div class="panel" style="margin-top:12px">
+            <ul class="note-list" id="host-notes"></ul>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h2>图表与分布</h2><span class="hint">点击任意图形或图例即可跳转到对应列表并应用筛选，筛选条件在列表页可见、可清除。</span></div>
+          <div class="split">
+            <div class="panel">
+              <h3>严重性分布</h3>
+              <p class="hint">口径：聚合发现数（按 规则 + 分类 + 等级 + 完整值 合并）。原始命中见下表。</p>
+              <div id="severity-chart"></div>
+              <div class="table-wrap" style="margin-top:10px">
+                <table>
+                  <thead><tr><th scope="col">等级</th><th scope="col">聚合发现</th><th scope="col">原始命中</th><th scope="col">涉及域名</th></tr></thead>
+                  <tbody id="severity-table-body"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="panel">
+              <h3>发现类型分布</h3>
+              <p class="hint">口径：按规则（规则名）聚合的原始命中次数；类型来自规则定义，未按敏感值猜测。</p>
+              <div id="type-chart"></div>
+            </div>
+            <div class="panel">
+              <h3>域名 / API 数量排行</h3>
+              <p class="hint">口径：按主机分类分组排行，每个主机名下的 API 端点记录数（与筛选后的端点列表一致）。只有公共后缀列表识别出后缀的主机计入域名，IP 与内部主机候选分组显示，无法解析主机的相对路径单独归组。</p>
+              <div id="domain-chart"></div>
+            </div>
+            <div class="panel">
+              <h3>HTTP 方法分布</h3>
+              <p class="hint">口径：按端点记录的方法统计；源码中未记录方法的一律计入“未知”，不默认补为 GET。</p>
+              <div id="method-chart"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h2>重点发现</h2><span class="hint">默认按等级优先排序，最多展示 {{len .Summary.Key}} 条；完整清单见“敏感发现”。</span></div>
+          <div id="key-findings"></div>
+        </div>
+
+        <div class="section">
+          <div class="section-head"><h2>结论口径与自动化边界</h2></div>
+          <div class="panel">
+            <ul class="note-list" id="overview-notes"></ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- =================================================== 敏感发现 -->
+      <section class="tab-panel" id="panel-findings" role="tabpanel" hidden>
         <div class="toolbar">
-          <label>严重性
-            <select id="severity"><option value="">全部</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>info</option></select>
+          <label>视图
+            <select id="findings-view">
+              <option value="group">聚合发现</option>
+              <option value="raw">原始命中</option>
+            </select>
+          </label>
+          <label>等级
+            <select id="severity"><option value="">全部</option></select>
           </label>
           <label>分类
-            <select id="category"><option value="">全部</option><option>sensitive</option><option>url</option></select>
+            <select id="category"><option value="">全部</option></select>
           </label>
-          <input type="search" id="search" placeholder="搜索规则、值或 URL...">
-          <div class="page-size">
-            <label>每页
-              <select id="page-size"><option value="25">25</option><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option></select>
-            </label>
-          </div>
-          <div class="count" id="findings-count"></div>
+          <label>规则
+            <select id="rule"><option value="">全部</option></select>
+          </label>
+          <label>域名
+            <select id="domain"><option value="">全部</option></select>
+          </label>
+          <label>搜索
+            <input type="search" id="search" placeholder="规则、完整值、来源、AI 理由...">
+          </label>
+          <label>每页
+            <select id="page-size">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="200">200</option>
+            </select>
+          </label>
+          <span class="spacer"></span>
+          <button type="button" class="btn-ghost copy-btn" id="findings-export" disabled>导出当前筛选结果</button>
         </div>
+        <div class="chips" id="findings-chips" aria-live="polite"></div>
+        <p class="count" id="findings-count"></p>
         <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th style="width:90px">严重性</th>
-                <th style="width:160px">规则</th>
-                <th>完整值</th>
-                <th style="width:260px">来源 URL</th>
-                <th style="width:60px">行</th>
-              </tr>
-            </thead>
+          <table id="findings-table">
+            <thead><tr><th scope="col">编号</th><th scope="col">等级</th><th scope="col">规则</th><th scope="col">完整值</th></tr></thead>
             <tbody id="findings-body"></tbody>
           </table>
         </div>
-        <div class="pagination" id="findings-pagination"></div>
-      </div>
+        <div id="findings-pagination"></div>
+      </section>
 
-      <div class="tab-panel" id="panel-endpoints" style="display:none">
+      <!-- =================================================== API 端点 -->
+      <section class="tab-panel" id="panel-endpoints" role="tabpanel" hidden>
+        <div class="toolbar">
+          <label>域名
+            <select id="ep-domain"><option value="">全部</option></select>
+          </label>
+          <label>方法
+            <select id="ep-method"><option value="">全部</option></select>
+          </label>
+          <label>搜索
+            <input type="search" id="ep-search" placeholder="路径、参数名、来源...">
+          </label>
+          <span class="spacer"></span>
+          <button type="button" class="btn-ghost copy-btn" id="endpoints-export" disabled>导出当前筛选结果</button>
+        </div>
+        <div class="chips" id="endpoints-chips" aria-live="polite"></div>
+        <p class="count" id="endpoints-count"></p>
+        <p class="count">口径：本列表只包含后端 API 端点（endpoint.type ≠ route）；前端框架路由见“路由与参数”。缺失的方法显示为“未知”，未被默认补为 GET。</p>
         <div class="table-wrap">
-          <table class="resource-table">
-            <thead><tr><th style="width:80px">方法</th><th style="width:90px">证据</th><th>路径</th><th style="width:280px">来源</th><th style="width:70px">授权</th><th style="width:80px">GET 状态</th></tr></thead>
+          <table id="endpoints-table">
+            <thead><tr><th scope="col">方法</th><th scope="col">路径</th></tr></thead>
             <tbody id="endpoints-body"></tbody>
           </table>
         </div>
-        <div class="pagination" id="endpoints-pagination"></div>
-      </div>
+        <div id="endpoints-pagination"></div>
+      </section>
 
-      <div class="tab-panel" id="panel-resources" style="display:none">
+      <!-- =================================================== 主机资产 -->
+      <section class="tab-panel" id="panel-hosts" role="tabpanel" hidden>
+        <div class="toolbar">
+          <label>类型
+            <select id="host-kind"><option value="">全部</option></select>
+          </label>
+          <label>视图
+            <select id="host-group">
+              <option value="host">按主机</option>
+              <option value="registrable">按可注册域归组</option>
+            </select>
+          </label>
+          <label>搜索
+            <input type="search" id="host-search" placeholder="主机、可注册域、后缀、来源 URL...">
+          </label>
+          <span class="spacer"></span>
+          <button type="button" class="btn-ghost copy-btn" id="hosts-export" disabled>导出当前筛选结果</button>
+        </div>
+        <div class="chips" id="host-chips" aria-live="polite"></div>
+        <p class="count" id="hosts-count"></p>
         <div class="table-wrap">
-          <table class="resource-table">
-            <thead><tr><th style="width:90px">类型</th><th>URL</th><th style="width:60px">状态</th><th style="width:90px">大小</th><th style="width:220px">本地路径</th></tr></thead>
+          <table id="hosts-table">
+            <thead><tr><th scope="col">主机</th><th scope="col">类型</th></tr></thead>
+            <tbody id="hosts-body"></tbody>
+          </table>
+        </div>
+        <div id="hosts-pagination"></div>
+        <div class="panel" style="margin-top:12px">
+          <p class="hint">数据来源说明：本页同时列出“内容发现”和“扫描关联”两类主机，使用同一套归一化与公共后缀分类规则。
+            未做 DNS 查询、未做连通性探测，出现在此不代表主机存在、可访问或存在漏洞；内部主机候选不计入域名统计。</p>
+        </div>
+      </section>
+
+      <!-- =============================================== 路由与参数 -->
+      <section class="tab-panel" id="panel-routes" role="tabpanel" hidden>
+        <div class="section">
+          <div class="section-head"><h2>框架路由</h2><span class="hint">复用端点数据中的 route 记录；探测结果来自已有的路由探测阶段。</span></div>
+          <p class="count" id="routes-count"></p>
+          <div class="table-wrap">
+            <table id="routes-table">
+              <thead><tr><th scope="col">路由路径</th><th scope="col">提取方式</th><th scope="col">证据</th><th scope="col">来源</th><th scope="col">探测结果</th></tr></thead>
+              <tbody id="routes-body"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="section">
+          <div class="section-head">
+            <h2>参数</h2>
+            <span class="hint">参数名的采集口径：URL query、请求体、响应字段与源码 AST 提取结果去重后的集合。</span>
+          </div>
+          <div class="toolbar">
+            <label>搜索 <input type="search" id="param-search" placeholder="参数名..."></label>
+            <span class="spacer"></span>
+            <a class="btn-ghost copy-btn" href="参数报告.html">查看参数报告（场景 / 域名 / 次数 / 来源）</a>
+          </div>
+          <p class="count" id="params-count"></p>
+          <div class="panel"><div class="param-list" id="params-list"></div></div>
+        </div>
+      </section>
+
+      <!-- ====================================================== 资源 -->
+      <section class="tab-panel" id="panel-resources" role="tabpanel" hidden>
+        <div class="section">
+          <div class="section-head"><h2>资源采集与解析概况</h2><span class="hint">只展示可证实的资源状态与诊断分类，不推算解析成功率。</span></div>
+          <div class="split">
+            <div class="panel">
+              <h3>资源类型</h3>
+              <p class="hint">口径：资源清单中的类型计数。</p>
+              <div id="resource-types"></div>
+            </div>
+            <div class="panel">
+              <h3>响应状态</h3>
+              <p class="hint">口径：资源 HTTP 状态码计数；“无响应”表示未记录状态码。</p>
+              <div id="resource-status"></div>
+            </div>
+          </div>
+          <div class="panel" style="margin-top:12px">
+            <ul class="note-list" id="resource-notes"></ul>
+          </div>
+        </div>
+        <p class="count" id="resources-count"></p>
+        <div class="table-wrap">
+          <table id="resources-table">
+            <thead><tr><th scope="col">类型</th><th scope="col">URL</th></tr></thead>
             <tbody id="resources-body"></tbody>
           </table>
         </div>
-        <div class="pagination" id="resources-pagination"></div>
-      </div>
+        <div id="resources-pagination"></div>
+      </section>
 
-      <div class="tab-panel" id="panel-issues" style="display:none">
+      <!-- ================================================ 扫描诊断 -->
+      <section class="tab-panel" id="panel-diagnostics" role="tabpanel" hidden>
+        <div class="section">
+          <div class="section-head"><h2>诊断概况</h2><span class="hint">诊断记录只包含非致命问题，用于判断结果的完整程度。</span></div>
+          <div class="split">
+            <div class="panel">
+              <h3>诊断分类</h3>
+              <p class="hint">口径：按诊断代码计数。</p>
+              <div id="issue-codes"></div>
+            </div>
+            <div class="panel">
+              <h3>发生阶段</h3>
+              <p class="hint">口径：按采集/存储/分析阶段计数。</p>
+              <div id="issue-stages"></div>
+            </div>
+          </div>
+          <div class="panel" style="margin-top:12px">
+            <ul class="note-list" id="issue-notes"></ul>
+          </div>
+        </div>
+        <p class="count" id="issues-count"></p>
         <div class="table-wrap">
-          <table class="resource-table">
-            <thead><tr><th style="width:110px">代码</th><th style="width:80px">阶段</th><th>URL</th><th>消息</th></tr></thead>
+          <table id="issues-table">
+            <thead><tr><th scope="col">代码</th><th scope="col">阶段</th><th scope="col">URL</th><th scope="col">消息</th><th scope="col">可重试</th></tr></thead>
             <tbody id="issues-body"></tbody>
           </table>
         </div>
-      </div>
+      </section>
+
+      <!-- ================================================ 报告附件 -->
+      <section class="tab-panel" id="panel-attachments" role="tabpanel" hidden>
+        <div class="section">
+          <div class="section-head"><h2>分项报告</h2><span class="hint">分项报告与本报告使用同一份扫描数据；本报告只做摘要与入口，不另建一套统计。</span></div>
+          <div class="panel">
+            <div class="inline-actions">
+              <a class="btn-ghost copy-btn" href="API报告.html">API 端点报告</a>
+              <a class="btn-ghost copy-btn" href="URL报告.html">完整 URL 报告</a>
+              <a class="btn-ghost copy-btn" href="敏感信息报告.html">敏感信息报告</a>
+              <a class="btn-ghost copy-btn" href="参数报告.html">请求参数报告</a>
+              <a class="btn-ghost copy-btn" href="路由报告.html">路由探测报告</a>
+              <a class="btn-ghost copy-btn" href="资源报告.html">资源报告</a>
+              <a class="btn-ghost copy-btn" href="主机资产报告.html">主机资产报告</a>
+            </div>
+          </div>
+        </div>
+        <div class="section">
+          <div class="section-head"><h2>文本清单</h2><span class="hint">纯文本清单可直接导入 Burp Suite、fuzz 工具或其他爬虫。</span></div>
+          <div class="panel">
+            <div class="inline-actions">
+              <a class="btn-ghost copy-btn" href="api绝对路径.txt">API 绝对路径.txt</a>
+              <a class="btn-ghost copy-btn" href="api相对路径.txt">API 相对路径.txt</a>
+              <a class="btn-ghost copy-btn" href="url.txt">url.txt</a>
+              <a class="btn-ghost copy-btn" href="路由.txt">路由.txt</a>
+              <a class="btn-ghost copy-btn" href="参数.txt">参数.txt</a>
+              <a class="btn-ghost copy-btn" href="敏感信息.txt">敏感信息.txt</a>
+              <a class="btn-ghost copy-btn" href="domain.txt">domain.txt</a>
+              <a class="btn-ghost copy-btn" href="ip.txt">ip.txt</a>
+              <a class="btn-ghost copy-btn" href="internal_hosts.txt">internal_hosts.txt</a>
+            </div>
+          </div>
+        </div>
+        <div class="section">
+          <div class="section-head"><h2>使用说明</h2></div>
+          <div class="panel">
+            <ul class="note-list">
+              <li>本页可离线打开，不依赖 CDN、外部字体或远程图表服务。</li>
+              <li>“打印 / 保存 PDF”使用浏览器自带打印能力，打印内容与当前筛选、分页无关，始终是完整报告。</li>
+              <li>CSV 导出只导出当前筛选条件下的结果（不是仅当前页），并使用 UTF-8 BOM 与公式注入防护。</li>
+              <li>报告保留完整敏感值，不做脱敏；请严格限制报告目录的访问权限。</li>
+            </ul>
+          </div>
+        </div>
+      </section>
     </main>
   </div>
 
-  <aside class="sidebar" id="sidebar">
-    <div class="sidebar-header">
-      <button class="tree-toggle" id="toggle-tree" title="关闭目标面板">×</button>
-      <h3>目标面板</h3>
+  <aside class="drawer" id="drawer" aria-hidden="true" aria-labelledby="drawer-title" role="dialog">
+    <div class="drawer-head">
+      <h2 id="drawer-title">详情</h2>
+      <button type="button" class="btn-ghost copy-btn" id="drawer-close">关闭</button>
     </div>
-    <div class="tree-panel" id="file-tree"></div>
+    <div class="drawer-body" id="drawer-body"></div>
   </aside>
 </div>
 
+<div id="toast" role="status" aria-live="polite"></div>
+
+<!-- Print view: rebuilt from the same summary, so printed content is
+     independent of the current tab, filters and pagination. -->
+<section class="print-doc" id="print-doc" aria-hidden="true"></section>
+
 <script>
 window.__DATA__ = {
-  target: {{.Target | json}},
-  mode: {{.Mode | json}},
-  userAgent: {{.UserAgent | json}},
-  browserStatus: {{.BrowserStatus | json}},
-  statistics: {{.Statistics | json}},
-  findings: {{.Findings | json}},
-  resources: {{.Resources | json}},
-  endpoints: {{.Endpoints | json}},
-  issues: {{.Issues | json}}
+  target: {{.Result.Target | json}},
+  resources: {{.Result.Resources | json}},
+  endpoints: {{endpoints .Result}},
+  issues: {{.Result.Issues | json}},
+  hosts: {{.Result.Hosts | json}},
+  scanHosts: {{.Result.ScanHosts | json}},
+  summary: {{.Summary | json}}
 };
-
-(function(){
-  const data = window.__DATA__;
-  const pick = (obj, ...keys) => {
-    for (const key of keys) {
-      if (obj && Object.prototype.hasOwnProperty.call(obj, key) && obj[key] !== undefined && obj[key] !== null) return obj[key];
-    }
-    return '';
-  };
-  const normalizeFinding = f => ({
-    ruleID: pick(f, 'rule_id', 'RuleID'),
-    ruleName: pick(f, 'rule_name', 'RuleName'),
-    category: pick(f, 'category', 'Category'),
-    severity: pick(f, 'severity', 'Severity'),
-    value: pick(f, 'value', 'Value'),
-    sourceURL: pick(f, 'source_url', 'SourceURL'),
-    line: pick(f, 'line', 'Line') || 0,
-    column: pick(f, 'column', 'Column') || 0,
-    contextLines: pick(f, 'context_lines', 'ContextLines') || []
-  });
-  const normalizeResource = r => ({
-    url: pick(r, 'url', 'URL'),
-    type: pick(r, 'type', 'Type'),
-    sourceURL: pick(r, 'source_url', 'SourceURL'),
-    localPath: pick(r, 'local_path', 'LocalPath'),
-    statusCode: pick(r, 'status_code', 'StatusCode') || 0,
-    size: pick(r, 'size', 'Size') || 0
-  });
-  const normalizeEndpoint = e => ({
-    url: pick(e, 'url', 'URL'),
-    raw: pick(e, 'raw', 'Raw'),
-    sourceURL: pick(e, 'source_url', 'SourceURL'),
-    authorized: pick(e, 'authorized', 'Authorized'),
-    statusCode: pick(e, 'status_code', 'StatusCode') || 0,
-    method: pick(e, 'method', 'Method'),
-    evidence: pick(e, 'evidence', 'Evidence')
-  });
-  const normalizeIssue = i => ({
-    code: pick(i, 'code', 'Code'),
-    stage: pick(i, 'stage', 'Stage'),
-    url: pick(i, 'url', 'URL'),
-    message: pick(i, 'message', 'Message')
-  });
-  const findings = (data.findings || []).map(normalizeFinding);
-  const resources = (data.resources || []).map(normalizeResource);
-  const endpoints = (data.endpoints || []).map(normalizeEndpoint);
-  const issues = (data.issues || []).map(normalizeIssue);
-
-  // Endpoint display: prefer the raw source path; fall back to the URL
-  // parsed into path + host so tables never show a folded absolute URL.
-  const endpointDisplay = e => {
-    let raw = e.raw || '';
-    if (raw && !/^https?:\/\//i.test(raw)) return { path: raw, host: '' };
-    try {
-      const u = new URL(e.url);
-      const path = u.pathname + u.search;
-      return { path: path || e.url, host: u.host };
-    } catch {
-      return { path: e.url, host: '' };
-    }
-  };
-  const methodTag = m => {
-    const v = (m || 'GET').toLowerCase();
-    return '<span class="method-tag ' + v + '">' + escapeHtml((m || 'GET').toUpperCase()) + '</span>';
-  };
-
-  let state = {
-    severity: '',
-    category: '',
-    search: '',
-    sourceFilter: '',
-    sourceLabel: '',
-    page: 1,
-    pageSize: 50,
-    expanded: null,
-    openNodes: new Set(),
-    closedNodes: new Set()
-  };
-
-  function buildTree() {
-    const root = { name: '站点', children: {}, urls: new Set(), findings: 0, expanded: true, filter: '' };
-    const urlMap = new Map();
-
-    findings.forEach(f => {
-      if (f.sourceURL) urlMap.set(f.sourceURL, (urlMap.get(f.sourceURL) || 0) + 1);
-    });
-
-    const addUrl = (url, findingCount) => {
-      if (!url) return;
-      try {
-        const u = new URL(url);
-        const origin = u.protocol + '//' + u.host;
-        let hostNode = root.children[origin];
-        if (!hostNode) {
-          hostNode = { name: u.host, host: true, children: {}, urls: new Set(), findings: 0, expanded: !state.closedNodes.has(origin), filter: origin };
-          root.children[origin] = hostNode;
-        }
-        hostNode.urls.add(url);
-        hostNode.findings += findingCount;
-
-        const parts = u.pathname.split('/').filter(Boolean);
-        let current = hostNode;
-        let pathPrefix = '';
-        parts.forEach((part, idx) => {
-          pathPrefix += '/' + part;
-          const key = origin + pathPrefix;
-          let node = current.children[key];
-          if (!node) {
-            node = { name: part, children: {}, urls: new Set(), findings: 0, expanded: state.openNodes.has(key) || (idx < 1 && !state.closedNodes.has(key)), filter: key };
-            current.children[key] = node;
-          }
-          node.urls.add(url);
-          node.findings += findingCount;
-          current = node;
-        });
-        if (parts.length === 0) {
-          hostNode.findings += 0;
-        }
-      } catch {
-        let node = root.children[url];
-        if (!node) {
-          node = { name: url, children: {}, urls: new Set(), findings: 0, expanded: false, filter: url };
-          root.children[url] = node;
-        }
-        node.urls.add(url);
-        node.findings += findingCount;
-      }
-    };
-
-    const allUrls = new Set();
-    resources.forEach(r => allUrls.add(r.url));
-    endpoints.forEach(e => { allUrls.add(e.url); allUrls.add(e.sourceURL); });
-    findings.forEach(f => allUrls.add(f.sourceURL));
-    [...allUrls].sort().forEach(url => addUrl(url, urlMap.get(url) || 0));
-
-    return root;
-  }
-
-  function renderTree(node, container, path) {
-    const el = document.createElement('div');
-    el.className = 'tree-node';
-    const hasChildren = Object.keys(node.children).length > 0;
-    const row = document.createElement('div');
-    row.className = 'tree-row';
-    row.dataset.path = node.filter || '';
-    if (state.sourceFilter && row.dataset.path === state.sourceFilter) {
-      row.classList.add('active');
-    }
-
-    const caret = document.createElement('span');
-    caret.className = 'tree-caret' + (hasChildren ? '' : ' leaf') + (node.expanded ? '' : ' collapsed');
-    caret.textContent = '▼';
-    if (hasChildren) {
-      caret.addEventListener('click', e => {
-        e.stopPropagation();
-        const nodeKey = node.filter || path || node.name;
-        if (node.expanded) {
-          state.closedNodes.add(nodeKey);
-          state.openNodes.delete(nodeKey);
-        } else {
-          state.openNodes.add(nodeKey);
-          state.closedNodes.delete(nodeKey);
-        }
-        node.expanded = !node.expanded;
-        refreshTree();
-      });
-    }
-
-    const icon = document.createElement('span');
-    icon.className = 'tree-icon';
-    icon.textContent = node.host ? '◎' : hasChildren ? '▣' : '□';
-
-    const label = document.createElement('span');
-    label.className = 'tree-label';
-    label.textContent = node.name;
-    label.title = node.name;
-
-    row.appendChild(caret);
-    row.appendChild(icon);
-    row.appendChild(label);
-    if (node.findings > 0) {
-      const count = document.createElement('span');
-      count.className = 'tree-count';
-      count.textContent = node.findings;
-      row.appendChild(count);
-    }
-    row.addEventListener('click', () => {
-      const filter = node.filter || '';
-      state.sourceFilter = state.sourceFilter === filter ? '' : filter;
-      state.sourceLabel = state.sourceFilter ? node.name : '';
-      state.page = 1;
-      activateTab('findings');
-      renderFindings();
-      document.getElementById('panel-findings').scrollIntoView({ block: 'start' });
-    });
-    el.appendChild(row);
-
-    if (hasChildren) {
-      const children = document.createElement('div');
-      children.className = 'tree-children' + (node.expanded ? ' open' : '');
-      Object.keys(node.children).sort().forEach(key => {
-        renderTree(node.children[key], children, key);
-      });
-      el.appendChild(children);
-    }
-    container.appendChild(el);
-  }
-
-  function refreshTree() {
-    const container = document.getElementById('file-tree');
-    container.innerHTML = '';
-    const tree = buildTree();
-    Object.keys(tree.children).sort().forEach(key => {
-      renderTree(tree.children[key], container, key);
-    });
-    if (container.children.length === 0) {
-      container.innerHTML = '<div class="empty">暂无可展示目标</div>';
-    }
-  }
-
-  function escapeHtml(text) {
-    return String(text == null ? '' : text)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  }
-
-  function highlightLine(content, start, end) {
-    if (start < 0 || end <= start) return escapeHtml(content);
-    const chars = Array.from(content);
-    const before = chars.slice(0, start).join('');
-    const matched = chars.slice(start, end).join('');
-    const after = chars.slice(end).join('');
-    return escapeHtml(before) + '<mark>' + escapeHtml(matched) + '</mark>' + escapeHtml(after);
-  }
-
-  function renderContext(finding) {
-    const lines = finding.contextLines || [];
-    let html = '';
-    lines.forEach(line => {
-      const lineNumber = pick(line, 'line_number', 'LineNumber') || '';
-      const content = pick(line, 'content', 'Content');
-      const matchStart = pick(line, 'match_start', 'MatchStart');
-      const matchEnd = pick(line, 'match_end', 'MatchEnd');
-      const isMatch = matchStart >= 0 && matchEnd > matchStart;
-      html += '<span class="line' + (isMatch ? ' match' : '') + '">';
-      html += '<span class="line-num">' + lineNumber + '</span>';
-      html += '<span class="line-content">' + highlightLine(content, matchStart, matchEnd) + '</span>';
-      html += '</span>\n';
-    });
-    return html;
-  }
-
-  function matchesFilter(f) {
-    if (state.severity && f.severity !== state.severity) return false;
-    if (state.category && f.category !== state.category) return false;
-    if (state.sourceFilter) {
-      if (f.sourceURL !== state.sourceFilter && !f.sourceURL.startsWith(state.sourceFilter + '/') && !f.sourceURL.startsWith(state.sourceFilter + '?')) return false;
-    }
-    if (state.search) {
-      const q = state.search.toLowerCase();
-      const hay = (f.ruleName + ' ' + f.ruleID + ' ' + f.value + ' ' + f.sourceURL + ' ' + f.severity + ' ' + f.category).toLowerCase();
-      if (!hay.includes(q)) return false;
-    }
-    return true;
-  }
-
-  function filteredFindings() {
-    return findings.filter(matchesFilter);
-  }
-
-  function renderFindingsTable() {
-    const tbody = document.getElementById('findings-body');
-    const filtered = filteredFindings();
-    const total = filtered.length;
-    const pageSize = state.pageSize;
-    const totalPages = Math.max(1, Math.ceil(total / pageSize));
-    state.page = Math.min(state.page, totalPages);
-    const start = (state.page - 1) * pageSize;
-    const pageItems = filtered.slice(start, start + pageSize);
-
-    document.getElementById('findings-count').textContent = total + ' 条 / ' + totalPages + ' 页';
-    const filterBox = document.getElementById('target-filter');
-    if (state.sourceFilter) {
-      filterBox.className = 'target-filter active';
-      filterBox.innerHTML = '<span class="pill">当前节点：<code>' + escapeHtml(state.sourceFilter) + '</code><button id="clear-source" title="清除节点过滤">×</button></span>';
-      filterBox.querySelector('#clear-source').addEventListener('click', () => {
-        state.sourceFilter = '';
-        state.sourceLabel = '';
-        state.page = 1;
-        refreshFindings();
-      });
-    } else {
-      filterBox.className = 'target-filter';
-      filterBox.innerHTML = '';
-    }
-
-    tbody.innerHTML = '';
-    if (pageItems.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="5" class="empty">无匹配发现</td></tr>';
-      renderPagination(totalPages, 0);
-      return;
-    }
-
-    pageItems.forEach(f => {
-      const row = document.createElement('tr');
-      row.dataset.id = f.ruleID + '::' + f.sourceURL + '::' + f.line + '::' + f.column;
-      if (state.expanded === row.dataset.id) row.classList.add('expanded');
-
-      row.innerHTML = '<td><span class="severity ' + f.severity + '">' + f.severity + '</span></td>' +
-        '<td><div class="rule-name">' + escapeHtml(f.ruleName) + '</div><div class="rule-id">' + escapeHtml(f.ruleID) + '</div></td>' +
-        '<td class="value-cell"><code>' + escapeHtml(f.value) + '</code></td>' +
-        '<td class="source-cell"><a href="' + encodeURI(f.sourceURL) + '" target="_blank" rel="noopener noreferrer"><code>' + escapeHtml(f.sourceURL) + '</code></a><div class="loc">' + f.line + ':' + f.column + '</div></td>' +
-        '<td>' + f.line + '</td>';
-
-      row.addEventListener('click', () => {
-        state.expanded = state.expanded === row.dataset.id ? null : row.dataset.id;
-        renderFindings();
-      });
-      tbody.appendChild(row);
-
-      if (state.expanded === row.dataset.id) {
-        const ctxRow = document.createElement('tr');
-        ctxRow.className = 'context-row';
-        ctxRow.innerHTML = '<td colspan="5"><div class="context-cell"><div class="context-header"><span class="context-title">匹配上下文 · ' + escapeHtml(f.ruleName) + '</span><button class="context-close">关闭</button></div><pre class="context-code">' + renderContext(f) + '</pre></div></td>';
-        ctxRow.querySelector('.context-close').addEventListener('click', e => {
-          e.stopPropagation();
-          state.expanded = null;
-          renderFindings();
-        });
-        tbody.appendChild(ctxRow);
-      }
-    });
-
-    renderPagination(totalPages, total);
-  }
-
-  function renderPagination(totalPages, total) {
-    const pag = document.getElementById('findings-pagination');
-    if (total === 0) {
-      pag.innerHTML = '';
-      return;
-    }
-    const start = (state.page - 1) * state.pageSize + 1;
-    const end = Math.min(start + state.pageSize - 1, total);
-    pag.innerHTML = '<button id="prev-page" ' + (state.page <= 1 ? 'disabled' : '') + '>上一页</button>' +
-      '<span class="page-info">' + start + '-' + end + ' / ' + total + '</span>' +
-      '<button id="next-page" ' + (state.page >= totalPages ? 'disabled' : '') + '>下一页</button>';
-    document.getElementById('prev-page').addEventListener('click', () => { state.page--; renderFindings(); });
-    document.getElementById('next-page').addEventListener('click', () => { state.page++; renderFindings(); });
-  }
-
-  function renderSimplePage(items, page, pageSize) {
-    const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
-    const current = Math.min(page, totalPages);
-    const start = (current - 1) * pageSize;
-    return { rows: items.slice(start, start + pageSize), page: current, totalPages, total: items.length };
-  }
-
-  function renderSimplePagination(container, pageState, onGo) {
-    if (pageState.totalPages <= 1) { container.innerHTML = ''; return; }
-    const start = (pageState.page - 1) * 100 + 1;
-    const end = Math.min(start + 99, pageState.total);
-    container.innerHTML = '<button data-go="prev" ' + (pageState.page <= 1 ? 'disabled' : '') + '>上一页</button>' +
-      '<span class="page-info">' + start + '-' + end + ' / ' + pageState.total + '</span>' +
-      '<button data-go="next" ' + (pageState.page >= pageState.totalPages ? 'disabled' : '') + '>下一页</button>';
-    container.querySelector('[data-go="prev"]').addEventListener('click', () => onGo(pageState.page - 1));
-    container.querySelector('[data-go="next"]').addEventListener('click', () => onGo(pageState.page + 1));
-  }
-
-  const tabRendered = { findings: false, endpoints: false, resources: false, issues: false };
-  const simplePage = { endpoints: 1, resources: 1 };
-
-  function renderEndpoints() {
-    const tbody = document.getElementById('endpoints-body');
-    const pageState = renderSimplePage(endpoints, simplePage.endpoints, 100);
-    simplePage.endpoints = pageState.page;
-    tbody.innerHTML = pageState.rows.length === 0
-      ? '<tr><td colspan="6" class="empty">无端点</td></tr>'
-      : pageState.rows.map(e => {
-          const d = endpointDisplay(e);
-          return '<tr><td>' + methodTag(e.method) + '</td>' +
-            '<td><span class="severity ' + (e.evidence === 'runtime' ? 'critical' : e.evidence === 'full-url' ? 'medium' : 'info') + '">' + escapeHtml(e.evidence || 'static') + '</span></td>' +
-            '<td><code>' + escapeHtml(d.path) + '</code>' + (d.host ? '<div class="loc">' + escapeHtml(d.host) + '</div>' : '') + '</td>' +
-            '<td><code>' + escapeHtml(e.sourceURL) + '</code></td><td>' + e.authorized + '</td><td>' + e.statusCode + '</td></tr>';
-        }).join('');
-    renderSimplePagination(
-      document.getElementById('endpoints-pagination'),
-      pageState,
-      page => { simplePage.endpoints = page; renderEndpoints(); }
-    );
-  }
-
-  function renderResources() {
-    const tbody = document.getElementById('resources-body');
-    const pageState = renderSimplePage(resources, simplePage.resources, 100);
-    simplePage.resources = pageState.page;
-    tbody.innerHTML = pageState.rows.length === 0
-      ? '<tr><td colspan="5" class="empty">无资源</td></tr>'
-      : pageState.rows.map(r => '<tr><td>' + r.type + '</td><td><code>' + escapeHtml(r.url) + '</code></td><td>' + r.statusCode + '</td><td>' + r.size + '</td><td><code>' + escapeHtml(r.localPath) + '</code></td></tr>').join('');
-    renderSimplePagination(
-      document.getElementById('resources-pagination'),
-      pageState,
-      page => { simplePage.resources = page; renderResources(); }
-    );
-  }
-
-  function renderIssues() {
-    const tbody = document.getElementById('issues-body');
-    tbody.innerHTML = issues.length === 0
-      ? '<tr><td colspan="4" class="empty">无诊断信息</td></tr>'
-      : issues.map(i => '<tr><td>' + escapeHtml(i.code) + '</td><td>' + escapeHtml(i.stage) + '</td><td><code>' + escapeHtml(i.url) + '</code></td><td>' + escapeHtml(i.message) + '</td></tr>').join('');
-  }
-
-  function renderFindings() {
-    tabRendered.findings = true;
-    renderFindingsTable();
-  }
-
-  document.getElementById('severity').addEventListener('change', e => { state.severity = e.target.value; state.page = 1; renderFindings(); });
-  document.getElementById('category').addEventListener('change', e => { state.category = e.target.value; state.page = 1; renderFindings(); });
-  let searchTimer = null;
-  document.getElementById('search').addEventListener('input', e => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => { state.search = e.target.value; state.page = 1; renderFindings(); }, 200);
-  });
-  document.getElementById('page-size').addEventListener('change', e => { state.pageSize = parseInt(e.target.value, 10); state.page = 1; renderFindings(); });
-
-  function setSidebar(open) {
-    document.getElementById('sidebar').classList.toggle('collapsed', !open);
-    document.getElementById('open-sidebar').style.display = open ? 'none' : 'flex';
-  }
-
-  document.getElementById('toggle-tree').addEventListener('click', () => setSidebar(false));
-  document.getElementById('open-sidebar').addEventListener('click', () => setSidebar(true));
-
-  function activateTab(name) {
-    document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
-    document.querySelectorAll('.tab-panel').forEach(p => p.style.display = 'none');
-    document.getElementById('panel-' + name).style.display = 'block';
-    if (!tabRendered[name]) {
-      tabRendered[name] = true;
-      if (name === 'endpoints') renderEndpoints();
-      else if (name === 'resources') renderResources();
-      else if (name === 'issues') renderIssues();
-    }
-  }
-
-  document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => activateTab(tab.dataset.tab));
-  });
-
-  refreshTree();
-  renderFindings();
-  setSidebar(true);
-})();
 </script>
+<script>{{interactions}}</script>
+<script>{{charts}}</script>
+<script>{{csv}}</script>
+<script>{{dashboard}}</script>
 </body>
 </html>
