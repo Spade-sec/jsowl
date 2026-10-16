@@ -543,6 +543,17 @@ func mergeResults(primary, secondary *model.Result) *model.Result {
 				primary.Endpoints[index].SourceURL = endpoint.SourceURL
 				primary.Endpoints[index].Line = endpoint.Line
 				primary.Endpoints[index].Column = endpoint.Column
+				// The classification is upgraded as well. "link" is only the
+				// fallback for a quoted URL no rule claimed; when the page
+				// itself navigated to or requested that URL, the browser stage
+				// knows what it is. Without this, a route the SPA pushed at
+				// runtime stayed a generic link and never reached the route
+				// report, even though the injected collector had observed it.
+				if primary.Endpoints[index].Type == "link" &&
+					endpoint.Type != "" && endpoint.Type != "link" {
+					primary.Endpoints[index].Type = endpoint.Type
+					primary.Endpoints[index].Source = endpoint.Source
+				}
 			}
 			continue
 		}

@@ -184,12 +184,19 @@
     }
   };
 
+  // A history navigation must be recorded AFTER it is applied: the new
+  // location is not in place until the original call returns, and the explicit
+  // URL argument is authoritative when the router changes only the fragment or
+  // a relative path. Recording before the call would log the previous location
+  // and miss the route entirely when nothing navigates afterwards.
   ["pushState", "replaceState"].forEach((methodName) => {
     const original = history[methodName];
     if (typeof original !== "function") return;
-    history[methodName] = function() {
+    history[methodName] = function(state, title, url) {
+      const result = original.apply(this, arguments);
+      if (typeof url === "string") addRoute(url, "", "history-hook");
       recordLocation("history-hook");
-      return original.apply(this, arguments);
+      return result;
     };
   });
   window.addEventListener("popstate", () => recordLocation("history-hook"));
