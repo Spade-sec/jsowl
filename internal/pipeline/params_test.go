@@ -85,12 +85,12 @@ func TestMergeParamHitsIdempotent(t *testing.T) {
 			{URL: "https://example.test/api?page=1", Type: "api"},
 		},
 	}
-	finalize(result)
+	Finalize(result)
 	count := len(result.Params)
 	if count == 0 {
 		t.Fatal("finalize produced no params")
 	}
-	finalize(result)
+	Finalize(result)
 	if len(result.Params) != count {
 		t.Fatalf("finalize duplicated params: %d -> %d", count, len(result.Params))
 	}

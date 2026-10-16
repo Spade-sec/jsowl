@@ -863,7 +863,6 @@ func TestAPIFromASTCallerContextFeeding(t *testing.T) {
 	}
 }
 
-
 func findCandidateSuffix(candidates []Candidate, suffix string) *Candidate {
 	for i := range candidates {
 		if strings.HasSuffix(candidates[i].Raw, suffix) {

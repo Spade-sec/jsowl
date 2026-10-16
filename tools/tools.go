@@ -99,6 +99,9 @@ func (s *Store) Scan(ctx context.Context, input ScanInput) (ScanOutput, error) {
 	config := jsowl.DefaultConfig()
 	config.Mode = model.Mode(input.Mode)
 	config.Request.TargetTimeout = 5 * time.Minute
+	// Reports and the scripts they reference are written into the same
+	// per-target directory, so the output root has to be known to the scanner.
+	config.Output.Directory = s.reportRoot()
 	if input.TimeoutSeconds > 0 {
 		config.Request.TargetTimeout = time.Duration(input.TimeoutSeconds) * time.Second
 	}
@@ -140,7 +143,7 @@ func (s *Store) Scan(ctx context.Context, input ScanInput) (ScanOutput, error) {
 		}
 	}
 	if input.WriteReports {
-		dir, reportErr := s.writeReports(id, result)
+		dir, reportErr := s.writeReports(raw, result)
 		output.ReportDir = dir
 		if reportErr != nil {
 			return output, fmt.Errorf("write reports: %w", reportErr)
@@ -542,8 +545,13 @@ func (s *Store) get(id string) (*model.Result, error) {
 	return result, nil
 }
 
-func (s *Store) writeReports(id string, result *model.Result) (string, error) {
-	directory := filepath.Join(s.reportRoot(), id)
+// writeReports writes this scan's reports into the target's own directory —
+// the same one the pipeline saved the JavaScript into.
+func (s *Store) writeReports(rawTarget string, result *model.Result) (string, error) {
+	directory, err := jsowl.TargetReportDirectory(s.reportRoot(), rawTarget)
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return "", err
 	}

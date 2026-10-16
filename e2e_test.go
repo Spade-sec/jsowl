@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -140,7 +141,11 @@ fetch("/api/data.json");
 	}
 }
 
-func TestScannerUsesBaseURLOnlyForRelativeCandidates(t *testing.T) {
+// TestScannerJoinsBaseURLPathForRelativeCandidates covers the base URL fix:
+// a base carrying a path acts as a PREFIX, so a page asking for "/api/users"
+// with --base-url https://base/assets/ is probed at /assets/api/users. Plain
+// URL resolution would drop "/assets" and hit the wrong path on the base host.
+func TestScannerJoinsBaseURLPathForRelativeCandidates(t *testing.T) {
 	var entryAPIRequests atomic.Int32
 	entry := httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
@@ -161,7 +166,8 @@ func TestScannerUsesBaseURLOnlyForRelativeCandidates(t *testing.T) {
 		writer http.ResponseWriter,
 		request *http.Request,
 	) {
-		if request.URL.Path == "/api/users" {
+		// The base URL's own path prefix is part of the requested path.
+		if request.URL.Path == "/assets/api/users" {
 			baseAPIRequests.Add(1)
 			writer.Header().Set("Content-Type", "application/json")
 			_, _ = writer.Write([]byte(`{"ok":true}`))
@@ -180,7 +186,7 @@ func TestScannerUsesBaseURLOnlyForRelativeCandidates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = scanner.Scan(context.Background(), Target{
+	result, err := scanner.Scan(context.Background(), Target{
 		URL: entry.URL, BaseURL: base.URL + "/assets/",
 	})
 	if err != nil {
@@ -191,6 +197,17 @@ func TestScannerUsesBaseURLOnlyForRelativeCandidates(t *testing.T) {
 	}
 	if got := baseAPIRequests.Load(); got != 1 {
 		t.Fatalf("base server API requests = %d, want 1", got)
+	}
+	// The reported endpoint carries the joined path, so the report shows where
+	// the request actually went.
+	var found bool
+	for _, endpoint := range result.Endpoints {
+		if strings.HasSuffix(endpoint.URL, "/assets/api/users") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the prefixed endpoint is missing from the result: %v", result.Endpoints)
 	}
 }
 

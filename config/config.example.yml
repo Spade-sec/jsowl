@@ -114,6 +114,10 @@ scope:
   # 探测 JS source map（.map）并把 sourcesContent 里还原出的源码重新喂给提取器。
   # 生产站点多半忘了删 .map，拿到它基本等于拿到未压缩的整套前端源码。默认开启。
   probe_source_maps: true
+  # 收集 JS 中声明的接口前缀（axios baseURL: "/api"、apiPrefix: "/v1"，以及 "baseUrl":"/api"
+  # 这类配置文本），把每个以 / 开头的相对引用在各前缀下各拼一次并探测，用响应结果确认前缀。
+  # 每目标上限：8 个前缀 / 200 条探测端点，超出写 base_path_probe_capped 诊断。
+  explore_base_paths: true
   # 命中的 map 不探测：路径包含任一片段即跳过（库/厂商 bundle 的 map 又大又没用）。
   source_map_blacklist:
     - chunk-vendors
@@ -150,6 +154,18 @@ output:
   # 在 API 报告的接口详情里复原 HTTP 请求包：源码有字面量值的参数保真，
   # 其余参数生成 {{fuzz:...}} 占位符，可直接复制进 burp/yakit 重放。
   request_template: true
+
+# 主机资产提取（域名 / IP / 内部主机候选）。域名层级固定使用内嵌的 Public
+# Suffix List 快照，离线可用；这里只补充本环境专有的内部后缀。
+hosts:
+  # 额外视为内部主机的后缀（按尾部标签匹配："corp" 同时覆盖 corp 与 svc.corp）。
+  # .test/.example/.invalid/.local/.localhost 已内置为特殊用途后缀，无需在此重复。
+  internal_suffixes: []
+  # 例如：
+  # internal_suffixes:
+  #   - corp
+  #   - lan
+  #   - svc.consul
 
 # AI 辅助分析（配合 -ai 开关）：基于静态提取的证据做参数完整性/真实性判断、
 # 未知污点来源推理、敏感信息价值评级。必须设置 api_key 和 base_url 后 -ai 才能生效。

@@ -12,13 +12,12 @@ import (
 
 func TestSaveJSStaysContainedAndSanitizesWindowsNames(t *testing.T) {
 	root := t.TempDir()
-	target := mustURL(t, "https://example.test")
 	resource := model.Resource{
 		URL:  "https://example.test/../../CON?.js?token=a",
 		Type: model.ResourceTypeScript,
 	}
 
-	relative, err := SaveJS(root, target, resource, []byte("window.ok = true"))
+	relative, err := SaveJS(root, resource, []byte("window.ok = true"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +40,6 @@ func TestSaveJSStaysContainedAndSanitizesWindowsNames(t *testing.T) {
 
 func TestSaveJSSeparatesQueryCollisionsAndDeduplicatesIdenticalWrite(t *testing.T) {
 	root := t.TempDir()
-	target := mustURL(t, "https://example.test")
 	first := model.Resource{
 		URL: "https://example.test/app.js?v=1", Type: model.ResourceTypeScript,
 	}
@@ -49,15 +47,15 @@ func TestSaveJSSeparatesQueryCollisionsAndDeduplicatesIdenticalWrite(t *testing.
 		URL: "https://example.test/app.js?v=2", Type: model.ResourceTypeChunk,
 	}
 
-	firstPath, err := SaveJS(root, target, first, []byte("one"))
+	firstPath, err := SaveJS(root, first, []byte("one"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := SaveJS(root, target, first, []byte("one"))
+	again, err := SaveJS(root, first, []byte("one"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondPath, err := SaveJS(root, target, second, []byte("two"))
+	secondPath, err := SaveJS(root, second, []byte("two"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +68,7 @@ func TestSaveJSSeparatesQueryCollisionsAndDeduplicatesIdenticalWrite(t *testing.
 }
 
 func TestSaveJSRejectsNonScriptResources(t *testing.T) {
-	_, err := SaveJS(t.TempDir(), mustURL(t, "https://example.test"), model.Resource{
+	_, err := SaveJS(t.TempDir(), model.Resource{
 		URL: "https://example.test/api", Type: model.ResourceTypeAPI,
 	}, []byte(`{"secret":"value"}`))
 	if err == nil {
@@ -80,7 +78,7 @@ func TestSaveJSRejectsNonScriptResources(t *testing.T) {
 
 func TestLoadJSReadsSavedScriptAndRejectsEscapePaths(t *testing.T) {
 	root := t.TempDir()
-	relative, err := SaveJS(root, mustURL(t, "https://example.test"), model.Resource{
+	relative, err := SaveJS(root, model.Resource{
 		URL: "https://example.test/app.js", Type: model.ResourceTypeScript,
 	}, []byte("window.ok = true"))
 	if err != nil {

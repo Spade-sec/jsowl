@@ -17,6 +17,7 @@ import (
 	"github.com/youmulijiang/jsowl/internal/analyze"
 	"github.com/youmulijiang/jsowl/internal/collect"
 	"github.com/youmulijiang/jsowl/internal/discover"
+	"github.com/youmulijiang/jsowl/internal/extract"
 	"github.com/youmulijiang/jsowl/internal/model"
 	"github.com/youmulijiang/jsowl/internal/scheduler"
 	"github.com/youmulijiang/jsowl/internal/scope"
@@ -42,6 +43,11 @@ type Options struct {
 // Pipeline recursively collects and analyzes one target within configured bounds.
 type Pipeline struct {
 	options Options
+	// hostExtractor normalizes and classifies hosts. It is created with the
+	// pipeline — before any concurrent collection starts — and is read-only
+	// afterwards, so every analysis goroutine shares one instance and one
+	// Public Suffix List.
+	hostExtractor *extract.Extractor
 }
 
 // Seed describes one browser-observed URL to feed into the shared pipeline.
@@ -68,8 +74,13 @@ type outcome struct {
 	err        error
 	findings   []model.Finding
 	candidates []discover.Candidate
+	basePaths  []string
 	params     []model.ParamHit
-	spa        discover.SPAEvidence
+	// hosts carries host candidates from this resource; hostNotes records
+	// extraction-limit diagnostics raised while reading it.
+	hosts     []extract.Candidate
+	hostNotes []extract.Note
+	spa       discover.SPAEvidence
 	// vendor marks the body as a third-party library bundle.
 	vendor bool
 }
@@ -77,11 +88,26 @@ type outcome struct {
 // runState carries the mutable state shared by the collection drains and the
 // deferred JavaScript analysis phase.
 type runState struct {
-	result         *model.Result
-	queue          *scheduler.Queue
-	endpointIndex  map[string]int
-	findingSeen    map[string]struct{}
-	paramSeen      map[string]struct{}
+	result        *model.Result
+	queue         *scheduler.Queue
+	endpointIndex map[string]int
+	findingSeen   map[string]struct{}
+	paramSeen     map[string]struct{}
+	// reportDirectory is this target's report directory: report.html, the
+	// split reports, the text lists and the downloaded JavaScript all live in
+	// it. It is derived once, from the output root and the target URL, with the
+	// same function the report writers use.
+	// basePaths lists the interface prefixes the target's JavaScript declares
+	// (axios baseURL "/api", apiPrefix "/v1", ...). Relative references are
+	// tried under each of them.
+	basePaths []string
+	// basePathEndpoints counts the prefix-derived endpoints tried so far, and
+	// basePathCapped records the cap diagnostic once.
+	basePathEndpoints int
+	basePathCapped    bool
+	reportDirectory   string
+	// hosts aggregates the content-discovered host assets for this target.
+	hosts          *extract.Aggregator
 	spa            *discover.SPAEvidence
 	pending        []deferredJS
 	deferJS        bool
@@ -119,7 +145,10 @@ type deferredJS struct {
 
 // New constructs a direct resource pipeline.
 func New(options Options) *Pipeline {
-	return &Pipeline{options: options}
+	return &Pipeline{
+		options:       options,
+		hostExtractor: extract.NewExtractor(options.Config.Hosts),
+	}
 }
 
 // SetEnrichers injects the optional AI refinement hooks after construction
@@ -183,12 +212,15 @@ func (p *Pipeline) sourceMapAllowed(candidate *url.URL) bool {
 // markVendor labels everything extracted from one body between the two marks
 // as vendor code, so the report can separate library noise from application
 // results when skip_library_bundles is disabled.
-func markVendor(result *outcome, vendor bool, candidatesFrom, findingsFrom, paramsFrom int) {
+func markVendor(result *outcome, vendor bool, candidatesFrom, findingsFrom, paramsFrom, hostsFrom int) {
 	if !vendor {
 		return
 	}
 	for index := candidatesFrom; index < len(result.candidates); index++ {
 		result.candidates[index].Vendor = true
+	}
+	for index := hostsFrom; index < len(result.hosts); index++ {
+		result.hosts[index].Vendor = true
 	}
 	for index := findingsFrom; index < len(result.findings); index++ {
 		result.findings[index].Vendor = true
@@ -209,6 +241,55 @@ func (state *runState) mergeParams(hits []model.ParamHit) {
 		state.paramSeen[key] = struct{}{}
 		state.result.Params = append(state.result.Params, hit)
 	}
+}
+
+// mergeHosts folds one resource's host candidates into the target aggregate.
+func (state *runState) mergeHosts(candidates []extract.Candidate, notes []extract.Note) {
+	if state.hosts != nil {
+		for _, candidate := range candidates {
+			state.hosts.Add(candidate)
+		}
+	}
+	state.recordHostNotes(notes)
+}
+
+// absorbBasePaths adds the interface prefixes one file declared.
+func (state *runState) absorbBasePaths(paths []string) {
+	for _, prefix := range paths {
+		if prefix == "" || len(state.basePaths) >= maxBasePathPrefixes {
+			continue
+		}
+		duplicate := false
+		for _, existing := range state.basePaths {
+			if existing == prefix {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			state.basePaths = append(state.basePaths, prefix)
+		}
+	}
+}
+
+// noteBasePathLimit records, once, that the prefix-probe budget is exhausted.
+func (state *runState) noteBasePathLimit() {
+	if state.basePathCapped {
+		return
+	}
+	state.basePathCapped = true
+	state.result.Issues = append(state.result.Issues, model.Issue{
+		Code:  "base_path_probe_capped",
+		Stage: "discover",
+		URL:   state.result.Target,
+		Message: "主机路径前缀拼接达到上限 " + strconv.Itoa(maxBasePathEndpoints) +
+			" 条，其余前缀未尝试。",
+	})
+}
+
+// recordHostNotes records the extraction diagnostics this target raised.
+func (state *runState) recordHostNotes(notes []extract.Note) {
+	recordHostNotes(state.result, notes)
 }
 
 func paramHitKey(hit model.ParamHit) string {
@@ -275,15 +356,18 @@ func absorbRecoveredSources(
 			continue
 		}
 		candidatesFrom, findingsFrom := len(result.candidates), len(result.findings)
-		paramsFrom := len(result.params)
+		paramsFrom, hostsFrom := len(result.params), len(result.hosts)
 		textResult := discover.FromJavaScript(source, content, engine)
 		result.findings = append(result.findings, textResult.Findings...)
 		result.candidates = append(result.candidates, textResult.Candidates...)
-		result.candidates = append(
-			result.candidates, discover.APIFromAST(source, content)...,
-		)
+		result.hosts = append(result.hosts, textResult.Hosts...)
+		recoveredJS := discover.AnalyzeJS(source, content)
+		result.candidates = append(result.candidates, recoveredJS.Candidates...)
+		result.hosts = append(result.hosts, recoveredJS.Hosts...)
+		result.hostNotes = append(result.hostNotes, recoveredJS.Notes...)
+		result.basePaths = append(result.basePaths, discover.BasePathNames(recoveredJS.BasePaths)...)
 		result.params = append(result.params, discover.ParamsFromAST(source, content)...)
-		markVendor(result, isVendor, candidatesFrom, findingsFrom, paramsFrom)
+		markVendor(result, isVendor, candidatesFrom, findingsFrom, paramsFrom, hostsFrom)
 	}
 }
 
@@ -326,6 +410,15 @@ func (p *Pipeline) RunDetailed(
 		Endpoints: make([]model.Endpoint, 0),
 		Findings:  make([]model.Finding, 0),
 		Issues:    make([]model.Issue, 0),
+	}
+	// The report directory is computed before any concurrent work starts and
+	// is never recomputed, so every resource of this target saves its script
+	// into the same folder as the report.
+	reportDirectory, err := storage.TargetDirectory(
+		p.options.Config.Output.Directory, target.URL,
+	)
+	if err != nil {
+		return nil, discover.SPAEvidence{}, err
 	}
 	queue := scheduler.New(
 		p.options.Config.Limits.MaxResources,
@@ -419,17 +512,19 @@ func (p *Pipeline) RunDetailed(
 	}
 
 	state := &runState{
-		result:         result,
-		queue:          queue,
-		endpointIndex:  endpointIndex,
-		findingSeen:    make(map[string]struct{}),
-		paramSeen:      make(map[string]struct{}),
-		spa:            &spa,
-		deferJS:        p.options.Config.Output.DownloadJS,
-		targetScope:    targetScope,
-		root:           root,
-		resolutionBase: resolutionBase,
-		probeEvents:    p.options.ProbeEvents,
+		result:          result,
+		queue:           queue,
+		endpointIndex:   endpointIndex,
+		findingSeen:     make(map[string]struct{}),
+		paramSeen:       make(map[string]struct{}),
+		reportDirectory: reportDirectory,
+		hosts:           extract.NewAggregator(p.hostExtractor, model.HostOriginContent),
+		spa:             &spa,
+		deferJS:         p.options.Config.Output.DownloadJS,
+		targetScope:     targetScope,
+		root:            root,
+		resolutionBase:  resolutionBase,
+		probeEvents:     p.options.ProbeEvents,
 	}
 	if err := p.drain(ctx, state, headers, entry); err != nil {
 		return result, spa, err
@@ -444,7 +539,7 @@ func (p *Pipeline) RunDetailed(
 		}
 		batch := state.pending
 		state.pending = nil
-		for _, analysis := range p.computeBatch(batch) {
+		for _, analysis := range p.computeBatch(batch, state.reportDirectory) {
 			p.mergeDeferred(state, analysis)
 		}
 		if err := p.drain(ctx, state, headers, entry); err != nil {
@@ -498,7 +593,14 @@ func (p *Pipeline) RunDetailed(
 		result.Technologies = append(result.Technologies, "requirejs")
 	}
 	sort.Strings(result.Technologies)
-	finalize(result)
+	// Content-discovered hosts, in deterministic order, plus whatever
+	// extraction diagnostics were raised. Scan-associated hosts are derived
+	// inside finalize from the resources, endpoints and findings themselves.
+	if state.hosts != nil {
+		result.Hosts = state.hosts.Assets()
+		state.recordHostNotes(state.hosts.Notes())
+	}
+	finalize(result, p.hostExtractor)
 	return result, spa, nil
 }
 
@@ -580,8 +682,7 @@ func (p *Pipeline) processOutcome(state *runState, collected outcome) error {
 				deferred.body = collected.response.Body
 			default:
 				localPath, saveErr := storage.SaveJSIn(
-					p.options.Config.Output.Directory,
-					state.root,
+					state.reportDirectory,
 					p.options.Config.Output.JSDirectory,
 					resource,
 					collected.response.Body,
@@ -634,6 +735,8 @@ func (p *Pipeline) processOutcome(state *runState, collected outcome) error {
 	}
 
 	state.mergeParams(collected.params)
+	state.absorbBasePaths(collected.basePaths)
+	state.mergeHosts(collected.hosts, collected.hostNotes)
 	p.processCandidates(
 		state, collected.response.URL, collected.candidates, collected.item.Depth,
 	)
@@ -653,13 +756,15 @@ func (p *Pipeline) processCandidates(
 	if parseErr != nil {
 		return
 	}
+	// A configured base URL prefixes only the interface references: static
+	// resources are fetched where the document references them.
+	var baseOverride *url.URL
+	if state.resolutionBase != state.root {
+		baseOverride = state.resolutionBase
+	}
 	for _, candidate := range candidates {
-		candidateBase := base
-		if state.resolutionBase != state.root && isRelativeReference(candidate.Raw) {
-			candidateBase = state.resolutionBase
-		}
-		resolved, resolveErr := state.targetScope.Resolve(
-			candidate.Raw, candidateBase,
+		resolved, resolveErr := resolveCandidate(
+			state.targetScope, candidate.Raw, base, baseOverride,
 		)
 		if resolveErr != nil {
 			continue
@@ -734,6 +839,9 @@ func (p *Pipeline) processCandidates(
 					SourceURL: sourceURL, Depth: nextDepth,
 				})
 			}
+			// The same reference may only be reachable under a prefix the
+			// application declares, so it is tried there too.
+			p.exploreBasePaths(state, candidate, resolved, sourceURL, depth)
 		case discover.KindRoute:
 			if state.spa.HashRouting && resolved.Fragment == "" &&
 				isRelativeReference(candidate.Raw) {
@@ -883,7 +991,10 @@ type deferredAnalysis struct {
 	item       deferredJS
 	findings   []model.Finding
 	candidates []discover.Candidate
+	basePaths  []string
 	params     []model.ParamHit
+	hosts      []extract.Candidate
+	hostNotes  []extract.Note
 	spa        discover.SPAEvidence
 	readErr    error
 }
@@ -892,7 +1003,7 @@ type deferredAnalysis struct {
 // Items with a saved file are read from disk (dropping the in-memory copy
 // after the save); items with a fallback body are analyzed from memory.
 // The caller merges results sequentially so endpoint ordering stays stable.
-func (p *Pipeline) computeBatch(batch []deferredJS) []deferredAnalysis {
+func (p *Pipeline) computeBatch(batch []deferredJS, reportDirectory string) []deferredAnalysis {
 	analyses := make([]deferredAnalysis, len(batch))
 	var wait sync.WaitGroup
 	wait.Add(len(batch))
@@ -903,9 +1014,7 @@ func (p *Pipeline) computeBatch(batch []deferredJS) []deferredAnalysis {
 			analysis := deferredAnalysis{item: item, vendor: item.vendor}
 			body := item.body
 			if item.path != "" {
-				loaded, readErr := storage.LoadJS(
-					p.options.Config.Output.Directory, item.path,
-				)
+				loaded, readErr := storage.LoadJS(reportDirectory, item.path)
 				if readErr != nil {
 					analysis.readErr = readErr
 					analyses[index] = analysis
@@ -921,7 +1030,15 @@ func (p *Pipeline) computeBatch(batch []deferredJS) []deferredAnalysis {
 			jsResult := discover.FromJavaScript(item.source, body, p.options.Analyzer)
 			analysis.findings = jsResult.Findings
 			analysis.spa = jsResult.SPA
-			analysis.candidates = discover.APIFromAST(item.source, body)
+			analysis.hosts = append(analysis.hosts, jsResult.Hosts...)
+			// One parse yields both the API candidates and the host
+			// candidates; host discovery never re-parses the file.
+			jsAnalysis := discover.AnalyzeJS(item.source, body)
+			analysis.candidates = jsAnalysis.Candidates
+			analysis.hosts = append(analysis.hosts, jsAnalysis.Hosts...)
+			analysis.hostNotes = append(analysis.hostNotes, jsAnalysis.Notes...)
+			analysis.basePaths = append(analysis.basePaths, discover.BasePathNames(jsResult.BasePaths)...)
+			analysis.basePaths = append(analysis.basePaths, discover.BasePathNames(jsAnalysis.BasePaths)...)
 			analysis.params = discover.ParamsFromAST(item.source, body)
 			analyses[index] = analysis
 		}()
@@ -960,6 +1077,8 @@ func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
 		state.result.Findings = append(state.result.Findings, finding)
 	}
 	state.mergeParams(analysis.params)
+	state.absorbBasePaths(analysis.basePaths)
+	state.mergeHosts(analysis.hosts, analysis.hostNotes)
 	p.processCandidates(
 		state,
 		analysis.item.source.String(),
@@ -1043,21 +1162,32 @@ func (p *Pipeline) collectOne(
 		result.candidates = append(result.candidates, discover.FromWebpack(
 			discoveryBase, response.Body, p.candidateLimit(),
 		)...)
-		result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
+		documentJS := discover.AnalyzeJS(source, response.Body)
+		result.candidates = append(result.candidates, documentJS.Candidates...)
+		result.hosts = append(result.hosts, documentJS.Hosts...)
+		result.hostNotes = append(result.hostNotes, documentJS.Notes...)
+		result.basePaths = append(result.basePaths, discover.BasePathNames(documentJS.BasePaths)...)
 		result.params = append(result.params, discover.ParamsFromAST(source, response.Body)...)
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, textResult.SPA)
 		result.findings = append(result.findings, textResult.Findings...)
 		result.candidates = append(result.candidates, textResult.Candidates...)
+		result.hosts = append(result.hosts, textResult.Hosts...)
+		result.basePaths = append(result.basePaths, discover.BasePathNames(textResult.BasePaths)...)
+		// A document is the "embedded text" case: hosts written in markup or
+		// comments are recovered by the bounded regex pass.
+		result.hosts = append(result.hosts, discover.HostsFromText(source, response.Body)...)
 		for _, inline := range htmlResult.InlineScripts {
 			inlineResult := discover.FromJavaScript(source, []byte(inline), p.options.Analyzer)
 			mergeSPAEvidence(&result.spa, inlineResult.SPA)
 			result.findings = append(result.findings, inlineResult.Findings...)
 			result.candidates = append(result.candidates, inlineResult.Candidates...)
-			result.candidates = append(
-				result.candidates,
-				discover.APIFromAST(source, []byte(inline))...,
-			)
+			result.hosts = append(result.hosts, inlineResult.Hosts...)
+			inlineJS := discover.AnalyzeJS(source, []byte(inline))
+			result.candidates = append(result.candidates, inlineJS.Candidates...)
+			result.hosts = append(result.hosts, inlineJS.Hosts...)
+			result.hostNotes = append(result.hostNotes, inlineJS.Notes...)
+			result.basePaths = append(result.basePaths, discover.BasePathNames(inlineJS.BasePaths)...)
 			result.params = append(
 				result.params,
 				discover.ParamsFromAST(source, []byte(inline))...,
@@ -1077,16 +1207,25 @@ func (p *Pipeline) collectOne(
 		// application results.
 		result.vendor = vendor
 		vendorCandidates, vendorFindings := len(result.candidates), len(result.findings)
-		vendorParams := len(result.params)
+		vendorParams, vendorHosts := len(result.params), len(result.hosts)
 		defer func() {
-			markVendor(&result, vendor, vendorCandidates, vendorFindings, vendorParams)
+			markVendor(&result, vendor, vendorCandidates, vendorFindings, vendorParams, vendorHosts)
 		}()
 		if !deferJS {
-			result.candidates = append(result.candidates, discover.APIFromAST(source, response.Body)...)
+			scriptJS := discover.AnalyzeJS(source, response.Body)
+			result.candidates = append(result.candidates, scriptJS.Candidates...)
+			result.hosts = append(result.hosts, scriptJS.Hosts...)
+			result.hostNotes = append(result.hostNotes, scriptJS.Notes...)
+			result.basePaths = append(result.basePaths, discover.BasePathNames(scriptJS.BasePaths)...)
 			result.params = append(result.params, discover.ParamsFromAST(source, response.Body)...)
 		}
 		jsResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, jsResult.SPA)
+		// In deferred mode the file is analyzed later, so its hosts are
+		// collected there; inline mode has this single pass.
+		if !deferJS {
+			result.hosts = append(result.hosts, jsResult.Hosts...)
+		}
 		// Fetch-first mode reruns the regex engine and AST extractor over the
 		// downloaded bodies after collection, so this pass keeps only the
 		// candidates needed to discover follow-up scripts and chunks.
@@ -1123,6 +1262,9 @@ func (p *Pipeline) collectOne(
 		mergeSPAEvidence(&result.spa, textResult.SPA)
 		result.findings = append(result.findings, textResult.Findings...)
 		result.candidates = append(result.candidates, textResult.Candidates...)
+		result.hosts = append(result.hosts, textResult.Hosts...)
+		result.hosts = append(result.hosts, discover.HostsFromText(source, response.Body)...)
+		result.basePaths = append(result.basePaths, discover.BasePathNames(textResult.BasePaths)...)
 	}
 	return result
 }
@@ -1248,6 +1390,147 @@ func asHashRoute(resolved *url.URL) string {
 func isRelativeReference(raw string) bool {
 	reference, err := url.Parse(strings.TrimSpace(raw))
 	return err == nil && reference.Scheme == "" && reference.Host == ""
+}
+
+// maxBasePathPrefixes caps how many prefixes one target tries, and
+// maxBasePathEndpoints caps how many prefix-derived endpoints are probed, so a
+// bundle declaring many prefixes cannot multiply requests without bound.
+const (
+	maxBasePathPrefixes  = 8
+	maxBasePathEndpoints = 200
+	// basePathSource marks an endpoint that only exists because a declared
+	// prefix was joined to a relative reference.
+	basePathSource = "prefix"
+)
+
+// resolveCandidate resolves one discovered reference against the file it came
+// from, or against the configured base URL when the scan has one.
+//
+// A base URL carrying a path acts as a PREFIX: with --base-url
+// https://host/api the reference "/users" resolves to https://host/api/users.
+// Plain URL resolution would drop "/api" — a leading slash is absolute from
+// the host root — which is what made the flag look like it ignored its path.
+func resolveCandidate(
+	targetScope *scope.Scope,
+	raw string,
+	source *url.URL,
+	base *url.URL,
+) (*url.URL, error) {
+	reference := strings.TrimSpace(raw)
+	if reference == "" {
+		return nil, errors.New("empty reference")
+	}
+	parsed, err := url.Parse(reference)
+	if err != nil {
+		return nil, err
+	}
+	// No base URL configured, an absolute URL, or a protocol-relative
+	// reference: resolve exactly as before.
+	if base == nil || base == source || parsed.IsAbs() || parsed.Host != "" {
+		return targetScope.Resolve(raw, source)
+	}
+	prefix := strings.TrimRight(base.Path, "/")
+	if prefix == "" {
+		return targetScope.Resolve(raw, base)
+	}
+	// A reference already written under the prefix needs no joining.
+	if parsed.Path == prefix || strings.HasPrefix(parsed.Path, prefix+"/") {
+		return targetScope.Resolve(raw, base)
+	}
+	if !strings.HasPrefix(parsed.Path, "/") {
+		// A bare relative reference is joined to the base as a directory:
+		// "users" under https://host/api means https://host/api/users, not
+		// https://host/users (which is what file-like base resolution gives).
+		directory := *base
+		if !strings.HasSuffix(directory.Path, "/") {
+			directory.Path += "/"
+		}
+		return targetScope.Resolve(raw, &directory)
+	}
+	joined := prefix + parsed.Path
+	if parsed.RawQuery != "" {
+		joined += "?" + parsed.RawQuery
+	}
+	return targetScope.Resolve(joined, base)
+}
+
+// basePathReference returns the path of a reference that can be prefixed: only
+// a leading-slash path, because a bare relative reference depends on the
+// directory of the file it was read from.
+func basePathReference(raw string) string {
+	value := strings.TrimSpace(raw)
+	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
+		return ""
+	}
+	if strings.ContainsAny(value, " \t\r\n") {
+		return ""
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" {
+		return ""
+	}
+	if parsed.Path == "" || parsed.Path == "/" {
+		return ""
+	}
+	return parsed.Path
+}
+
+// exploreBasePaths registers one reference under every prefix the target's
+// JavaScript declared, so the probe stage can tell which prefix the
+// application really serves the interface on. Only probeable (in-scope)
+// endpoints are tried, and the total is capped per target.
+func (p *Pipeline) exploreBasePaths(
+	state *runState,
+	candidate discover.Candidate,
+	resolved *url.URL,
+	sourceURL string,
+	depth int,
+) {
+	if !p.options.Config.Scope.ExploreBasePaths || len(state.basePaths) == 0 {
+		return
+	}
+	path := basePathReference(candidate.Raw)
+	if path == "" {
+		return
+	}
+	for _, prefix := range state.basePaths {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			// The reference already carries the prefix; the endpoint exists.
+			continue
+		}
+		joined, err := state.targetScope.Resolve(prefix+path, resolved)
+		if err != nil || state.targetScope.IsSuffixBlocked(joined) ||
+			!state.targetScope.CanProbe(joined) {
+			continue
+		}
+		canonical := scope.Canonical(joined)
+		if _, exists := state.endpointIndex[canonical]; exists {
+			continue
+		}
+		if state.basePathEndpoints >= maxBasePathEndpoints {
+			state.noteBasePathLimit()
+			return
+		}
+		state.basePathEndpoints++
+		state.endpointIndex[canonical] = len(state.result.Endpoints)
+		state.result.Endpoints = append(state.result.Endpoints, model.Endpoint{
+			Raw:          prefix + path,
+			URL:          canonical,
+			SourceURL:    sourceURL,
+			Authorized:   true,
+			Method:       candidate.Method,
+			Evidence:     model.EvidenceStatic,
+			Source:       basePathSource,
+			Line:         candidate.Line,
+			Column:       candidate.Column,
+			ContextLines: candidate.ContextLines,
+			Type:         "api",
+		})
+		state.queue.Add(scheduler.Item{
+			URL: canonical, Kind: model.ResourceTypeAPI,
+			SourceURL: sourceURL, Depth: depth + 1,
+		})
+	}
 }
 
 // routeType distinguishes true framework routes (dedicated router rules or
@@ -1380,10 +1663,19 @@ func mergeParamHits(result *model.Result, hits []model.ParamHit) {
 // so callers that merge results from a second pass can refresh the counts the
 // report header shows.
 func Finalize(result *model.Result) {
-	finalize(result)
+	finalize(result, nil)
 }
 
-func finalize(result *model.Result) {
+// finalize sorts the result, recomputes statistics and derives the
+// scan-associated host list. A nil extractor uses a default one, which is what
+// external callers that never built a pipeline get.
+func finalize(result *model.Result, extractor *extract.Extractor) {
+	if extractor == nil {
+		extractor = defaultHostExtractor()
+	}
+	scanHosts, scanNotes := extract.CollectScanHosts(result, extractor)
+	result.ScanHosts = scanHosts
+	recordHostNotes(result, scanNotes)
 	mergeParamHits(result, deriveParamHits(result))
 	sort.SliceStable(result.Params, func(i, j int) bool {
 		if result.Params[i].SourceURL != result.Params[j].SourceURL {

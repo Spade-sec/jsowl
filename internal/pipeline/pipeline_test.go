@@ -16,6 +16,7 @@ import (
 	"github.com/youmulijiang/jsowl/internal/collect"
 	"github.com/youmulijiang/jsowl/internal/collect/direct"
 	"github.com/youmulijiang/jsowl/internal/model"
+	"github.com/youmulijiang/jsowl/internal/storage"
 )
 
 func newTestPipeline(t *testing.T, config model.Config, server *httptest.Server) *Pipeline {
@@ -242,11 +243,20 @@ func TestDeferredAnalysisPersistsToDiskAndFindsEndpoints(t *testing.T) {
 	if len(saved) == 0 {
 		t.Fatal("no JS resource was persisted")
 	}
+	// LocalPath is relative to the target's report directory, so the recorded
+	// path resolves next to the report that references it.
+	reportDirectory, err := storage.TargetDirectory(outputDirectory, "http://stub.test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, path := range saved {
 		if _, err := os.Stat(
-			filepath.Join(outputDirectory, filepath.FromSlash(path)),
+			filepath.Join(reportDirectory, filepath.FromSlash(path)),
 		); err != nil {
 			t.Fatalf("saved file missing: %v", err)
+		}
+		if _, err := storage.LoadJS(reportDirectory, path); err != nil {
+			t.Fatalf("saved file is not readable from the report directory: %v", err)
 		}
 	}
 	if len(result.Issues) != 0 {

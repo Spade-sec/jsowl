@@ -301,6 +301,11 @@ type ScopeConfig struct {
 	// ProbeRoutes optionally GETs framework routes and compares their body
 	// against the index page to tell server-backed routes from SPA fallbacks.
 	ProbeRoutes bool `yaml:"probe_routes" json:"probe_routes"`
+	// ExploreBasePaths, on by default, tries every relative interface
+	// reference under each base path the JavaScript declares
+	// (axios.create({ baseURL: "/api" })) and probes the result, so the
+	// prefix the application really serves is discovered instead of assumed.
+	ExploreBasePaths bool `yaml:"explore_base_paths" json:"explore_base_paths"`
 	// ProbeSourceMaps fetches JavaScript source maps and feeds the sources
 	// they embed back into the analyzer, which recovers the unminified
 	// originals. On by default: a leaked map usually restores the whole app.
@@ -334,6 +339,16 @@ type RulesConfig struct {
 	Custom   []Rule   `yaml:"custom" json:"custom"`
 }
 
+// HostsConfig tunes host extraction. The Public Suffix List itself is fixed
+// data shipped with the binary; only locally meaningful suffixes are added
+// here, so a shared PSL snapshot never has to be edited for one engagement.
+type HostsConfig struct {
+	// InternalSuffixes lists extra suffixes that mark a host as internal
+	// (corp, lan, internal.example). Matching is on the full trailing label
+	// run: "svc.corp" matches an entry "corp".
+	InternalSuffixes []string `yaml:"internal_suffixes" json:"internal_suffixes,omitempty"`
+}
+
 // Config contains every library and CLI scan setting.
 type Config struct {
 	Mode        Mode              `yaml:"mode" json:"mode"`
@@ -343,6 +358,7 @@ type Config struct {
 	Limits      LimitsConfig      `yaml:"limits" json:"limits"`
 	Scope       ScopeConfig       `yaml:"scope" json:"scope"`
 	Output      OutputConfig      `yaml:"output" json:"output"`
+	Hosts       HostsConfig       `yaml:"hosts" json:"hosts"`
 	RulesFile   string            `yaml:"rules_file" json:"rules_file,omitempty"`
 	Rules       RulesConfig       `yaml:"-" json:"rules"`
 	// AI configures the optional AI-assist layer (-ai): an OpenAI-compatible
@@ -621,6 +637,114 @@ type Statistics struct {
 	Findings  int `json:"findings"`
 }
 
+// HostKind classifies one host. A value is only ever a domain when the Public
+// Suffix List recognized its suffix; everything else is reported as an IP or
+// as an internal-host candidate instead of being folded into the domain count.
+type HostKind string
+
+const (
+	HostKindDomain   HostKind = "domain"
+	HostKindIPv4     HostKind = "ipv4"
+	HostKindIPv6     HostKind = "ipv6"
+	HostKindInternal HostKind = "internal_host"
+)
+
+// HostOrigin separates the two populations the report must never mix: hosts
+// found inside JavaScript content, and hosts the scan itself touched.
+const (
+	HostOriginContent = "js"   // discovered in analyzed content
+	HostOriginScan    = "scan" // belongs to a scanned resource, endpoint or finding source
+)
+
+// Suffix resolution outcomes for a host asset.
+const (
+	// SuffixRecognized: the Public Suffix List snapshot matched, so the
+	// registrable domain and subdomain are authoritative.
+	SuffixRecognized = "recognized"
+	// SuffixCustom: a special-use or locally configured suffix matched, so no
+	// registrable domain is claimed.
+	SuffixCustom = "custom"
+	// SuffixUnknown: no suffix rule matched at all.
+	SuffixUnknown = "unknown"
+	// SuffixUnresolved: the Public Suffix List was unavailable, so the domain
+	// hierarchy could not be computed. The validated candidate is kept.
+	SuffixUnresolved = "unresolved"
+	// SuffixNotApplicable: the asset is an IP address, which has no suffix.
+	SuffixNotApplicable = "not_applicable"
+)
+
+// IP address attributes. They describe what the address IS, not what is
+// reachable: an address carrying none of them is not thereby "publicly
+// routable", it is simply unclassified.
+const (
+	HostAttrPrivate      = "private"
+	HostAttrLoopback     = "loopback"
+	HostAttrLinkLocal    = "link_local"
+	HostAttrMulticast    = "multicast"
+	HostAttrUnspecified  = "unspecified"
+	HostAttrUnclassified = "unclassified"
+)
+
+// Host extraction methods: how the candidate was recovered.
+const (
+	HostMethodURL              = "url"               // parsed out of a network URL
+	HostMethodASTLiteral       = "ast_literal"       // string literal in the AST
+	HostMethodStaticExpression = "static_expression" // statically folded expression
+	HostMethodRegex            = "regex"             // regex fallback pass
+)
+
+// HostEvidence is one place a host was observed. Raw values and raw URLs are
+// always preserved alongside the normalized form, so evidence is never
+// replaced by its normalization.
+type HostEvidence struct {
+	// SourceURL is the file or document the candidate was read from.
+	SourceURL string `json:"source_url,omitempty"`
+	// Raw is the value as it appeared (string literal text, URL, field value).
+	Raw string `json:"raw"`
+	// Line and Column locate the candidate in the source (1-based), matching
+	// the convention every other report section uses.
+	Line   int `json:"line,omitempty"`
+	Column int `json:"column,omitempty"`
+	// Method is one of the HostMethod* values.
+	Method string `json:"extraction_method"`
+	// ContextLines carries the surrounding source lines of the match.
+	ContextLines []ContextLine `json:"context_lines,omitempty"`
+	// AssociatedURL keeps the full URL when the host was read out of one.
+	AssociatedURL string `json:"associated_url,omitempty"`
+	// Note records why an evidence entry exists when the method alone does not
+	// say it: "email_domain", "comment", "dynamic_host", the scan role, ...
+	Note string `json:"note,omitempty"`
+	// Vendor marks evidence read from a third-party library bundle.
+	Vendor bool `json:"vendor,omitempty"`
+}
+
+// HostAsset is one deduplicated host with every place it was observed.
+type HostAsset struct {
+	Kind  HostKind `json:"kind"`
+	Value string   `json:"value"`
+	// RegistrableDomain and Subdomain follow the Public Suffix List; both are
+	// empty unless SuffixStatus is SuffixRecognized.
+	RegistrableDomain string `json:"registrable_domain,omitempty"`
+	PublicSuffix      string `json:"public_suffix,omitempty"`
+	Subdomain         string `json:"subdomain,omitempty"`
+	// SuffixStatus is one of the Suffix* values.
+	SuffixStatus string `json:"suffix_status"`
+	// Zone keeps an IPv6 zone identifier ("%eth0") out of the dedup key while
+	// still recording it.
+	Zone string `json:"zone,omitempty"`
+	// Attributes lists the HostAttr* values that apply. No numeric or
+	// composite score is produced anywhere in this structure.
+	Attributes []string `json:"attributes,omitempty"`
+	// Origin is HostOriginContent or HostOriginScan.
+	Origin string `json:"origin"`
+	// Occurrences counts the evidence entries kept for this asset.
+	Occurrences int `json:"occurrences"`
+	// Vendor is set when every piece of evidence came from a third-party
+	// library bundle.
+	Vendor  bool           `json:"vendor,omitempty"`
+	Sources []HostEvidence `json:"sources,omitempty"`
+}
+
 // Result is the deterministic, serializable output of one target scan.
 type Result struct {
 	Target        string        `json:"target"`
@@ -638,8 +762,17 @@ type Result struct {
 	// placeholders), each tagged with its extraction scenario.
 	Params       []ParamHit `json:"params,omitempty"`
 	Technologies []string   `json:"technologies"`
-	Statistics   Statistics `json:"statistics"`
-	Issues       []Issue    `json:"issues"`
+	// Hosts lists hosts discovered inside analyzed content (JavaScript,
+	// documents, source maps). Being listed here means the value was found in
+	// the code, not that the host resolves or accepts traffic.
+	Hosts []HostAsset `json:"hosts,omitempty"`
+	// ScanHosts lists the hosts the scan itself touched: resources, endpoints
+	// and finding sources. It is a separate population on purpose, so a host
+	// that happens to appear in both can be correlated without merging the two
+	// counts into one unexplained number.
+	ScanHosts  []HostAsset `json:"scan_hosts,omitempty"`
+	Statistics Statistics  `json:"statistics"`
+	Issues     []Issue     `json:"issues"`
 }
 
 type BatchItem struct {

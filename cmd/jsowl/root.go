@@ -9,12 +9,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/cespare/xxhash/v2"
 	"github.com/spf13/cobra"
 	"github.com/youmulijiang/jsowl"
 	"github.com/youmulijiang/jsowl/internal/model"
@@ -578,20 +575,9 @@ func writeReports(
 	return nil
 }
 
-var invalidDirectoryCharacter = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
-
+// targetReportDirectory derives the per-target report directory. The
+// derivation lives in storage because the pipeline saves that target's
+// JavaScript into the same directory; both must agree.
 func targetReportDirectory(root, rawTarget string) (string, error) {
-	parsed, err := url.Parse(rawTarget)
-	if err != nil || parsed.Host == "" {
-		return "", fmt.Errorf("derive report directory for %q", rawTarget)
-	}
-	name := strings.Trim(invalidDirectoryCharacter.ReplaceAllString(parsed.Host, "_"), " .")
-	if name == "" {
-		return "", errors.New("target host produced an empty report directory")
-	}
-	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" {
-		parsed.Fragment = ""
-		name += fmt.Sprintf("-%08x", uint32(xxhash.Sum64String(parsed.String())))
-	}
-	return filepath.Join(root, name), nil
+	return jsowl.TargetReportDirectory(root, rawTarget)
 }

@@ -65,6 +65,7 @@ func DefaultConfig() Config {
 			FetchExternalScripts: true,
 			ProbeSourceMaps:      true,
 			SkipLibraryBundles:   true,
+			ExploreBasePaths:     true,
 			SourceMapBlacklist: []string{
 				// Library and vendor bundles: their maps are huge and their
 				// sources never describe the target application.

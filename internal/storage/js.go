@@ -25,21 +25,23 @@ var (
 	}
 )
 
-// SaveJS atomically stores a script or chunk under <root>/<host>/js and
-// returns a slash-separated path relative to root.
+// SaveJS atomically stores a script or chunk under <reportDirectory>/js and
+// returns a slash-separated path relative to that directory.
+//
+// The report directory is the target's own directory (see TargetDirectory), so
+// downloaded JavaScript lives next to the report that references it and the
+// recorded local path resolves inside the report folder, not in a sibling one.
 func SaveJS(
-	root string,
-	target *url.URL,
+	reportDirectory string,
 	resource model.Resource,
 	body []byte,
 ) (string, error) {
-	return SaveJSIn(root, target, "js", resource, body)
+	return SaveJSIn(reportDirectory, "js", resource, body)
 }
 
 // SaveJSIn is SaveJS with a configurable JavaScript directory name.
 func SaveJSIn(
-	root string,
-	target *url.URL,
+	reportDirectory string,
 	jsDirectory string,
 	resource model.Resource,
 	body []byte,
@@ -48,17 +50,16 @@ func SaveJSIn(
 		resource.Type != model.ResourceTypeChunk {
 		return "", errors.New("only script and chunk resources may be stored")
 	}
-	if target == nil || target.Host == "" {
-		return "", errors.New("target URL must include a host")
+	if strings.TrimSpace(reportDirectory) == "" {
+		return "", errors.New("report directory must not be empty")
 	}
 	parsed, err := url.Parse(resource.URL)
 	if err != nil {
 		return "", fmt.Errorf("parse script URL: %w", err)
 	}
 
-	hostDirectory := sanitizeComponent(target.Host)
 	jsDirectory = sanitizeComponent(filepath.Base(jsDirectory))
-	directoryParts := []string{root, hostDirectory, jsDirectory}
+	directoryParts := []string{reportDirectory, jsDirectory}
 	if resource.Type == model.ResourceTypeChunk {
 		directoryParts = append(directoryParts, "chunks")
 	}
@@ -82,7 +83,7 @@ func SaveJSIn(
 
 	if existing, readErr := os.ReadFile(absolute); readErr == nil {
 		if bytes.Equal(existing, body) {
-			return relativeToRoot(root, absolute)
+			return relativeToRoot(reportDirectory, absolute)
 		}
 		// Re-scanning into an existing report directory rewrites the same
 		// stable filename with fresh content. Replace it instead of failing;
@@ -120,20 +121,20 @@ func SaveJSIn(
 		return "", fmt.Errorf("publish script: %w", err)
 	}
 	cleanup = false
-	return relativeToRoot(root, absolute)
+	return relativeToRoot(reportDirectory, absolute)
 }
 
-// LoadJS reads back a script previously saved under root by its
-// slash-separated relative path, rejecting paths that escape the root.
-func LoadJS(root, relativePath string) ([]byte, error) {
+// LoadJS reads back a script previously saved under the report directory by its
+// slash-separated relative path, rejecting paths that escape it.
+func LoadJS(reportDirectory, relativePath string) ([]byte, error) {
 	if filepath.IsAbs(relativePath) {
-		return nil, errors.New("script path must be relative to the output root")
+		return nil, errors.New("script path must be relative to the report directory")
 	}
-	absolute := filepath.Join(root, filepath.FromSlash(relativePath))
-	relative, err := filepath.Rel(root, absolute)
+	absolute := filepath.Join(reportDirectory, filepath.FromSlash(relativePath))
+	relative, err := filepath.Rel(reportDirectory, absolute)
 	if err != nil || relative == ".." ||
 		strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return nil, errors.New("script path escaped output root")
+		return nil, errors.New("script path escaped report directory")
 	}
 	return os.ReadFile(absolute)
 }
@@ -157,7 +158,7 @@ func relativeToRoot(root, absolute string) (string, error) {
 		return "", fmt.Errorf("make script path relative: %w", err)
 	}
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", errors.New("script destination escaped output root")
+		return "", errors.New("script destination escaped report directory")
 	}
 	return filepath.ToSlash(relative), nil
 }

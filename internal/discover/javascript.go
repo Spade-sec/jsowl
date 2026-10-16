@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/youmulijiang/jsowl/internal/analyze"
+	"github.com/youmulijiang/jsowl/internal/extract"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
@@ -51,6 +52,11 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 			)
 		}
 		result.Candidates = append(result.Candidates, candidate)
+		// A rule that matched a network URL also produced a host observation:
+		// the same value, recorded as host evidence without another body scan.
+		if host := hostCandidateFromURL(source, body, extractedCandidate); host != nil {
+			result.Hosts = append(result.Hosts, *host)
+		}
 	}
 
 	lower := bytes.ToLower(body)
@@ -67,6 +73,9 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 	result.SPA.RequireJS = bytes.Contains(lower, []byte("requirejs.config")) ||
 		bytes.Contains(lower, []byte("require.config"))
 	result.SPA.LargeBundle = len(body) >= largeBundleThreshold
+	// A base path often lives in a config blob the AST does not model, so the
+	// text pass looks for the same assignments.
+	result.BasePaths = scanBasePathText(body, maxBasePathsPerFile)
 	return result
 }
 
@@ -217,4 +226,31 @@ func lineColumn(body []byte, offset int) (int, int) {
 	lineStart := lineStarts(body)[line-1]
 	column := len([]rune(string(body[lineStart:offset]))) + 1
 	return line, column
+}
+
+// hostCandidateFromURL turns a rule-engine hit on a network URL into a host
+// candidate. Values that are not network URLs (paths, filenames, bare
+// literals) yield nothing: the rules engine matches request targets, and only
+// its URL hits carry a host.
+func hostCandidateFromURL(
+	source *url.URL,
+	body []byte,
+	extracted analyze.Candidate,
+) *extract.Candidate {
+	if _, ok := extract.HostFromNetworkURL(extracted.Raw); !ok {
+		return nil
+	}
+	candidate := extract.Candidate{
+		Raw:       extracted.Raw,
+		Context:   extract.ContextURL,
+		Method:    model.HostMethodRegex,
+		SourceURL: source.String(),
+	}
+	if extracted.Offset > 0 {
+		candidate.Line, candidate.Column = lineColumn(body, extracted.Offset)
+		candidate.ContextLines = extractContext(
+			body, extracted.Offset, contextSpanLines, extracted.Raw,
+		)
+	}
+	return &candidate
 }

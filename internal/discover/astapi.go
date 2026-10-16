@@ -13,6 +13,8 @@ import (
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
 	javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
+
+	"github.com/youmulijiang/jsowl/internal/extract"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
@@ -91,7 +93,6 @@ func collectJSONFieldNames(
 // maxBodyParams caps how many field names one request contributes.
 const maxBodyParams = 32
 
-
 // maxParamDepth bounds how deep nested object parameters are flattened.
 const maxParamDepth = 2
 
@@ -126,24 +127,74 @@ func specKeyParams(params []model.Param) []string {
 	return keys
 }
 
-// APIFromAST parses JavaScript with Tree-sitter. Unlike the old parser, a
-// local syntax error does not discard valid call sites elsewhere in the file.
-func APIFromAST(source *url.URL, body []byte) []Candidate {
+// JSAnalysis is everything one JavaScript parse yields: the API candidates and
+// the host candidates, plus any extraction-limit diagnostics.
+type JSAnalysis struct {
+	Candidates []Candidate
+	Hosts      []extract.Candidate
+	// BasePaths lists the interface prefixes this file declares; the pipeline
+	// tries relative references under each of them.
+	BasePaths []BasePathCandidate
+	Notes     []extract.Note
+}
+
+// AnalyzeJS parses JavaScript with Tree-sitter once and returns both the API
+// candidates and the host candidates found in the same tree. The host pass
+// reuses the walker's resolved constant table, so a host assembled from
+// literals resolves the same way a URL does and no file is parsed twice.
+func AnalyzeJS(source *url.URL, body []byte) JSAnalysis {
 	parser := sitter.NewParser()
 	defer parser.Close()
 	if err := parser.SetLanguage(sitter.NewLanguage(javascript.Language())); err != nil {
-		return nil
+		return JSAnalysis{}
 	}
 	tree := parser.Parse(body, nil)
 	if tree == nil {
-		return nil
+		return JSAnalysis{}
 	}
 	defer tree.Close()
 	root := tree.RootNode()
 	if root == nil || root.NamedChildCount() == 0 {
-		return nil
+		// The parse produced nothing usable: fall back to the bounded text
+		// scan so hosts in an unparseable body are still recoverable.
+		sourceURL := ""
+		if source != nil {
+			sourceURL = source.String()
+		}
+		return JSAnalysis{
+			Hosts:     HostsFromText(source, body),
+			BasePaths: scanBasePathText(body, maxBasePathsPerFile),
+			Notes: []extract.Note{{
+				Code:    extract.NoteParseFallback,
+				Message: "JavaScript 解析未产生可用语法树，主机提取退化为文本扫描。",
+				URL:     sourceURL,
+			}},
+		}
 	}
-	w := &astWalker{
+	w := newASTWalker(body)
+	w.walk(root)
+	w.resolveWrapperCallers(root)
+	w.resolveAliasedCalls()
+	w.resolveHeuristics()
+	w.resolveTaint()
+	hosts := collectHosts(source, body, root)
+	return JSAnalysis{
+		Candidates: apiCandidates(w),
+		Hosts:      hosts.Candidates,
+		BasePaths:  hosts.BasePaths,
+		Notes:      hosts.Notes,
+	}
+}
+
+// APIFromAST parses JavaScript with Tree-sitter. Unlike the old parser, a
+// local syntax error does not discard valid call sites elsewhere in the file.
+func APIFromAST(source *url.URL, body []byte) []Candidate {
+	return AnalyzeJS(source, body).Candidates
+}
+
+// newASTWalker builds the request-oriented walker with its scope tables.
+func newASTWalker(body []byte) *astWalker {
+	return &astWalker{
 		constants:        map[string]string{},
 		objectConstants:  map[string]map[string]string{},
 		instanceBSE:      map[string]string{},
@@ -163,11 +214,11 @@ func APIFromAST(source *url.URL, body []byte) []Candidate {
 		wrappers:         map[string]wrappedCall{},
 		source:           body,
 	}
-	w.walk(root)
-	w.resolveWrapperCallers(root)
-	w.resolveAliasedCalls()
-	w.resolveHeuristics()
-	w.resolveTaint()
+}
+
+// apiCandidates assembles the deduplicated, sorted candidate list a walker
+// produced.
+func apiCandidates(w *astWalker) []Candidate {
 	sort.SliceStable(w.calls, func(i, j int) bool {
 		if w.calls[i].Line != w.calls[j].Line {
 			return w.calls[i].Line < w.calls[j].Line

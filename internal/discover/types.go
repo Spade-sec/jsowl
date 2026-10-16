@@ -3,6 +3,7 @@ package discover
 import (
 	"strings"
 
+	"github.com/youmulijiang/jsowl/internal/extract"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
@@ -79,4 +80,11 @@ type JSResult struct {
 	Candidates []Candidate
 	Findings   []model.Finding
 	SPA        SPAEvidence
+	// Hosts lists host candidates recovered from the text pass. A candidate is
+	// a raw observation: validation and classification happen once, in
+	// internal/extract.
+	Hosts []extract.Candidate
+	// BasePaths lists interface prefixes found by the text pass, such as the
+	// "baseUrl": "/api" of an embedded config blob.
+	BasePaths []BasePathCandidate
 }

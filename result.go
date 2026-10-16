@@ -3,6 +3,7 @@ package jsowl
 import (
 	"github.com/youmulijiang/jsowl/internal/model"
 	"github.com/youmulijiang/jsowl/internal/report"
+	"github.com/youmulijiang/jsowl/internal/storage"
 )
 
 // Result is the deterministic output of one target scan.
@@ -66,6 +67,18 @@ type ProbeEvent = model.ProbeEvent
 // WriteJSONReport atomically writes the complete scan result as JSON.
 func WriteJSONReport(path string, result *Result) error {
 	return report.WriteJSON(path, result)
+}
+
+// TargetReportDirectory returns the report directory for one target: the output
+// root plus the target's host, with a stable hash suffix when the target
+// carries a path or a query.
+//
+// Everything belonging to a target is written here — report.json, report.html,
+// the split reports, the plain-text lists and the downloaded JavaScript — so a
+// caller that writes the reports itself (an MCP or HTTP wrapper, for instance)
+// must use this function to find the directory the scanner saved scripts into.
+func TargetReportDirectory(root, rawTarget string) (string, error) {
+	return storage.TargetDirectory(root, rawTarget)
 }
 
 // WriteHTMLReport atomically writes a self-contained interactive HTML report.

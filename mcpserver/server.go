@@ -198,7 +198,7 @@ func (s *Store) scanTool(ctx context.Context, req *mcp.CallToolRequest, input sc
 	}
 
 	id := s.put(result)
-	reportDir, reportErr := s.writeReports(id, result)
+	reportDir, reportErr := s.writeReports(raw, result)
 
 	output := scanOutput{
 		ScanID: id, Target: result.Target, Mode: string(result.Mode),
@@ -348,9 +348,9 @@ func (s *Store) sensitiveTool(ctx context.Context, req *mcp.CallToolRequest, inp
 }
 
 type parameterRowOut struct {
-	Name      string   `json:"name"`
-	Example   string   `json:"example,omitempty"`
-	FirstSeen string   `json:"first_seen,omitempty"`
+	Name      string `json:"name"`
+	Example   string `json:"example,omitempty"`
+	FirstSeen string `json:"first_seen,omitempty"`
 	// Scenarios lists how the name was recovered: object_property,
 	// destructuring, nested_destructuring, function_param, variable,
 	// api_request, url_query, config_object, route_param.
@@ -482,8 +482,14 @@ func (s *Store) reportRoot() string {
 	return dir
 }
 
-func (s *Store) writeReports(id string, result *jsowl.Result) (string, error) {
-	directory := filepath.Join(s.reportRoot(), id)
+// writeReports writes this scan's reports into the target's own directory —
+// the same one the pipeline saved the JavaScript into — so a report and its
+// scripts never end up in two different folders.
+func (s *Store) writeReports(rawTarget string, result *jsowl.Result) (string, error) {
+	directory, err := jsowl.TargetReportDirectory(s.reportRoot(), rawTarget)
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return "", err
 	}

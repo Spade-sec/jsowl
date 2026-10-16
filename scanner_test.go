@@ -423,8 +423,14 @@ func TestScannerOptionallyStoresOnlyJavaScript(t *testing.T) {
 	if scriptPath == "" {
 		t.Fatal("script LocalPath is empty")
 	}
+	// LocalPath is relative to the target's report directory, so the script
+	// sits in the same folder as the report that references it.
+	reportDirectory, err := TargetReportDirectory(config.Output.Directory, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(
-		config.Output.Directory,
+		reportDirectory,
 		filepath.FromSlash(scriptPath),
 	)); err != nil {
 		t.Fatalf("stored script: %v", err)
