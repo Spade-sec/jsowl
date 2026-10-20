@@ -97,16 +97,16 @@ browser:
 
 ## 运行时输出
 
-默认对每个已爬取资源输出一行：
+请求完成后立即输出一行，多个扫描协程通过容量为 256 的队列交给单个输出协程，按入队顺序逐行写入终端：
 
 ```text
-https://example.com/ [18240] [200] [text/html; charset=utf-8]
+[GET] [https://example.com/] [success] [200] [18240]
+[POST] [https://example.com/api/users] [success] [403] [128]
+[GET] [https://example.com/timeout] [faile] [0] [0]
 ```
 
-依次为 URL、响应体长度、状态码和 Content-Type。API 探测完成时流式输出：
+依次为请求方法、链接、请求结果、HTTP 状态码和响应体字节数。收到完整响应（包括 4xx/5xx）为 `success`；请求或响应读取失败为 `faile`，状态码与长度显示 0。HTTP 采集在重试结束后输出最终结果；浏览器页面请求在加载完成或失败时输出。HTTP 长度为实际读取的正文长度（配置截断时为截断后的长度），浏览器长度为 CDP 累计收到的解码正文长度，不含响应头。
 
-```text
-[200] GET https://api.example.com/v2/user/info [runtime]
-```
+队列满时等待，不丢弃请求记录；退出前排空队列。并发请求按完成事件的入队顺序输出，不保证与发起顺序相同。浏览器加载与之后的 HTTP 采集是不同请求，同一链接可能出现多次。扫描结束后不再重复打印资源清单。
 
-使用 `--silent` 可关闭成功行输出，但报告写入和 stderr 错误输出不受影响。
+使用 `--silent` 可关闭请求行输出，但报告写入和 stderr 错误输出不受影响。

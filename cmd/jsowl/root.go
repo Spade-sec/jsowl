@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -22,7 +21,7 @@ var version = "dev"
 
 type scanService interface {
 	ScanBatch(context.Context, []jsowl.Target) <-chan jsowl.BatchItem
-	SetProbeSink(chan<- jsowl.ProbeEvent)
+	SetRequestSink(chan<- jsowl.RequestEvent)
 }
 
 type dependencies struct {
@@ -331,18 +330,12 @@ func runScans(
 		}
 		defer closeLoginAfterScan(scanner)
 	}
-	// Producer-consumer printing: the scanner (producer) pushes one probe
-	// event per completed API probe into a buffered channel; a dedicated
-	// printer goroutine (consumer) drains it so report writing and further
-	// scanning are never blocked. A slow terminal only drops events. Both
-	// the printer and the batch loop write to stdout, so they share a
-	// synchronized writer to keep lines from interleaving.
-	probeEvents := make(chan jsowl.ProbeEvent, 256)
-	printable := &synchronizedWriter{writer: deps.stdout}
+	// A single consumer owns stdout. The bounded queue never drops requests.
+	events := make(chan jsowl.RequestEvent, 256)
 	if !silent {
-		scanner.SetProbeSink(probeEvents)
+		scanner.SetRequestSink(events)
 	}
-	printerDone := startProbePrinter(printable, probeEvents, silent)
+	printerDone := startRequestPrinter(deps.stdout, events, silent)
 	failures := 0
 	for item := range scanner.ScanBatch(ctx, targets) {
 		if item.Result != nil {
@@ -364,13 +357,8 @@ func runScans(
 			_, _ = fmt.Fprintf(deps.stderr, "%s: %v\n", item.Target.URL, item.Err)
 			continue
 		}
-		if !silent {
-			for _, line := range formatResultLines(item.Result) {
-				_, _ = fmt.Fprintln(printable, line)
-			}
-		}
 	}
-	close(probeEvents)
+	close(events)
 	<-printerDone
 	if failures > 0 {
 		return fmt.Errorf("%d target or report task(s) failed", failures)
@@ -479,67 +467,30 @@ func closeLoginAfterScan(scanner scanService) {
 	}
 }
 
-// synchronizedWriter serializes concurrent writes so probe lines from the
-// printer goroutine never interleave with batch result lines mid-line.
-type synchronizedWriter struct {
-	mu     sync.Mutex
-	writer io.Writer
-}
-
-func (writer *synchronizedWriter) Write(data []byte) (int, error) {
-	writer.mu.Lock()
-	defer writer.mu.Unlock()
-	return writer.writer.Write(data)
-}
-
-// startProbePrinter launches the consumer side of probe-event streaming. It
-// returns a channel closed once the printer has drained every event, so the
-// caller can guarantee all lines are flushed before exiting. In silent mode
-// events are still drained (keeping the producer unblocked) but not printed.
-func startProbePrinter(
-	stdout io.Writer,
-	events <-chan jsowl.ProbeEvent,
-	silent bool,
-) <-chan struct{} {
+// startRequestPrinter drains all queued events before signaling completion.
+func startRequestPrinter(stdout io.Writer, events <-chan jsowl.RequestEvent, silent bool) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		for event := range events {
-			if silent {
-				continue
+			if !silent {
+				_, _ = fmt.Fprintln(stdout, formatRequestLine(event))
 			}
-			_, _ = fmt.Fprintln(stdout, formatProbeLine(event))
 		}
 	}()
 	return done
 }
 
-func formatProbeLine(event jsowl.ProbeEvent) string {
+func formatRequestLine(event jsowl.RequestEvent) string {
 	method := event.Method
 	if method == "" {
 		method = "GET"
 	}
-	return fmt.Sprintf("[%d] %s %s [%s]", event.StatusCode, method, event.URL, event.Evidence)
-}
-
-func formatResultLines(result *jsowl.Result) []string {
-	if result == nil {
-		return nil
+	status := "faile"
+	if event.Success {
+		status = "success"
 	}
-	lines := make([]string, 0, max(1, len(result.Resources)))
-	for _, resource := range result.Resources {
-		lines = append(lines, fmt.Sprintf(
-			"%s [%d] [%d] [%s]",
-			resource.URL,
-			resource.Size,
-			resource.StatusCode,
-			resource.ContentType,
-		))
-	}
-	if len(lines) == 0 {
-		lines = append(lines, fmt.Sprintf("%s [0] [0] []", result.Target))
-	}
-	return lines
+	return fmt.Sprintf("[%s] [%s] [%s] [%d] [%d]", method, event.URL, status, event.StatusCode, event.Size)
 }
 
 func writeReports(

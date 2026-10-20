@@ -53,8 +53,8 @@ jsowl --check                                 # 检查配置、规则与本地�
 ## 示例输出
 
 ```text
-https://example.com/ [18240] [200] [text/html; charset=utf-8]
-[200] GET https://api.example.com/v2/user/info [runtime]
+[GET] [https://example.com/] [success] [200] [18240]
+[GET] [https://api.example.com/v2/user/info] [success] [200] [128]
 ```
 
 ```text

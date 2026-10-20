@@ -129,6 +129,8 @@ setTimeout(() => {
 		t.Fatal(err)
 	}
 
+	events := make(chan collect.RequestEvent, 256)
+	collector.SetRequestSink(events)
 	result, err := collector.Collect(
 		context.Background(),
 		target,
@@ -141,6 +143,19 @@ setTimeout(() => {
 	)
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
+	}
+	close(events)
+	foundPost := false
+	for event := range events {
+		if event.URL == server.URL+"/fetch" {
+			foundPost = true
+			if event.Method != "POST" || !event.Success || event.StatusCode != 200 || event.Size != int64(len(`{"api":"/from-fetch"}`)) {
+				t.Fatalf("browser request event = %+v", event)
+			}
+		}
+	}
+	if !foundPost {
+		t.Fatal("missing browser POST request completion")
 	}
 	if len(result.HTML) == 0 {
 		t.Fatal("Collect() returned empty rendered HTML")

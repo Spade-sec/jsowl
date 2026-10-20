@@ -31,6 +31,7 @@ type Scanner struct {
 	analyzer       *analyze.Engine
 	browserFactory func(model.BrowserConfig) (collect.BrowserCollector, error)
 	probeSink      chan<- model.ProbeEvent
+	requestSink    chan<- RequestEvent
 	loginSession   *browser.LoginSession
 }
 
@@ -198,8 +199,12 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 	targetContext, cancel := context.WithTimeout(ctx, s.config.Request.TargetTimeout)
 	defer cancel()
 	started := time.Now()
+	var getter collect.Getter = client
+	if s.requestSink != nil {
+		getter = reportingGetter{Getter: client, sink: s.requestSink}
+	}
 	resourcePipeline := pipeline.New(pipeline.Options{
-		Getter: client, Analyzer: s.analyzer, Config: s.config,
+		Getter: getter, Analyzer: s.analyzer, Config: s.config,
 		ProbeEvents: s.probeSink,
 	})
 	// AI assist layer (-ai): the three enrichers share one client and one
@@ -372,6 +377,11 @@ func (s *Scanner) scanWithBrowser(
 	collector, err := s.browserFactory(s.config.Browser)
 	if err != nil {
 		return nil, fmt.Errorf("create browser collector: %w", err)
+	}
+	if source, ok := collector.(interface {
+		SetRequestSink(chan<- collect.RequestEvent)
+	}); ok {
+		source.SetRequestSink(s.requestSink)
 	}
 	browserHeaders := headers.Clone()
 	if cookieHeader := serializeCookies(jar.Cookies(root)); cookieHeader != "" {

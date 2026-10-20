@@ -22,6 +22,16 @@ type Getter interface {
 	Get(context.Context, *url.URL, http.Header) (Response, error)
 }
 
+// RequestEvent describes a completed request. Size counts collected body bytes
+// for HTTP requests and decoded Network.dataReceived bytes for browser requests.
+type RequestEvent struct {
+	Method     string
+	URL        string
+	Success    bool
+	StatusCode int
+	Size       int64
+}
+
 // NetworkRecord describes one response observed by a browser collector.
 type NetworkRecord struct {
 	URL          string

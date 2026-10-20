@@ -15,13 +15,15 @@ import (
 type fakeScanner struct {
 	targets []jsowl.Target
 	result  *jsowl.Result
-	sink    chan<- jsowl.ProbeEvent
+	sink    chan<- jsowl.RequestEvent
 	// beforeBatch, when set, runs after SetProbeSink and before the batch
 	// channel is produced, letting tests emit probe events.
 	beforeBatch func()
 }
 
-func (f *fakeScanner) SetProbeSink(sink chan<- jsowl.ProbeEvent) {
+func (f *fakeScanner) SetProbeSink(chan<- jsowl.ProbeEvent) {}
+
+func (f *fakeScanner) SetRequestSink(sink chan<- jsowl.RequestEvent) {
 	f.sink = sink
 }
 
@@ -38,6 +40,11 @@ func (f *fakeScanner) ScanBatch(
 		result := f.result
 		if result == nil {
 			result = &jsowl.Result{Target: target.URL}
+		}
+		if f.sink != nil {
+			for _, r := range result.Resources {
+				f.sink <- jsowl.RequestEvent{Method: "GET", URL: r.URL, Success: true, StatusCode: r.StatusCode, Size: r.Size}
+			}
 		}
 		output <- jsowl.BatchItem{
 			Target: target,
@@ -112,7 +119,7 @@ func TestRootFlagsOverrideConfigAndMergeTargets(t *testing.T) {
 	}
 }
 
-func TestRootPrintsHTTPXStyleLineForEveryCollectedResource(t *testing.T) {
+func TestRootPrintsRequestLineForEveryCollectedResource(t *testing.T) {
 	var output bytes.Buffer
 	deps := testDependencies()
 	deps.stdout = &output
@@ -145,8 +152,8 @@ func TestRootPrintsHTTPXStyleLineForEveryCollectedResource(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "" +
-		"https://example.test/ [321] [201] [text/html; charset=utf-8]\n" +
-		"https://example.test/app.js [654] [200] [application/javascript]\n"
+		"[GET] [https://example.test/] [success] [201] [321]\n" +
+		"[GET] [https://example.test/app.js] [success] [200] [654]\n"
 	if output.String() != want {
 		t.Fatalf("stdout = %q, want %q", output.String(), want)
 	}
@@ -172,9 +179,9 @@ func TestRootPrintsProbeEventsAsTheyComplete(t *testing.T) {
 	deps.stdout = &output
 	scanner := &fakeScanner{result: &jsowl.Result{Target: "https://example.test/"}}
 	scanner.beforeBatch = func() {
-		scanner.sink <- jsowl.ProbeEvent{
-			Target: "https://example.test/", URL: "https://example.test/api/items",
-			Method: "POST", StatusCode: 200, Evidence: "runtime",
+		scanner.sink <- jsowl.RequestEvent{
+			URL:    "https://example.test/api/items",
+			Method: "POST", Success: true, StatusCode: 200, Size: 42,
 		}
 	}
 	deps.newScanner = func(jsowl.Config) (scanService, error) {
@@ -186,7 +193,7 @@ func TestRootPrintsProbeEventsAsTheyComplete(t *testing.T) {
 	if err := command.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "[200] POST https://example.test/api/items [runtime]") {
+	if !strings.Contains(output.String(), "[POST] [https://example.test/api/items] [success] [200] [42]") {
 		t.Fatalf("probe line missing from stdout: %q", output.String())
 	}
 }
@@ -198,9 +205,9 @@ func TestRootSilentSuppressesProbeEventLines(t *testing.T) {
 	scanner := &fakeScanner{result: &jsowl.Result{Target: "https://example.test/"}}
 	scanner.beforeBatch = func() {
 		if scanner.sink != nil {
-			scanner.sink <- jsowl.ProbeEvent{
-				Target: "https://example.test/", URL: "https://example.test/api/items",
-				StatusCode: 200, Evidence: "runtime",
+			scanner.sink <- jsowl.RequestEvent{
+				URL:     "https://example.test/api/items",
+				Success: true, StatusCode: 200,
 			}
 		}
 	}

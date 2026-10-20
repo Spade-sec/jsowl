@@ -36,10 +36,11 @@ var errPreNavigation = errors.New("browser failed before navigation")
 // When bound to a LoginSession, collections run inside that session's
 // headed browser instead of spawning a throwaway one.
 type Collector struct {
-	config  model.BrowserConfig
-	request model.RequestConfig
-	script  string
-	session *LoginSession
+	config      model.BrowserConfig
+	request     model.RequestConfig
+	script      string
+	session     *LoginSession
+	requestSink chan<- collect.RequestEvent
 }
 
 // New constructs a Rod collector without launching or downloading a browser.
@@ -188,6 +189,8 @@ func (c *Collector) collectOnce(
 	}
 
 	var networkMu sync.Mutex
+	stopRequestOutput := observeRequestOutput(page, c.requestSink)
+	defer stopRequestOutput()
 	network := make(map[string]collect.NetworkRecord)
 	requests := make(map[string]collect.NetworkRecord)
 	recordResponse := func(event *proto.NetworkResponseReceived) {
