@@ -747,15 +747,17 @@ type HostAsset struct {
 
 // Result is the deterministic, serializable output of one target scan.
 type Result struct {
-	Target        string        `json:"target"`
-	StartedAt     time.Time     `json:"started_at"`
-	FinishedAt    time.Time     `json:"finished_at"`
-	Mode          Mode          `json:"mode"`
-	UserAgent     string        `json:"user_agent"`
-	BrowserStatus BrowserStatus `json:"browser_status"`
-	Resources     []Resource    `json:"resources"`
-	Endpoints     []Endpoint    `json:"endpoints"`
-	Findings      []Finding     `json:"findings"`
+	// ReportDirectory is assigned once per scan and shared by all its writers.
+	ReportDirectory string        `json:"report_directory,omitempty"`
+	Target          string        `json:"target"`
+	StartedAt       time.Time     `json:"started_at"`
+	FinishedAt      time.Time     `json:"finished_at"`
+	Mode            Mode          `json:"mode"`
+	UserAgent       string        `json:"user_agent"`
+	BrowserStatus   BrowserStatus `json:"browser_status"`
+	Resources       []Resource    `json:"resources"`
+	Endpoints       []Endpoint    `json:"endpoints"`
+	Findings        []Finding     `json:"findings"`
 	// Params lists parameter names extracted from code shapes (object
 	// properties, destructuring, function signatures, ...) plus the ones
 	// derived from endpoints (API request bodies, URL queries, route

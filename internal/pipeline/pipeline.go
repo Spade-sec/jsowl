@@ -26,9 +26,10 @@ import (
 
 // Options supplies the immutable dependencies for one target pipeline.
 type Options struct {
-	Getter   collect.Getter
-	Analyzer *analyze.Engine
-	Config   model.Config
+	ReportDirectory string
+	Getter          collect.Getter
+	Analyzer        *analyze.Engine
+	Config          model.Config
 	// ProbeEvents, when non-nil, receives one event per completed API probe.
 	// The pipeline never blocks on it; consumers must keep up or drop events.
 	ProbeEvents chan<- model.ProbeEvent
@@ -420,6 +421,10 @@ func (p *Pipeline) RunDetailed(
 	if err != nil {
 		return nil, discover.SPAEvidence{}, err
 	}
+	if p.options.ReportDirectory != "" {
+		reportDirectory = p.options.ReportDirectory
+	}
+	result.ReportDirectory = reportDirectory
 	queue := scheduler.New(
 		p.options.Config.Limits.MaxResources,
 		p.options.Config.Limits.MaxDepth,

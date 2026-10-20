@@ -48,7 +48,7 @@ jsowl -l targets.txt -o reports               # 批量目标 + 自定义输出�
 jsowl --check                                 # 检查配置、规则与本地浏览器
 ```
 
-扫描完成后在 `jsowl-report/example.com/` 下生成 `report.html`（交互式总览入口）、`report.json` 与分项报告。
+扫描完成后在 `jsowl-report/IP_时间_随机标识/` 下生成 `report.html`（交互式总览入口）、`report.json` 与分项报告。
 
 ## 示例输出
 
@@ -59,7 +59,7 @@ jsowl --check                                 # 检查配置、规则与本地�
 
 ```text
 jsowl-report/
-└── example.com/
+└── 192.0.2.10_20261020-183025_a81f20c497e6b30d/
     ├── report.html          # 交互式总览 + 分项报告导航
     ├── report.json          # 完整 JSON 结果
     ├── API报告.html / url.txt / 敏感信息.txt ...

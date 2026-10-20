@@ -22,6 +22,7 @@ import (
 	"github.com/youmulijiang/jsowl/internal/discover"
 	"github.com/youmulijiang/jsowl/internal/model"
 	"github.com/youmulijiang/jsowl/internal/pipeline"
+	"github.com/youmulijiang/jsowl/internal/storage"
 	"github.com/youmulijiang/jsowl/internal/ua"
 )
 
@@ -199,12 +200,17 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 	targetContext, cancel := context.WithTimeout(ctx, s.config.Request.TargetTimeout)
 	defer cancel()
 	started := time.Now()
+	reportDirectory, err := storage.ScanDirectory(targetContext, s.config.Output.Directory, target.URL, started)
+	if err != nil {
+		return nil, err
+	}
 	var getter collect.Getter = client
 	if s.requestSink != nil {
 		getter = reportingGetter{Getter: client, sink: s.requestSink}
 	}
 	resourcePipeline := pipeline.New(pipeline.Options{
-		Getter: getter, Analyzer: s.analyzer, Config: s.config,
+		ReportDirectory: reportDirectory,
+		Getter:          getter, Analyzer: s.analyzer, Config: s.config,
 		ProbeEvents: s.probeSink,
 	})
 	// AI assist layer (-ai): the three enrichers share one client and one

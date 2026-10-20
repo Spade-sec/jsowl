@@ -503,6 +503,9 @@ func writeReports(
 	if err != nil {
 		return err
 	}
+	if result.ReportDirectory != "" {
+		directory = result.ReportDirectory
+	}
 	if config.Output.JSON {
 		if err := deps.writeJSON(filepath.Join(directory, "report.json"), result); err != nil {
 			return err

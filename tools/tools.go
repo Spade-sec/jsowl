@@ -46,10 +46,11 @@ type Response struct {
 
 // Store keeps finished scans addressable by id for the query tools.
 type Store struct {
-	mu    sync.Mutex
-	next  int
-	scans map[string]*model.Result
-	Dir   string // report output root; empty uses a per-process temp directory
+	mu       sync.Mutex
+	next     int
+	scans    map[string]*model.Result
+	Dir      string // report output root; empty uses a per-process temp directory
+	tempRoot string // shared by script and report writers; guarded by mu
 }
 
 // NewStore creates a tool store; dir receives per-scan report files.
@@ -552,6 +553,9 @@ func (s *Store) writeReports(rawTarget string, result *model.Result) (string, er
 	if err != nil {
 		return "", err
 	}
+	if result.ReportDirectory != "" {
+		directory = result.ReportDirectory
+	}
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return "", err
 	}
@@ -565,13 +569,20 @@ func (s *Store) writeReports(rawTarget string, result *model.Result) (string, er
 }
 
 func (s *Store) reportRoot() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.Dir != "" {
 		return s.Dir
 	}
+	if s.tempRoot != "" {
+		return s.tempRoot
+	}
 	dir, err := os.MkdirTemp("", "jsowl-tools-*")
 	if err != nil {
+		s.tempRoot = "."
 		return "."
 	}
+	s.tempRoot = dir
 	return dir
 }
 

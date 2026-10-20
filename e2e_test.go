@@ -74,6 +74,13 @@ func TestEndToEndLibraryAndCLIWorkflow(t *testing.T) {
 	if data, runErr := command.CombinedOutput(); runErr != nil {
 		t.Fatalf("run CLI: %v\n%s", runErr, data)
 	}
+	entries, err := os.ReadDir(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || !entries[0].IsDir() {
+		t.Fatalf("one CLI target must create exactly one output directory: %v", entries)
+	}
 	jsonReports, err := filepath.Glob(filepath.Join(output, "*", "report.json"))
 	if err != nil || len(jsonReports) != 1 {
 		t.Fatalf("JSON reports = %#v, error = %v", jsonReports, err)
@@ -89,6 +96,14 @@ func TestEndToEndLibraryAndCLIWorkflow(t *testing.T) {
 	var cliResult Result
 	if err := json.Unmarshal(data, &cliResult); err != nil {
 		t.Fatal(err)
+	}
+	for _, resource := range cliResult.Resources {
+		if resource.LocalPath == "" {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(jsonReports[0]), filepath.FromSlash(resource.LocalPath))); err != nil {
+			t.Fatalf("script is not stored alongside its report: %v", err)
+		}
 	}
 	if !containsFinding(&cliResult, "hae.密钥凭证.jwt-token") {
 		t.Fatalf("CLI JSON finding missing: %#v", cliResult.Findings)

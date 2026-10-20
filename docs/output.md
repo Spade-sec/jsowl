@@ -6,7 +6,7 @@
 
 ```text
 jsowl-report/
-└── example.com/
+└── 192.0.2.10_20261020-183025_a81f20c497e6b30d/
     ├── report.html          # 交互式主报告：总览仪表盘 + 工作台 + 打印视图
     ├── API报告.html          # API 路径（相对/绝对分组，分页 + 上下文）
     ├── URL报告.html          # 完整 http(s) URL（分页）
@@ -29,11 +29,11 @@ jsowl-report/
             └── users.<hash>.js
 ```
 
-同一主机的非根路径或带 query 的多个扫描目标会在主机名后添加稳定 URL 哈希（例如
-`example.com-0b2cf73d/`），避免报告相互覆盖。**一个目标的全部产物都在这一个目录里**：
-`report.json`、`report.html`、各分项报告、文本清单，以及下载保存的脚本与 chunk（`js/`）。
-报告里记录的本地路径（`report.json` 的 `local_path`、资源报告里的“本地路径”列）是**相对该目录**的，
-因此始终指向报告旁边的文件。重复扫描同一目标会覆盖该目录中同名文件。
+目录格式为 `IP_YYYYMMDD-HHMMSS_16位随机十六进制标识/`，时间使用北京时间。域名通过本地 DNS 解析用于目录命名，多地址时优先 IPv4；这不代表代理或浏览器最终连接的地址。IPv6 的冒号替换为下划线。解析最多等待 1 秒，失败时使用 `unresolved-域名` 作为前缀。
+
+每次扫描只生成一次目录名，direct/browser 阶段和所有报告写入方共享它。重复扫描同一目标也会生成不同目录，保留历史结果。**一次扫描的全部产物都在这一个目录里**：`report.json`、`report.html`、各分项报告、文本清单，以及脚本与 chunk（`js/`）。
+
+`report.json` 的 `report_directory` 字段记录本次目录，`local_path` 为相对该目录的脚本路径。使用 Go 库自行写报告时，请使用 `result.ReportDirectory`，不要重新生成目录名。旧的 `TargetReportDirectory` 函数仅保留兼容用途。
 
 ## 报告格式
 
@@ -149,8 +149,6 @@ JSOWL_SAMPLE_REPORT=1 go test ./internal/report -run TestGenerateSampleReport -v
 超过正文上限（`limits.max_body_size`）的脚本不会保存，并在结果中记录 Issue。
 
 `output.js_directory` 只改变这一层目录的名字，且取路径的末段：配置 `assets/js` 得到的是 `js`。
-报告目录本身由目标决定（输出根 + 主机名，必要时带哈希），与 `js_directory` 无关；
-扫描器与所有报告写入方（CLI、MCP 服务、tools 服务）都用同一个推导函数
-（`TargetReportDirectory`），因此报告与其脚本永远落在同一个文件夹里。
+报告目录由扫描器在扫描开始时生成，并通过 `Result.ReportDirectory` 传递给 CLI、MCP 和 tools，与 `js_directory` 无关。
 
 开启后流水线会先把所有脚本和 chunk 下载完成，再统一对下载内容做正则匹配和 AST 解析（发现后续脚本/chunk 的递归抓取逻辑不变）。API 响应正文永不保存。

@@ -425,10 +425,7 @@ func TestScannerOptionallyStoresOnlyJavaScript(t *testing.T) {
 	}
 	// LocalPath is relative to the target's report directory, so the script
 	// sits in the same folder as the report that references it.
-	reportDirectory, err := TargetReportDirectory(config.Output.Directory, server.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reportDirectory := result.ReportDirectory
 	if _, err := os.Stat(filepath.Join(
 		reportDirectory,
 		filepath.FromSlash(scriptPath),

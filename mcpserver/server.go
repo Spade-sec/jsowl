@@ -34,6 +34,8 @@ type Store struct {
 	// Dir receives one sub-directory of report files per scan. Empty means a
 	// per-process temporary directory.
 	Dir string
+	// tempRoot is allocated once and shared by script and report writers.
+	tempRoot string
 	// Base is the starting scan configuration; nil means jsowl.DefaultConfig.
 	// Per-scan tool inputs (mode, headers, timeout) override individual
 	// fields on top of it.
@@ -472,13 +474,20 @@ func (s *Store) get(id string) (*jsowl.Result, error) {
 
 // reportRoot returns the directory that holds per-scan report sub-directories.
 func (s *Store) reportRoot() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.Dir != "" {
 		return s.Dir
 	}
+	if s.tempRoot != "" {
+		return s.tempRoot
+	}
 	dir, err := os.MkdirTemp("", "jsowl-mcp-*")
 	if err != nil {
+		s.tempRoot = "."
 		return "."
 	}
+	s.tempRoot = dir
 	return dir
 }
 
@@ -489,6 +498,9 @@ func (s *Store) writeReports(rawTarget string, result *jsowl.Result) (string, er
 	directory, err := jsowl.TargetReportDirectory(s.reportRoot(), rawTarget)
 	if err != nil {
 		return "", err
+	}
+	if result.ReportDirectory != "" {
+		directory = result.ReportDirectory
 	}
 	if err := os.MkdirAll(directory, 0o750); err != nil {
 		return "", err

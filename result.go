@@ -69,14 +69,14 @@ func WriteJSONReport(path string, result *Result) error {
 	return report.WriteJSON(path, result)
 }
 
-// TargetReportDirectory returns the report directory for one target: the output
+// TargetReportDirectory returns the legacy report directory for one target: the output
 // root plus the target's host, with a stable hash suffix when the target
 // carries a path or a query.
 //
-// Everything belonging to a target is written here — report.json, report.html,
-// the split reports, the plain-text lists and the downloaded JavaScript — so a
-// caller that writes the reports itself (an MCP or HTTP wrapper, for instance)
-// must use this function to find the directory the scanner saved scripts into.
+// New scans assign an IP/timestamp/random directory once and return it in
+// Result.ReportDirectory; report writers must reuse that path.
+//
+// Deprecated: use the ReportDirectory field returned by Scanner.Scan.
 func TargetReportDirectory(root, rawTarget string) (string, error) {
 	return storage.TargetDirectory(root, rawTarget)
 }
