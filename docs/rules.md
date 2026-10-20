@@ -1,6 +1,6 @@
 # 自定义规则
 
-所有规则统一在 [config/rules.yml](../config/rules.yml)，为 HaE 原生格式，是唯一规则来源，增删改规则只动这一个文件。它身兼三个角色：
+可配置的敏感信息规则统一在 [config/rules.yml](../config/rules.yml)，为 HaE 原生格式，增删改规则只动这一个文件。API/URL 提取规则由 [internal/analyze/builtin.go](../internal/analyze/builtin.go) 内置，始终启用，不在该配置文件中维护。规则文件身兼三个角色：
 
 - 仓库目录下运行时自动加载为**项目级规则**（stderr 提示 `project rules: <路径>`），修改后立即生效、无需重新编译；
 - 编译时经 go:embed 嵌入二进制，供仓库外运行使用；
@@ -58,6 +58,12 @@ custom:
 ## 内置规则集
 
 config/rules.yml 已收录并适配适合 Web/JavaScript 信息收集的规则，以及 HaE 常用子集（身份证、邮箱、内网 IP、国内 Webhook、云厂商密钥、Shiro/Druid 指纹等）。无效正则、捕获组、模式、时间、并发和资源边界会在扫描前拒绝。
+
+敏感字段提取支持带引号的 JSON 键名，以及 `pass/passwd/mima`、独立及前缀 Token、云凭据字段、`account_sid`、`encryptkey/encrypt_key/aes_key/des_key`。这批字段规则仅提取成对单引号、双引号或反引号包围的静态值（1–512 字符），不把变量引用、函数调用或环境变量读取当成硬编码凭据；空值、常见占位符和 `${…}` 插值也会排除。厂商特定 Token、PEM 私钥和连接串等其他规则继续使用各自的匹配方式。
+
+“扩展敏感配置字段”保留用户提供的 112 个关键词，支持原表达式的多种赋值符号及 JSON 键名引号；仅输出 8–64 位、由字母数字和 `_=-` 组成的引号内值。该规则使用自己的匹配条件，不继承上面各字段规则的占位符过滤。
+
+数据库规则支持 MySQL/MariaDB、PostgreSQL、MongoDB（含 SRV 和多节点）、Redis/Rediss、SQL Server、Oracle URI，并补充 JDBC、分号参数连接串及 Go MySQL DSN。显式包含账密的 URI、参数连接串和 Go DSN 按 high 标记；普通连接地址和 JDBC 按 medium 标记，实际影响需要结合连接参数判断。匹配结果保留完整连接串，包含的账密不会脱敏；`${…}` 动态配置引用会被排除。带账密 URI 不再由普通地址规则重复提取。
 
 ## 用户级规则文件
 

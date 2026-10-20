@@ -27,7 +27,7 @@ func SetDefaultRulesYAML(data []byte) error {
 	return nil
 }
 
-// DefaultRules returns the default sensitive and URL rules parsed from the
+// DefaultRules returns the default sensitive-information rules parsed from the
 // rules document injected via SetDefaultRulesYAML (config/rules.yml in the
 // repository). URL extraction also lives in APIRules and is always compiled
 // separately.
