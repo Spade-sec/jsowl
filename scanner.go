@@ -34,6 +34,9 @@ type Scanner struct {
 	probeSink      chan<- model.ProbeEvent
 	requestSink    chan<- RequestEvent
 	loginSession   *browser.LoginSession
+	// analysisLimiter is shared by every target pipeline so a batch scan
+	// bounds analysis concurrency in total, not per target.
+	analysisLimiter *pipeline.Limiter
 }
 
 // SetProbeSink registers a channel that receives one event per completed API
@@ -115,7 +118,10 @@ func New(config Config) (*Scanner, error) {
 		return nil, err
 	}
 	return &Scanner{
-		config: ownedConfig, analyzer: engine, browserFactory: func(
+		config:          ownedConfig,
+		analyzer:        engine,
+		analysisLimiter: pipeline.NewLimiter(0),
+		browserFactory: func(
 			config model.BrowserConfig,
 		) (collect.BrowserCollector, error) {
 			return browser.New(config, ownedConfig.Request)
@@ -211,7 +217,8 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 	resourcePipeline := pipeline.New(pipeline.Options{
 		ReportDirectory: reportDirectory,
 		Getter:          getter, Analyzer: s.analyzer, Config: s.config,
-		ProbeEvents: s.probeSink,
+		ProbeEvents:     s.probeSink,
+		AnalysisLimiter: s.analysisLimiter,
 	})
 	// AI assist layer (-ai): the three enrichers share one client and one
 	// request budget. Without -ai they stay nil and the pipeline no-ops.

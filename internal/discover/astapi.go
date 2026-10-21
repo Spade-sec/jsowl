@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"sort"
 	"strconv"
@@ -138,46 +139,61 @@ type JSAnalysis struct {
 	Notes     []extract.Note
 }
 
-// AnalyzeJS parses JavaScript with Tree-sitter once and returns both the API
-// candidates and the host candidates found in the same tree. The host pass
-// reuses the walker's resolved constant table, so a host assembled from
-// literals resolves the same way a URL does and no file is parsed twice.
-func AnalyzeJS(source *url.URL, body []byte) JSAnalysis {
+// ParsedScript owns one Tree-sitter parse of a JavaScript body. It lets the
+// API extractor, the host extractor and the parameter collector share a single
+// syntax tree instead of parsing the same file three times. The tree is valid
+// only between ParseScript and Close; callers must finish walking it before
+// closing and must not share it across goroutines.
+type ParsedScript struct {
+	Body  []byte
+	tree  *sitter.Tree
+	root  *sitter.Node
+	lines *lineIndex
+}
+
+// ParseScript parses body once. A nil tree is reported as an error; an empty
+// but valid tree is returned and handled by the extractors' text fallback.
+func ParseScript(body []byte) (*ParsedScript, error) {
 	parser := sitter.NewParser()
 	defer parser.Close()
 	if err := parser.SetLanguage(sitter.NewLanguage(javascript.Language())); err != nil {
-		return JSAnalysis{}
+		return nil, err
 	}
 	tree := parser.Parse(body, nil)
 	if tree == nil {
-		return JSAnalysis{}
+		return nil, errors.New("parse JavaScript: no syntax tree")
 	}
-	defer tree.Close()
-	root := tree.RootNode()
-	if root == nil || root.NamedChildCount() == 0 {
-		// The parse produced nothing usable: fall back to the bounded text
-		// scan so hosts in an unparseable body are still recoverable.
-		sourceURL := ""
-		if source != nil {
-			sourceURL = source.String()
-		}
-		return JSAnalysis{
-			Hosts:     HostsFromText(source, body),
-			BasePaths: scanBasePathText(body, maxBasePathsPerFile),
-			Notes: []extract.Note{{
-				Code:    extract.NoteParseFallback,
-				Message: "JavaScript 解析未产生可用语法树，主机提取退化为文本扫描。",
-				URL:     sourceURL,
-			}},
-		}
+	return &ParsedScript{
+		Body: body, tree: tree, root: tree.RootNode(), lines: newLineIndex(body),
+	}, nil
+}
+
+// Close releases the syntax tree. It is safe to call more than once.
+func (p *ParsedScript) Close() {
+	if p == nil || p.tree == nil {
+		return
 	}
-	w := newASTWalker(body)
-	w.walk(root)
-	w.resolveWrapperCallers(root)
+	p.tree.Close()
+	p.tree = nil
+	p.root = nil
+}
+
+func (p *ParsedScript) usable() bool {
+	return p != nil && p.root != nil && p.root.NamedChildCount() > 0
+}
+
+// Analyze extracts API candidates and host candidates from the shared tree.
+func (p *ParsedScript) Analyze(source *url.URL) JSAnalysis {
+	if !p.usable() {
+		return jsParseFallback(source, p.Body)
+	}
+	w := newASTWalkerWithLines(p.Body, p.lines)
+	w.walk(p.root)
+	w.resolveWrapperCallers(p.root)
 	w.resolveAliasedCalls()
 	w.resolveHeuristics()
 	w.resolveTaint()
-	hosts := collectHosts(source, body, root)
+	hosts := collectHostsWithLines(source, p.Body, p.root, p.lines)
 	return JSAnalysis{
 		Candidates: apiCandidates(w),
 		Hosts:      hosts.Candidates,
@@ -186,14 +202,73 @@ func AnalyzeJS(source *url.URL, body []byte) JSAnalysis {
 	}
 }
 
+// Params extracts parameter hits from the shared tree.
+func (p *ParsedScript) Params(source *url.URL) []model.ParamHit {
+	if !p.usable() {
+		return nil
+	}
+	collector := &paramCollector{
+		sourceURL: source, body: p.Body, lines: p.lines,
+		seen: map[string]struct{}{},
+	}
+	collector.walk(p.root)
+	return collector.hits
+}
+
+// AnalyzeBody parses once and runs both extractors over the same tree. It is
+// the entry point every pipeline branch uses; the separately exported
+// AnalyzeJS / ParamsFromAST remain compatible wrappers.
+func AnalyzeBody(source *url.URL, body []byte) (JSAnalysis, []model.ParamHit) {
+	parsed, err := ParseScript(body)
+	if err != nil {
+		// Matches the old behavior: a body that cannot be parsed contributes
+		// nothing from either extractor.
+		return JSAnalysis{}, nil
+	}
+	defer parsed.Close()
+	return parsed.Analyze(source), parsed.Params(source)
+}
+
+// jsParseFallback handles a parse that produced no usable tree: hosts in the
+// raw text are still recoverable, and the degradation is recorded once.
+func jsParseFallback(source *url.URL, body []byte) JSAnalysis {
+	sourceURL := ""
+	if source != nil {
+		sourceURL = source.String()
+	}
+	return JSAnalysis{
+		Hosts:     HostsFromText(source, body),
+		BasePaths: scanBasePathText(body, maxBasePathsPerFile),
+		Notes: []extract.Note{{
+			Code:    extract.NoteParseFallback,
+			Message: "JavaScript 解析未产生可用语法树，主机提取退化为文本扫描。",
+			URL:     sourceURL,
+		}},
+	}
+}
+
+// AnalyzeJS parses JavaScript with Tree-sitter once and returns both the API
+// candidates and the host candidates found in the same tree. The host pass
+// reuses the walker's resolved constant table, so a host assembled from
+// literals resolves the same way a URL does and no file is parsed twice.
+func AnalyzeJS(source *url.URL, body []byte) JSAnalysis {
+	parsed, err := ParseScript(body)
+	if err != nil {
+		return JSAnalysis{}
+	}
+	defer parsed.Close()
+	return parsed.Analyze(source)
+}
+
 // APIFromAST parses JavaScript with Tree-sitter. Unlike the old parser, a
 // local syntax error does not discard valid call sites elsewhere in the file.
 func APIFromAST(source *url.URL, body []byte) []Candidate {
 	return AnalyzeJS(source, body).Candidates
 }
 
-// newASTWalker builds the request-oriented walker with its scope tables.
-func newASTWalker(body []byte) *astWalker {
+// newASTWalkerWithLines builds the request-oriented walker with its scope
+// tables over an already-built line index.
+func newASTWalkerWithLines(body []byte, lines *lineIndex) *astWalker {
 	return &astWalker{
 		constants:        map[string]string{},
 		objectConstants:  map[string]map[string]string{},
@@ -213,6 +288,7 @@ func newASTWalker(body []byte) *astWalker {
 		delegates:        map[string]string{},
 		wrappers:         map[string]wrappedCall{},
 		source:           body,
+		lines:            lines,
 	}
 }
 
@@ -253,6 +329,9 @@ type astWalker struct {
 	instanceBSE      map[string]string
 	instanceBaseKind map[string]string
 	source           []byte
+	// lines is the shared line index of source, so every recorded call site
+	// reuses one layout instead of rebuilding it.
+	lines *lineIndex
 	// builders maps a variable to the payload builder it was bound to
 	// ("URLSearchParams" or "FormData"), so a request body written as a bare
 	// identifier can still yield its field keys from the append chain.
@@ -692,7 +771,7 @@ func (w *astWalker) resolveCallerPayload(wrapped wrappedCall, args []*sitter.Nod
 // placeholder record of the wrapped request, so the report and the AI
 // evidence pack can see where the payload object is actually built.
 func (w *astWalker) appendCallerContext(wrapped wrappedCall, callee *sitter.Node) {
-	ctx := extractContext(w.source, int(callee.StartByte()), contextSpanLines, wrapped.Raw)
+	ctx := w.lines.extract(int(callee.StartByte()), contextSpanLines, wrapped.Raw)
 	for i := len(w.calls) - 1; i >= 0; i-- {
 		record := &w.calls[i]
 		if record.Raw != wrapped.Raw || record.Spec == nil {
@@ -1131,7 +1210,7 @@ func (w *astWalker) recordCall(
 	}
 	point := callee.StartPosition()
 	line, column := int(point.Row)+1, int(point.Column)+1
-	ctx := extractContext(w.source, int(callee.StartByte()), contextSpanLines, raw)
+	ctx := w.lines.extract(int(callee.StartByte()), contextSpanLines, raw)
 	spec := w.buildSpec(args, bodyArg)
 	// Stamp the recovered base URL before either candidate is recorded: both
 	// the raw path and the joined full URL should carry it for the report.
@@ -1787,7 +1866,7 @@ func (w *astWalker) visitNewExpression(n *sitter.Node) {
 		return
 	}
 	point := n.StartPosition()
-	ctx := extractContext(w.source, int(n.StartByte()), contextSpanLines, value)
+	ctx := w.lines.extract(int(n.StartByte()), contextSpanLines, value)
 	w.calls = append(w.calls, apiCall{
 		Raw: value, Method: "GET", Evidence: evidenceFor(value),
 		Line: int(point.Row) + 1, Column: int(point.Column) + 1, Context: ctx,

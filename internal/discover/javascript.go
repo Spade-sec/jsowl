@@ -1,7 +1,6 @@
 package discover
 
 import (
-	"bytes"
 	"net/url"
 	"path"
 	"strings"
@@ -15,10 +14,43 @@ const largeBundleThreshold = 512 * 1024
 
 // FromJavaScript applies extraction rules and detects dynamic-loading signals in JavaScript.
 func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResult {
-	findings, extracted := engine.Analyze(analyze.ResourceRef{
-		URL:  source.String(),
-		Type: model.ResourceTypeScript,
-	}, body)
+	return fromJavaScript(source, body, newLineIndex(body), engine, true)
+}
+
+// FromJavaScriptDiscovery is the download-phase variant: it runs only the URL
+// rules and returns the candidates (plus SPA evidence) needed to discover and
+// fetch follow-up resources. Sensitive rules, findings, host candidates and
+// match context are skipped because the deferred analysis pass produces them
+// from the saved file. The candidate set is identical to FromJavaScript's:
+// the engine only ever derives candidates from URL-category rules.
+func FromJavaScriptDiscovery(
+	source *url.URL,
+	body []byte,
+	engine *analyze.Engine,
+) JSResult {
+	return fromJavaScript(source, body, newLineIndex(body), engine, false)
+}
+
+func fromJavaScript(
+	source *url.URL,
+	body []byte,
+	lines *lineIndex,
+	engine *analyze.Engine,
+	full bool,
+) JSResult {
+	var findings []model.Finding
+	var extracted []analyze.Candidate
+	if full {
+		findings, extracted = engine.Analyze(analyze.ResourceRef{
+			URL:  source.String(),
+			Type: model.ResourceTypeScript,
+		}, body)
+	} else {
+		extracted = engine.AnalyzeCandidates(analyze.ResourceRef{
+			URL:  source.String(),
+			Type: model.ResourceTypeScript,
+		}, body)
+	}
 
 	result := JSResult{Findings: findings}
 	seen := make(map[string]struct{})
@@ -45,38 +77,80 @@ func FromJavaScript(source *url.URL, body []byte, engine *analyze.Engine) JSResu
 		}
 		if (kind == KindEndpoint || kind == KindRoute) &&
 			extractedCandidate.Offset > 0 {
-			candidate.Line, candidate.Column = lineColumn(body, extractedCandidate.Offset)
-			candidate.ContextLines = extractContext(
-				body, extractedCandidate.Offset, contextSpanLines,
-				extractedCandidate.Raw,
-			)
+			candidate.Line, candidate.Column = lines.position(extractedCandidate.Offset)
+			if full {
+				candidate.ContextLines = lines.extract(
+					extractedCandidate.Offset, contextSpanLines,
+					extractedCandidate.Raw,
+				)
+			}
 		}
 		result.Candidates = append(result.Candidates, candidate)
 		// A rule that matched a network URL also produced a host observation:
 		// the same value, recorded as host evidence without another body scan.
-		if host := hostCandidateFromURL(source, body, extractedCandidate); host != nil {
-			result.Hosts = append(result.Hosts, *host)
+		if full {
+			if host := hostCandidateFromURL(source, lines, extractedCandidate); host != nil {
+				result.Hosts = append(result.Hosts, *host)
+			}
 		}
 	}
 
-	lower := bytes.ToLower(body)
-	result.SPA.DynamicImport = bytes.Contains(lower, []byte("import("))
-	result.SPA.HistoryRouting = bytes.Contains(lower, []byte("history.pushstate")) ||
-		bytes.Contains(lower, []byte("history.replacestate"))
-	result.SPA.HashRouting = bytes.Contains(lower, []byte("createwebhashhistory")) ||
-		bytes.Contains(lower, []byte(`mode:"hash"`)) ||
-		bytes.Contains(lower, []byte(`mode:'hash'`))
-	result.SPA.DynamicScript = bytes.Contains(lower, []byte("createelement(\"script\"")) ||
-		bytes.Contains(lower, []byte("createelement('script'"))
-	result.SPA.Webpack = bytes.Contains(lower, []byte("webpackchunk")) ||
-		bytes.Contains(lower, []byte("__webpack_require__"))
-	result.SPA.RequireJS = bytes.Contains(lower, []byte("requirejs.config")) ||
-		bytes.Contains(lower, []byte("require.config"))
+	result.SPA.DynamicImport = containsFold(body, []byte("import("))
+	result.SPA.HistoryRouting = containsFold(body, []byte("history.pushstate")) ||
+		containsFold(body, []byte("history.replacestate"))
+	result.SPA.HashRouting = containsFold(body, []byte("createwebhashhistory")) ||
+		containsFold(body, []byte(`mode:"hash"`)) ||
+		containsFold(body, []byte(`mode:'hash'`))
+	result.SPA.DynamicScript = containsFold(body, []byte("createelement(\"script\"")) ||
+		containsFold(body, []byte("createelement('script'"))
+	result.SPA.Webpack = containsFold(body, []byte("webpackchunk")) ||
+		containsFold(body, []byte("__webpack_require__"))
+	result.SPA.RequireJS = containsFold(body, []byte("requirejs.config")) ||
+		containsFold(body, []byte("require.config"))
 	result.SPA.LargeBundle = len(body) >= largeBundleThreshold
-	// A base path often lives in a config blob the AST does not model, so the
-	// text pass looks for the same assignments.
-	result.BasePaths = scanBasePathText(body, maxBasePathsPerFile)
+	if full {
+		// A base path often lives in a config blob the AST does not model, so
+		// the text pass looks for the same assignments. The download phase does
+		// not consume base paths; the deferred analysis pass derives them.
+		result.BasePaths = scanBasePathTextIndexed(lines, maxBasePathsPerFile)
+	}
 	return result
+}
+
+// containsFold reports whether haystack contains needle, comparing ASCII
+// letters case-insensitively. needle must already be lower case. It avoids the
+// full copy bytes.ToLower allocates for a multi-megabyte bundle.
+func containsFold(haystack, needle []byte) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(needle) > len(haystack) {
+		return false
+	}
+	first := needle[0]
+	for start := 0; start <= len(haystack)-len(needle); start++ {
+		if lowerASCII(haystack[start]) != first {
+			continue
+		}
+		matched := true
+		for offset := 1; offset < len(needle); offset++ {
+			if lowerASCII(haystack[start+offset]) != needle[offset] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return true
+		}
+	}
+	return false
+}
+
+func lowerASCII(char byte) byte {
+	if char >= 'A' && char <= 'Z' {
+		return char + ('a' - 'A')
+	}
+	return char
 }
 
 func classifyCandidate(candidate analyze.Candidate) Kind {
@@ -217,24 +291,13 @@ func IsStaticAssetPath(pathname string) bool {
 	return blocked
 }
 
-// lineColumn converts a byte offset into 1-based line and rune column.
-func lineColumn(body []byte, offset int) (int, int) {
-	if offset < 0 || offset > len(body) {
-		return 0, 0
-	}
-	line := countLine(lineStarts(body), offset) + 1
-	lineStart := lineStarts(body)[line-1]
-	column := len([]rune(string(body[lineStart:offset]))) + 1
-	return line, column
-}
-
 // hostCandidateFromURL turns a rule-engine hit on a network URL into a host
 // candidate. Values that are not network URLs (paths, filenames, bare
 // literals) yield nothing: the rules engine matches request targets, and only
 // its URL hits carry a host.
 func hostCandidateFromURL(
 	source *url.URL,
-	body []byte,
+	lines *lineIndex,
 	extracted analyze.Candidate,
 ) *extract.Candidate {
 	if _, ok := extract.HostFromNetworkURL(extracted.Raw); !ok {
@@ -247,9 +310,9 @@ func hostCandidateFromURL(
 		SourceURL: source.String(),
 	}
 	if extracted.Offset > 0 {
-		candidate.Line, candidate.Column = lineColumn(body, extracted.Offset)
-		candidate.ContextLines = extractContext(
-			body, extracted.Offset, contextSpanLines, extracted.Raw,
+		candidate.Line, candidate.Column = lines.position(extracted.Offset)
+		candidate.ContextLines = lines.extract(
+			extracted.Offset, contextSpanLines, extracted.Raw,
 		)
 	}
 	return &candidate

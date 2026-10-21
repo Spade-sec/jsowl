@@ -47,13 +47,14 @@ type HostCandidates struct {
 	Notes     []extract.Note
 }
 
-// collectHosts walks a parsed JavaScript tree and returns host candidates. It
-// runs over the tree APIFromAST already parsed, so no file is parsed twice for
-// host discovery.
-func collectHosts(
+// collectHostsWithLines walks a parsed JavaScript tree and returns host
+// candidates. It runs over the tree the API pass already parsed, so no file is
+// parsed twice for host discovery, and reuses that pass's line index.
+func collectHostsWithLines(
 	source *url.URL,
 	body []byte,
 	root *sitter.Node,
+	lines *lineIndex,
 ) HostCandidates {
 	if root == nil {
 		return HostCandidates{}
@@ -65,6 +66,7 @@ func collectHosts(
 	collector := &hostCollector{
 		sourceURL: sourceURL,
 		body:      body,
+		lines:     lines,
 		seen:      map[string]struct{}{},
 		deadline:  time.Now().Add(extract.MaxExtractionDuration),
 	}
@@ -94,6 +96,7 @@ func collectHosts(
 type hostCollector struct {
 	sourceURL  string
 	body       []byte
+	lines      *lineIndex
 	basePaths  []BasePathCandidate
 	candidates []extract.Candidate
 	notes      []extract.Note
@@ -252,7 +255,9 @@ func (c *hostCollector) recordLiteral(n *sitter.Node, context string) {
 	if !literalHoldsHost(raw) {
 		return
 	}
-	for _, candidate := range scanHostText(c.body, int(n.StartByte()), raw, c.sourceURL, "") {
+	for _, candidate := range scanHostTextIndexed(
+		c.lines, int(n.StartByte()), raw, c.sourceURL, "",
+	) {
 		if len(c.candidates) >= hostCandidateLimit {
 			return
 		}
@@ -322,7 +327,7 @@ func (c *hostCollector) record(n *sitter.Node, raw, context, method string) {
 		SourceURL:    c.sourceURL,
 		Line:         line,
 		Column:       column,
-		ContextLines: extractContext(c.body, int(n.StartByte()), contextSpanLines, raw),
+		ContextLines: c.lines.extract(int(n.StartByte()), contextSpanLines, raw),
 	})
 }
 
@@ -372,8 +377,8 @@ func (c *hostCollector) recordRegexText(n *sitter.Node) {
 	if n == nil {
 		return
 	}
-	for _, candidate := range scanHostText(
-		c.body, int(n.StartByte()), c.text(n), c.sourceURL, "comment",
+	for _, candidate := range scanHostTextIndexed(
+		c.lines, int(n.StartByte()), c.text(n), c.sourceURL, "comment",
 	) {
 		if len(c.candidates) >= hostCandidateLimit {
 			return

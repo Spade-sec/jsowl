@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	sitter "github.com/tree-sitter/go-tree-sitter"
-	javascript "github.com/tree-sitter/tree-sitter-javascript/bindings/go"
 	"github.com/youmulijiang/jsowl/internal/model"
 )
 
@@ -43,28 +42,18 @@ var jsReservedWords = map[string]struct{}{
 // are derived from endpoints by the pipeline instead. Results are deduplicated
 // per (name, scenario, line) and capped per file.
 func ParamsFromAST(source *url.URL, body []byte) []model.ParamHit {
-	parser := sitter.NewParser()
-	defer parser.Close()
-	if err := parser.SetLanguage(sitter.NewLanguage(javascript.Language())); err != nil {
+	parsed, err := ParseScript(body)
+	if err != nil {
 		return nil
 	}
-	tree := parser.Parse(body, nil)
-	if tree == nil {
-		return nil
-	}
-	defer tree.Close()
-	root := tree.RootNode()
-	if root == nil || root.NamedChildCount() == 0 {
-		return nil
-	}
-	collector := &paramCollector{sourceURL: source, body: body, seen: map[string]struct{}{}}
-	collector.walk(root)
-	return collector.hits
+	defer parsed.Close()
+	return parsed.Params(source)
 }
 
 type paramCollector struct {
 	sourceURL *url.URL
 	body      []byte
+	lines     *lineIndex
 	hits      []model.ParamHit
 	seen      map[string]struct{}
 }
@@ -477,15 +466,13 @@ func (c *paramCollector) add(name, scenario, value, evidence string, at *sitter.
 		source = c.sourceURL.String()
 	}
 	c.hits = append(c.hits, model.ParamHit{
-		Name:      name,
-		Scenario:  scenario,
-		Value:     value,
-		Evidence:  evidence,
-		SourceURL: source,
-		Line:      line,
-		Column:    column,
-		ContextLines: extractContext(
-			c.body, int(at.StartByte()), contextSpanLines, name,
-		),
+		Name:         name,
+		Scenario:     scenario,
+		Value:        value,
+		Evidence:     evidence,
+		SourceURL:    source,
+		Line:         line,
+		Column:       column,
+		ContextLines: c.lines.extract(int(at.StartByte()), contextSpanLines, name),
 	})
 }

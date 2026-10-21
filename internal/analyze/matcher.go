@@ -75,12 +75,28 @@ func (m nfaMatcher) groupCount() int {
 }
 
 // runeOffsets maps each rune start (and the text end) to its byte offset.
+// ASCII text needs no table at all: there the rune index equals the byte index,
+// which is the common case for minified JavaScript. A nil table therefore means
+// "identity".
 func runeOffsets(text string) []int {
+	if isASCII(text) {
+		return nil
+	}
 	offsets := make([]int, 0, utf8.RuneCountInString(text)+1)
 	for index := range text {
 		offsets = append(offsets, index)
 	}
 	return append(offsets, len(text))
+}
+
+// isASCII reports whether every byte of text is ASCII.
+func isASCII(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if text[index] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 // nfaIndices converts one regexp2 match into RE2-style byte indices; it
@@ -94,7 +110,12 @@ func nfaIndices(match *regexp2.Match, offsets []int) []int {
 			capture := group.Captures[0]
 			runeStart := capture.Index
 			runeEnd := capture.Index + capture.Length
-			if runeStart >= 0 && runeEnd < len(offsets) {
+			if offsets == nil {
+				// ASCII body: rune offsets are byte offsets.
+				if runeStart >= 0 && runeEnd >= runeStart {
+					start, end = runeStart, runeEnd
+				}
+			} else if runeStart >= 0 && runeEnd < len(offsets) {
 				start, end = offsets[runeStart], offsets[runeEnd]
 			}
 		}

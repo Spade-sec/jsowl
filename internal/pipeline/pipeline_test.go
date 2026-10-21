@@ -173,6 +173,7 @@ const deferredScriptBody = "fetch('/api/from-deferred')"
 
 // stubGetter serves fixed responses per path without a live server.
 type stubGetter struct {
+	mu        sync.Mutex
 	responses map[string]collect.Response
 	requests  []string
 }
@@ -180,7 +181,9 @@ type stubGetter struct {
 func (stub *stubGetter) Get(
 	_ context.Context, target *url.URL, _ http.Header,
 ) (collect.Response, error) {
+	stub.mu.Lock()
 	stub.requests = append(stub.requests, target.Path)
+	stub.mu.Unlock()
 	response, ok := stub.responses[target.Path]
 	if !ok {
 		return collect.Response{}, errors.New("unexpected URL: " + target.String())
@@ -207,6 +210,51 @@ func findEndpointURLs(result *model.Result) []string {
 		}
 	}
 	return urls
+}
+
+// TestDeferredAnalysisKeepsRegexOnlyEndpointContext guards the interaction
+// between the download-phase discovery pass (which deliberately skips context)
+// and the deferred analysis pass: an endpoint that only the regex rules find
+// must still get its context lines once the saved file is analyzed.
+func TestDeferredAnalysisKeepsRegexOnlyEndpointContext(t *testing.T) {
+	getter := &stubGetter{responses: map[string]collect.Response{
+		"/": {URL: "http://stub.test/", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"text/html"}},
+			Body:   []byte(`<script src="/app.js"></script>`)},
+		"/app.js": {URL: "http://stub.test/app.js", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/javascript"}},
+			Body:   []byte(`var x = "/api/regex-only";`)},
+		"/api/regex-only": {URL: "http://stub.test/api/regex-only", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   []byte(`{"ok":true}`)},
+	}}
+	config := model.DefaultConfig()
+	config.Mode = model.ModeDirect
+	pipeline, _ := newStubPipeline(t, config, getter)
+
+	result, _, err := pipeline.RunDetailed(context.Background(),
+		model.Target{URL: "http://stub.test"}, http.Header{}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *model.Endpoint
+	for index := range result.Endpoints {
+		if result.Endpoints[index].URL == "http://stub.test/api/regex-only" {
+			found = &result.Endpoints[index]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("regex-only endpoint missing: %v", findEndpointURLs(result))
+	}
+	if len(found.ContextLines) == 0 {
+		t.Fatalf("regex-only endpoint lost its context lines: %#v", *found)
+	}
+	context := found.ContextLines[0]
+	if context.Content != `var x = "/api/regex-only";` ||
+		context.MatchStart < 0 || context.MatchEnd <= context.MatchStart {
+		t.Fatalf("context = %#v", context)
+	}
 }
 
 func TestDeferredAnalysisPersistsToDiskAndFindsEndpoints(t *testing.T) {

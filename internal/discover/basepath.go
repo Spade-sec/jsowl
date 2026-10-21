@@ -96,6 +96,12 @@ type BasePathCandidate struct {
 // scanBasePathText finds base-path assignments in text the AST could not read
 // (an inlined JSON config, a stringified settings blob).
 func scanBasePathText(body []byte, limit int) []BasePathCandidate {
+	return scanBasePathTextIndexed(newLineIndex(body), limit)
+}
+
+// scanBasePathTextIndexed is scanBasePathText over an already-built line index.
+func scanBasePathTextIndexed(lines *lineIndex, limit int) []BasePathCandidate {
+	body := lines.body
 	if len(body) == 0 || limit <= 0 {
 		return nil
 	}
@@ -114,11 +120,11 @@ func scanBasePathText(body []byte, limit int) []BasePathCandidate {
 			continue
 		}
 		seen[prefix] = struct{}{}
-		line, column := lineColumn(body, match[2])
+		line, column := lines.position(match[2])
 		found = append(found, BasePathCandidate{
 			Path: prefix, Source: "regex", Method: model.HostMethodRegex,
 			Line: line, Column: column,
-			ContextLines: extractContext(body, match[2], contextSpanLines, raw),
+			ContextLines: lines.extract(match[2], contextSpanLines, raw),
 		})
 		if len(found) >= limit {
 			break
@@ -151,7 +157,7 @@ func (c *hostCollector) recordBasePath(n *sitter.Node) bool {
 	c.basePaths = append(c.basePaths, BasePathCandidate{
 		Path: prefix, Source: "ast", Method: model.HostMethodASTLiteral,
 		Line: line, Column: column,
-		ContextLines: extractContext(c.body, int(n.StartByte()), contextSpanLines, raw),
+		ContextLines: c.lines.extract(int(n.StartByte()), contextSpanLines, raw),
 	})
 	return true
 }

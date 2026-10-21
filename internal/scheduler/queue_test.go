@@ -1,6 +1,9 @@
 package scheduler
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 func TestQueueDeduplicatesAndHonorsDepthAndResourceLimit(t *testing.T) {
 	queue := New(2, 2)
@@ -60,5 +63,36 @@ func TestQueueMarkSeenPreventsCrossPhaseDuplicates(t *testing.T) {
 	}
 	if queue.Add(Item{URL: "https://example.test/overflow.js", Depth: 1}) {
 		t.Fatal("combined resource budget was exceeded")
+	}
+}
+
+// TestQueueTakeOneKeepsFIFOAcrossCompaction drains a queue big enough to
+// trigger the internal compaction path and checks ordering survives it.
+func TestQueueTakeOneKeepsFIFOAcrossCompaction(t *testing.T) {
+	const count = 5000
+	queue := New(0, 5)
+	for index := 0; index < count; index++ {
+		url := "https://example.test/" + strconv.Itoa(index)
+		if !queue.Add(Item{URL: url, Depth: 1}) {
+			t.Fatalf("Add(%d) = false", index)
+		}
+	}
+	for index := 0; index < count; index++ {
+		item, ok := queue.TakeOne()
+		if !ok {
+			t.Fatalf("TakeOne() = false at %d", index)
+		}
+		if want := "https://example.test/" + strconv.Itoa(index); item.URL != want {
+			t.Fatalf("item %d = %q, want %q", index, item.URL, want)
+		}
+		if got := queue.Len(); got != count-index-1 {
+			t.Fatalf("Len() = %d at %d, want %d", got, index, count-index-1)
+		}
+	}
+	if _, ok := queue.TakeOne(); ok {
+		t.Fatal("TakeOne() returned an item from an empty queue")
+	}
+	if queue.Len() != 0 {
+		t.Fatalf("Len() = %d, want 0", queue.Len())
 	}
 }

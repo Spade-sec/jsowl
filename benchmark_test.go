@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/youmulijiang/jsowl/internal/analyze"
+	"github.com/youmulijiang/jsowl/internal/discover"
 	"github.com/youmulijiang/jsowl/internal/model"
 	"github.com/youmulijiang/jsowl/internal/scope"
 )
@@ -30,6 +31,77 @@ func BenchmarkAnalyzeLargeBundle(b *testing.B) {
 	b.SetBytes(int64(len(body)))
 	for b.Loop() {
 		engine.Analyze(reference, body)
+	}
+}
+
+// BenchmarkAnalyzeCandidatesLargeBundle measures the download-phase pass: URL
+// rules only, no findings and no context lines.
+func BenchmarkAnalyzeCandidatesLargeBundle(b *testing.B) {
+	engine, err := analyze.New(nil, nil)
+	if err != nil {
+		b.Fatal(err)
+	}
+	body := bytes.Repeat(
+		[]byte(`fetch("/api/users");const token="fixture";`),
+		10000,
+	)
+	reference := analyze.ResourceRef{
+		URL: "https://example.test/app.js", Type: model.ResourceTypeScript,
+	}
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		engine.AnalyzeCandidates(reference, body)
+	}
+}
+
+func bundleFixture() ([]byte, *analyze.Engine, *url.URL) {
+	engine, _ := analyze.New(nil, nil)
+	body := bytes.Repeat(
+		[]byte(`fetch("/api/users");const token="fixture";`),
+		10000,
+	)
+	source, _ := url.Parse("https://example.test/static/app.js")
+	return body, engine, source
+}
+
+// BenchmarkFromJavaScriptLargeBundle is the full extraction pass: findings,
+// host candidates, base paths and match context.
+func BenchmarkFromJavaScriptLargeBundle(b *testing.B) {
+	body, engine, source := bundleFixture()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		discover.FromJavaScript(source, body, engine)
+	}
+}
+
+// BenchmarkFromJavaScriptDiscoveryLargeBundle is the URL-only download pass.
+func BenchmarkFromJavaScriptDiscoveryLargeBundle(b *testing.B) {
+	body, engine, source := bundleFixture()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		discover.FromJavaScriptDiscovery(source, body, engine)
+	}
+}
+
+func BenchmarkAnalyzeBodySharedParseLargeBundle(b *testing.B) {
+	body, _, source := bundleFixture()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		discover.AnalyzeBody(source, body)
+	}
+}
+
+func BenchmarkAnalyzeAndParamsSeparateLargeBundle(b *testing.B) {
+	body, _, source := bundleFixture()
+	b.ReportAllocs()
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		discover.AnalyzeJS(source, body)
+		discover.ParamsFromAST(source, body)
 	}
 }
 

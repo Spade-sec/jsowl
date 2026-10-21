@@ -18,6 +18,7 @@ type Item struct {
 type Queue struct {
 	mu       sync.Mutex
 	items    []Item
+	head     int
 	seen     map[string]struct{}
 	maxItems int
 	maxDepth int
@@ -74,20 +75,58 @@ func (q *Queue) Take(limit int) []Item {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if limit <= 0 || len(q.items) == 0 {
+	available := len(q.items) - q.head
+	if limit <= 0 || available == 0 {
 		return nil
 	}
-	if limit > len(q.items) {
-		limit = len(q.items)
+	if limit > available {
+		limit = available
 	}
-	batch := append([]Item(nil), q.items[:limit]...)
-	q.items = append(q.items[:0], q.items[limit:]...)
+	batch := append([]Item(nil), q.items[q.head:q.head+limit]...)
+	q.consumeLocked(limit)
 	return batch
+}
+
+// TakeOne removes the oldest queued item. The queue keeps a head index instead
+// of shifting the remaining slice on every take, so draining thousands of
+// resources stays linear.
+func (q *Queue) TakeOne() (Item, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.head >= len(q.items) {
+		return Item{}, false
+	}
+	item := q.items[q.head]
+	q.consumeLocked(1)
+	return item, true
+}
+
+// consumeLocked advances the head, releases the consumed slots and compacts
+// the slice once the dead prefix dominates.
+func (q *Queue) consumeLocked(count int) {
+	end := q.head + count
+	for index := q.head; index < end; index++ {
+		q.items[index] = Item{}
+	}
+	q.head = end
+	switch {
+	case q.head == len(q.items):
+		q.items = q.items[:0]
+		q.head = 0
+	case q.head >= 1024 && q.head*2 >= len(q.items):
+		remaining := copy(q.items, q.items[q.head:])
+		for index := remaining; index < len(q.items); index++ {
+			q.items[index] = Item{}
+		}
+		q.items = q.items[:remaining]
+		q.head = 0
+	}
 }
 
 // Len returns the number of queued, not-yet-taken items.
 func (q *Queue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return len(q.items)
+	return len(q.items) - q.head
 }

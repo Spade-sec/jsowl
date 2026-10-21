@@ -179,6 +179,24 @@ func New(custom []model.Rule, disabled []string) (*Engine, error) {
 
 // Analyze extracts stable, deduplicated findings and URL candidates from one body.
 func (e *Engine) Analyze(source ResourceRef, body []byte) ([]model.Finding, []Candidate) {
+	return e.extract(source, body, true)
+}
+
+// AnalyzeCandidates runs only the URL-category rules and returns their
+// candidates, without building findings or their context lines. Candidate
+// extraction is restricted to URL rules in Analyze as well, so the result is
+// exactly the candidate set Analyze would return — it only skips the
+// sensitive-rule passes whose findings the caller would discard.
+func (e *Engine) AnalyzeCandidates(source ResourceRef, body []byte) []Candidate {
+	_, candidates := e.extract(source, body, false)
+	return candidates
+}
+
+func (e *Engine) extract(
+	source ResourceRef,
+	body []byte,
+	wantFindings bool,
+) ([]model.Finding, []Candidate) {
 	type locatedFinding struct {
 		finding model.Finding
 		offset  int
@@ -190,11 +208,20 @@ func (e *Engine) Analyze(source ResourceRef, body []byte) ([]model.Finding, []Ca
 	seenCandidates := make(map[string]struct{})
 
 	// Convert once per body: regexp2 counts capture offsets in runes, and
-	// every rule reuses the same rune→byte translation table.
+	// every rule reuses the same rune→byte translation table. ASCII bodies
+	// skip the table entirely (rune index == byte index).
 	text := string(body)
 	offsets := runeOffsets(text)
+	var lines *findingLines
+	if wantFindings {
+		lines = newFindingLines(body)
+	}
 
 	for _, rule := range e.rules {
+		isURL := rule.rule.Category == model.RuleCategoryURL
+		if !wantFindings && !isURL {
+			continue
+		}
 		matches, matchErr := rule.m.findAll(text, offsets)
 		// A regexp2 timeout aborts the rest of this rule's pass; matches
 		// recovered before the deadline are still reported.
@@ -223,27 +250,29 @@ func (e *Engine) Analyze(source ResourceRef, body []byte) ([]model.Finding, []Ca
 			} else if rule.rule.Format != "" {
 				value = expandFormat(rule.rule.Format, text, indices)
 			}
-			key := rule.rule.ID + "\x00" + source.URL + "\x00" + value
-			if _, duplicate := seenFindings[key]; duplicate {
-				continue
-			}
-			seenFindings[key] = struct{}{}
+			if wantFindings {
+				key := rule.rule.ID + "\x00" + source.URL + "\x00" + value
+				if _, duplicate := seenFindings[key]; duplicate {
+					continue
+				}
+				seenFindings[key] = struct{}{}
 
-			line, column := location(body, start)
-			finding := model.Finding{
-				RuleID:       rule.rule.ID,
-				RuleName:     rule.rule.Name,
-				Category:     rule.rule.Category,
-				Severity:     rule.rule.Severity,
-				Value:        truncateRunes(value, maxValueRunes),
-				SourceURL:    source.URL,
-				Line:         line,
-				Column:       column,
-				ContextLines: matchContext(body, start, end),
+				line, column := lines.location(start)
+				finding := model.Finding{
+					RuleID:       rule.rule.ID,
+					RuleName:     rule.rule.Name,
+					Category:     rule.rule.Category,
+					Severity:     rule.rule.Severity,
+					Value:        truncateRunes(value, maxValueRunes),
+					SourceURL:    source.URL,
+					Line:         line,
+					Column:       column,
+					ContextLines: lines.matchContext(start, end),
+				}
+				located = append(located, locatedFinding{finding: finding, offset: start})
 			}
-			located = append(located, locatedFinding{finding: finding, offset: start})
 
-			if rule.rule.Category == model.RuleCategoryURL {
+			if isURL {
 				candidateKey := source.URL + "\x00" + value
 				if _, duplicate := seenCandidates[candidateKey]; !duplicate {
 					seenCandidates[candidateKey] = struct{}{}
@@ -276,33 +305,87 @@ func (e *Engine) Analyze(source ResourceRef, body []byte) ([]model.Finding, []Ca
 	return findings, candidates
 }
 
-func location(body []byte, offset int) (int, int) {
-	line := bytes.Count(body[:offset], []byte{'\n'}) + 1
-	lastNewline := bytes.LastIndexByte(body[:offset], '\n')
-	lineStart := lastNewline + 1
-	column := utf8.RuneCount(body[lineStart:offset]) + 1
-	return line, column
+// findingLines caches the line layout of one analyzed body. Building it once
+// keeps per-finding line/column and context lookups independent of the body
+// size; the previous implementation split the whole body for every finding,
+// which made a match-heavy minified bundle quadratic.
+type findingLines struct {
+	body   []byte
+	starts []int
+	// ascii caches the body's encoding: 0 unknown, 1 ASCII, -1 non-ASCII.
+	ascii int8
 }
 
-func matchContext(body []byte, start, end int) []model.ContextLine {
-	startLine := bytes.Count(body[:start], []byte{'\n'})
+func newFindingLines(body []byte) *findingLines {
+	starts := make([]int, 0, bytes.Count(body, []byte{'\n'})+1)
+	starts = append(starts, 0)
+	for index, char := range body {
+		if char == '\n' {
+			starts = append(starts, index+1)
+		}
+	}
+	return &findingLines{body: body, starts: starts}
+}
+
+func (lines *findingLines) isASCII() bool {
+	switch lines.ascii {
+	case 1:
+		return true
+	case -1:
+		return false
+	}
+	lines.ascii = 1
+	for _, char := range lines.body {
+		if char >= utf8.RuneSelf {
+			lines.ascii = -1
+			return false
+		}
+	}
+	return true
+}
+
+// countUpTo returns how many line starts are <= offset.
+func (lines *findingLines) countUpTo(offset int) int {
+	return sort.Search(len(lines.starts), func(i int) bool {
+		return lines.starts[i] > offset
+	})
+}
+
+func (lines *findingLines) location(offset int) (int, int) {
+	line := max(0, lines.countUpTo(offset)-1)
+	lineStart := lines.starts[line]
+	return line + 1, utf8.RuneCount(lines.body[lineStart:offset]) + 1
+}
+
+// lineContent returns one line without its separating newline and trailing CR,
+// matching the strings.Split(body, "\n") semantics the previous implementation
+// used (including the empty last line after a trailing newline).
+func (lines *findingLines) lineContent(index int) (string, int) {
+	start := lines.starts[index]
+	end := len(lines.body)
+	if index+1 < len(lines.starts) {
+		end = lines.starts[index+1] - 1
+	}
+	content := strings.TrimSuffix(string(lines.body[start:end]), "\r")
+	return content, start
+}
+
+func (lines *findingLines) matchContext(start, end int) []model.ContextLine {
+	startLine := max(0, lines.countUpTo(start)-1)
 	endLine := startLine
 	if end > start {
-		endLine += bytes.Count(body[start:end], []byte{'\n'})
+		endLine += lines.countUpTo(end) - lines.countUpTo(start)
 	}
-	lines := strings.Split(string(body), "\n")
 	firstLine := max(0, startLine-contextLines)
-	lastLine := min(len(lines)-1, endLine+contextLines)
+	lastLine := min(len(lines.starts)-1, endLine+contextLines)
 
-	lineOffsets := make([]int, len(lines))
-	for i := 1; i < len(lines); i++ {
-		lineOffsets[i] = lineOffsets[i-1] + len(lines[i-1]) + 1
+	if lines.isASCII() {
+		return lines.matchContextASCII(start, end, startLine, endLine, firstLine, lastLine)
 	}
 
 	result := make([]model.ContextLine, 0, lastLine-firstLine+1)
 	for index := firstLine; index <= lastLine; index++ {
-		content := strings.TrimSuffix(lines[index], "\r")
-		lineStart := lineOffsets[index]
+		content, lineStart := lines.lineContent(index)
 
 		matchStart, matchEnd := -1, -1
 		if index >= startLine && index <= endLine {
@@ -334,6 +417,51 @@ func matchContext(body []byte, start, end int) []model.ContextLine {
 		result = append(result, model.ContextLine{
 			LineNumber: index + 1,
 			Content:    content,
+			MatchStart: matchStart,
+			MatchEnd:   matchEnd,
+		})
+	}
+	return result
+}
+
+// matchContextASCII is the fast path for ASCII bodies: byte offsets equal rune
+// offsets, so a long minified line is sliced into a short window instead of
+// being copied and converted to runes for every finding.
+func (lines *findingLines) matchContextASCII(
+	start, end, startLine, endLine, firstLine, lastLine int,
+) []model.ContextLine {
+	result := make([]model.ContextLine, 0, lastLine-firstLine+1)
+	for index := firstLine; index <= lastLine; index++ {
+		lineStart := lines.starts[index]
+		lineEnd := len(lines.body)
+		if index+1 < len(lines.starts) {
+			lineEnd = lines.starts[index+1] - 1
+		}
+		content := lines.body[lineStart:lineEnd]
+		if size := len(content); size > 0 && content[size-1] == '\r' {
+			content = content[:size-1]
+		}
+
+		matchStart, matchEnd := -1, -1
+		if index >= startLine && index <= endLine {
+			if index == startLine {
+				matchStart = start - lineStart
+			} else {
+				matchStart = 0
+			}
+			if index == endLine {
+				matchEnd = end - lineStart
+			} else {
+				matchEnd = len(content)
+			}
+			matchStart = min(max(matchStart, 0), len(content))
+			matchEnd = min(max(matchEnd, matchStart), len(content))
+		}
+
+		text, matchStart, matchEnd := trimContextBytes(content, matchStart, matchEnd)
+		result = append(result, model.ContextLine{
+			LineNumber: index + 1,
+			Content:    text,
 			MatchStart: matchStart,
 			MatchEnd:   matchEnd,
 		})
@@ -393,6 +521,54 @@ func windowString(
 	}
 	shift := utf8.RuneCountInString(prefix) - windowStart
 	return prefix + string(runes[windowStart:windowEnd]) + suffix,
+		matchStart + shift, matchEnd + shift
+}
+
+// trimContextBytes is trimContextLine for an ASCII line: the budget and the
+// match coordinates are measured in bytes, which equal runes there, so no
+// whole-line conversion is performed.
+func trimContextBytes(content []byte, matchStart, matchEnd int) (string, int, int) {
+	if len(content) <= maxContextLineRunes {
+		return string(content), matchStart, matchEnd
+	}
+	if matchEnd > len(content) {
+		matchEnd = len(content)
+	}
+	if matchStart > matchEnd {
+		matchStart = matchEnd
+	}
+	if matchStart < 0 || matchEnd <= matchStart {
+		return string(content[:maxContextLineRunes]) + "…", matchStart, matchEnd
+	}
+	matchLen := matchEnd - matchStart
+	side := (maxContextLineRunes - 1 - matchLen) / 2
+	if side < 0 {
+		windowStart := max(0, matchStart)
+		windowEnd := min(len(content), windowStart+maxContextLineRunes-1)
+		return windowBytes(content, windowStart, windowEnd, matchStart, matchEnd)
+	}
+	windowStart := max(0, matchStart-side)
+	windowEnd := min(len(content), matchEnd+side)
+	if windowStart == 0 {
+		windowEnd = min(len(content), windowStart+maxContextLineRunes-1)
+	} else if windowEnd == len(content) {
+		windowStart = max(0, len(content)-maxContextLineRunes+1)
+	}
+	return windowBytes(content, windowStart, windowEnd, matchStart, matchEnd)
+}
+
+func windowBytes(
+	content []byte, windowStart, windowEnd, matchStart, matchEnd int,
+) (string, int, int) {
+	prefix, suffix := "", ""
+	if windowStart > 0 {
+		prefix = "…"
+	}
+	if windowEnd < len(content) {
+		suffix = "…"
+	}
+	shift := utf8.RuneCountInString(prefix) - windowStart
+	return prefix + string(content[windowStart:windowEnd]) + suffix,
 		matchStart + shift, matchEnd + shift
 }
 

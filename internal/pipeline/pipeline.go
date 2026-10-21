@@ -39,11 +39,18 @@ type Options struct {
 	TemplateEnricher analyze.TemplateEnricher
 	TaintEnricher    analyze.TaintEnricher
 	FindingEnricher  analyze.FindingEnricher
+	// AnalysisLimiter bounds concurrent body analysis. Nil gives this pipeline
+	// its own GOMAXPROCS-sized limiter; a Scanner injects one shared instance
+	// so a batch scan cannot multiply analysis concurrency by target count.
+	AnalysisLimiter *Limiter
 }
 
 // Pipeline recursively collects and analyzes one target within configured bounds.
 type Pipeline struct {
 	options Options
+	// limiter bounds concurrent body analysis across every goroutine this
+	// pipeline starts.
+	limiter *Limiter
 	// hostExtractor normalizes and classifies hosts. It is created with the
 	// pipeline — before any concurrent collection starts — and is read-only
 	// afterwards, so every analysis goroutine shares one instance and one
@@ -146,8 +153,13 @@ type deferredJS struct {
 
 // New constructs a direct resource pipeline.
 func New(options Options) *Pipeline {
+	limiter := options.AnalysisLimiter
+	if limiter == nil {
+		limiter = NewLimiter(0)
+	}
 	return &Pipeline{
 		options:       options,
+		limiter:       limiter,
 		hostExtractor: extract.NewExtractor(options.Config.Hosts),
 	}
 }
@@ -362,12 +374,12 @@ func absorbRecoveredSources(
 		result.findings = append(result.findings, textResult.Findings...)
 		result.candidates = append(result.candidates, textResult.Candidates...)
 		result.hosts = append(result.hosts, textResult.Hosts...)
-		recoveredJS := discover.AnalyzeJS(source, content)
+		recoveredJS, recoveredParams := discover.AnalyzeBody(source, content)
 		result.candidates = append(result.candidates, recoveredJS.Candidates...)
 		result.hosts = append(result.hosts, recoveredJS.Hosts...)
 		result.hostNotes = append(result.hostNotes, recoveredJS.Notes...)
 		result.basePaths = append(result.basePaths, discover.BasePathNames(recoveredJS.BasePaths)...)
-		result.params = append(result.params, discover.ParamsFromAST(source, content)...)
+		result.params = append(result.params, recoveredParams...)
 		markVendor(result, isVendor, candidatesFrom, findingsFrom, paramsFrom, hostsFrom)
 	}
 }
@@ -544,7 +556,11 @@ func (p *Pipeline) RunDetailed(
 		}
 		batch := state.pending
 		state.pending = nil
-		for _, analysis := range p.computeBatch(batch, state.reportDirectory) {
+		analyses, err := p.computeBatch(ctx, batch, state.reportDirectory)
+		if err != nil {
+			return result, spa, err
+		}
+		for _, analysis := range analyses {
 			p.mergeDeferred(state, analysis)
 		}
 		if err := p.drain(ctx, state, headers, entry); err != nil {
@@ -609,7 +625,12 @@ func (p *Pipeline) RunDetailed(
 	return result, spa, nil
 }
 
-// drain collects and processes queued resources until the queue is empty.
+// drain collects and processes queued resources until the queue is empty and
+// no request is in flight. Workers fetch continuously instead of waiting for a
+// whole batch: a slow request no longer holds up the resources behind it.
+// Results are merged by this single coordinator, so the shared run state is
+// never mutated concurrently.
+//
 // In fetch-first mode (DownloadJS enabled) scripts and chunks are saved and
 // queued for the deferred analysis phase instead of being analyzed inline.
 func (p *Pipeline) drain(
@@ -618,16 +639,71 @@ func (p *Pipeline) drain(
 	headers http.Header,
 	entry *collect.Response,
 ) error {
-	for state.queue.Len() > 0 {
+	workers := p.options.Config.Concurrency.ResourcesPerTarget
+	if workers <= 0 {
+		workers = 1
+	}
+	// Buffered to the worker count: a worker can always finish its send even
+	// after the coordinator returned on cancellation, so no goroutine leaks.
+	results := make(chan outcome, workers)
+	inflight := 0
+	launch := func(item scheduler.Item) {
+		inflight++
+		go func() {
+			results <- p.collectOne(
+				ctx, item, headers, entry, state.root, state.resolutionBase,
+				state.deferJS,
+			)
+		}()
+	}
+
+	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		batch := state.queue.Take(p.options.Config.Concurrency.ResourcesPerTarget)
-		outcomes := p.collectBatch(
-			ctx, batch, headers, entry, state.root, state.resolutionBase,
-			state.deferJS,
-		)
-		for _, collected := range outcomes {
+		// Fill every free worker slot. Items discovered by the results just
+		// processed are already in the queue, so the pool keeps working.
+		for inflight < workers {
+			item, ok := state.queue.TakeOne()
+			if !ok {
+				break
+			}
+			launch(item)
+		}
+		if inflight == 0 {
+			// Nothing queued and nothing running: the dynamic task set is
+			// exhausted.
+			break
+		}
+
+		var first outcome
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case first = <-results:
+		}
+		inflight--
+		// Take everything else that is already finished, then merge in a
+		// stable order so completion order only decides which results are in
+		// this group, not how they are merged.
+		ready := []outcome{first}
+	collect:
+		for inflight > 0 {
+			select {
+			case next := <-results:
+				inflight--
+				ready = append(ready, next)
+			default:
+				break collect
+			}
+		}
+		sort.SliceStable(ready, func(i, j int) bool {
+			if ready[i].item.Depth != ready[j].item.Depth {
+				return ready[i].item.Depth < ready[j].item.Depth
+			}
+			return ready[i].item.URL < ready[j].item.URL
+		})
+		for _, collected := range ready {
 			if err := p.processOutcome(state, collected); err != nil {
 				if contextErr := ctx.Err(); contextErr != nil {
 					return contextErr
@@ -873,6 +949,55 @@ func (p *Pipeline) processCandidates(
 	}
 }
 
+// enrichRecordedEndpoints folds the match context of regex candidates into
+// endpoints the download phase already recorded. The download pass runs the
+// same URL rules over the same body, so every candidate here already has an
+// endpoint; this pass only fills what the discovery pass skipped (context
+// lines above all). It never creates endpoints and never enqueues work, so
+// prefix-derived probes and request counts stay exactly what the download
+// phase decided.
+func (p *Pipeline) enrichRecordedEndpoints(
+	state *runState,
+	sourceURL string,
+	candidates []discover.Candidate,
+) {
+	if len(candidates) == 0 {
+		return
+	}
+	base, parseErr := url.Parse(sourceURL)
+	if parseErr != nil {
+		return
+	}
+	var baseOverride *url.URL
+	if state.resolutionBase != state.root {
+		baseOverride = state.resolutionBase
+	}
+	for _, candidate := range candidates {
+		if candidate.Kind != discover.KindEndpoint && candidate.Kind != discover.KindRoute {
+			continue
+		}
+		resolved, resolveErr := resolveCandidate(
+			state.targetScope, candidate.Raw, base, baseOverride,
+		)
+		if resolveErr != nil || state.targetScope.IsSuffixBlocked(resolved) {
+			continue
+		}
+		canonical := scope.Canonical(resolved)
+		evidence := ""
+		if candidate.Kind == discover.KindEndpoint {
+			evidence = candidateEvidence(candidate, resolved)
+		} else if state.spa.HashRouting && resolved.Fragment == "" &&
+			isRelativeReference(candidate.Raw) {
+			canonical = asHashRoute(resolved)
+		}
+		index, exists := state.endpointIndex[canonical]
+		if !exists {
+			continue
+		}
+		enrichEndpoint(&state.result.Endpoints[index], candidate, evidence)
+	}
+}
+
 // enrichEndpoint fills fields an earlier, coarser candidate left empty on an
 // existing endpoint. Fetch-first mode sees regex candidates before AST
 // candidates, so the richer AST data (body parameters, context lines, method)
@@ -996,60 +1121,110 @@ type deferredAnalysis struct {
 	item       deferredJS
 	findings   []model.Finding
 	candidates []discover.Candidate
-	basePaths  []string
-	params     []model.ParamHit
-	hosts      []extract.Candidate
-	hostNotes  []extract.Note
-	spa        discover.SPAEvidence
-	readErr    error
+	// regexCandidates are the same URL rules' candidates computed from the
+	// saved file. The download phase already recorded endpoints from them
+	// without match context, so these are used only to enrich those existing
+	// endpoints — never to create new ones or enqueue work.
+	regexCandidates []discover.Candidate
+	basePaths       []string
+	params          []model.ParamHit
+	hosts           []extract.Candidate
+	hostNotes       []extract.Note
+	spa             discover.SPAEvidence
+	readErr         error
 }
 
-// computeBatch loads and analyzes deferred JavaScript bodies in parallel.
-// Items with a saved file are read from disk (dropping the in-memory copy
-// after the save); items with a fallback body are analyzed from memory.
-// The caller merges results sequentially so endpoint ordering stays stable.
-func (p *Pipeline) computeBatch(batch []deferredJS, reportDirectory string) []deferredAnalysis {
+// computeBatch loads and analyzes deferred JavaScript bodies with a bounded
+// worker count. The limiter is shared, so a batch scan never exceeds the
+// process-wide analysis concurrency. Items with a saved file are read from
+// disk (dropping the in-memory copy after the save); items with a fallback
+// body are analyzed from memory. The caller merges results sequentially so
+// endpoint ordering stays stable.
+func (p *Pipeline) computeBatch(
+	ctx context.Context,
+	batch []deferredJS,
+	reportDirectory string,
+) ([]deferredAnalysis, error) {
 	analyses := make([]deferredAnalysis, len(batch))
+	if len(batch) == 0 {
+		return analyses, nil
+	}
+	workers := min(len(batch), p.limiter.Capacity())
+	if workers < 1 {
+		workers = 1
+	}
+	indexes := make(chan int)
 	var wait sync.WaitGroup
-	wait.Add(len(batch))
-	for index := range batch {
-		item := batch[index]
+	wait.Add(workers)
+	for range workers {
 		go func() {
 			defer wait.Done()
-			analysis := deferredAnalysis{item: item, vendor: item.vendor}
-			body := item.body
-			if item.path != "" {
-				loaded, readErr := storage.LoadJS(reportDirectory, item.path)
-				if readErr != nil {
-					analysis.readErr = readErr
-					analyses[index] = analysis
-					return
+			for index := range indexes {
+				if err := p.limiter.Acquire(ctx); err != nil {
+					analyses[index].readErr = err
+					continue
 				}
-				body = loaded
+				analyses[index] = p.analyzeDeferred(ctx, batch[index], reportDirectory)
+				p.limiter.Release()
 			}
-			if body == nil {
-				analysis.readErr = errors.New("no saved file or in-memory body to analyze")
-				analyses[index] = analysis
-				return
-			}
-			jsResult := discover.FromJavaScript(item.source, body, p.options.Analyzer)
-			analysis.findings = jsResult.Findings
-			analysis.spa = jsResult.SPA
-			analysis.hosts = append(analysis.hosts, jsResult.Hosts...)
-			// One parse yields both the API candidates and the host
-			// candidates; host discovery never re-parses the file.
-			jsAnalysis := discover.AnalyzeJS(item.source, body)
-			analysis.candidates = jsAnalysis.Candidates
-			analysis.hosts = append(analysis.hosts, jsAnalysis.Hosts...)
-			analysis.hostNotes = append(analysis.hostNotes, jsAnalysis.Notes...)
-			analysis.basePaths = append(analysis.basePaths, discover.BasePathNames(jsResult.BasePaths)...)
-			analysis.basePaths = append(analysis.basePaths, discover.BasePathNames(jsAnalysis.BasePaths)...)
-			analysis.params = discover.ParamsFromAST(item.source, body)
-			analyses[index] = analysis
 		}()
 	}
+	var dispatchErr error
+	for index := range batch {
+		select {
+		case indexes <- index:
+		case <-ctx.Done():
+			dispatchErr = ctx.Err()
+		}
+		if dispatchErr != nil {
+			break
+		}
+	}
+	close(indexes)
 	wait.Wait()
-	return analyses
+	return analyses, dispatchErr
+}
+
+// analyzeDeferred loads one deferred body and runs the full extraction pass
+// over it.
+func (p *Pipeline) analyzeDeferred(
+	ctx context.Context,
+	item deferredJS,
+	reportDirectory string,
+) deferredAnalysis {
+	analysis := deferredAnalysis{item: item, vendor: item.vendor}
+	if err := ctx.Err(); err != nil {
+		analysis.readErr = err
+		return analysis
+	}
+	body := item.body
+	if item.path != "" {
+		loaded, readErr := storage.LoadJS(reportDirectory, item.path)
+		if readErr != nil {
+			analysis.readErr = readErr
+			return analysis
+		}
+		body = loaded
+	}
+	if body == nil {
+		analysis.readErr = errors.New("no saved file or in-memory body to analyze")
+		return analysis
+	}
+	jsResult := discover.FromJavaScript(item.source, body, p.options.Analyzer)
+	analysis.findings = jsResult.Findings
+	analysis.spa = jsResult.SPA
+	analysis.hosts = append(analysis.hosts, jsResult.Hosts...)
+	analysis.regexCandidates = jsResult.Candidates
+	// One parse yields both the API candidates and the host candidates;
+	// host discovery never re-parses the file.
+	jsAnalysis, params := discover.AnalyzeBody(item.source, body)
+	analysis.candidates = jsAnalysis.Candidates
+	analysis.hosts = append(analysis.hosts, jsAnalysis.Hosts...)
+	analysis.hostNotes = append(analysis.hostNotes, jsAnalysis.Notes...)
+	analysis.basePaths = append(analysis.basePaths, discover.BasePathNames(jsResult.BasePaths)...)
+	analysis.basePaths = append(analysis.basePaths, discover.BasePathNames(jsAnalysis.BasePaths)...)
+	analysis.params = params
+	return analysis
 }
 
 // mergeDeferred folds one analysis result into the run state.
@@ -1069,6 +1244,9 @@ func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
 		for index := range analysis.candidates {
 			analysis.candidates[index].Vendor = true
 		}
+		for index := range analysis.regexCandidates {
+			analysis.regexCandidates[index].Vendor = true
+		}
 		for index := range analysis.params {
 			analysis.params[index].Vendor = true
 		}
@@ -1084,36 +1262,19 @@ func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
 	state.mergeParams(analysis.params)
 	state.absorbBasePaths(analysis.basePaths)
 	state.mergeHosts(analysis.hosts, analysis.hostNotes)
+	// The deferred analysis pass reruns the same URL rules over the saved
+	// file. Those candidates only fill fields the download-phase discovery
+	// pass skipped (match context above all); they must run before the AST
+	// candidates so first-wins enrichment matches the download ordering.
+	p.enrichRecordedEndpoints(
+		state, analysis.item.source.String(), analysis.regexCandidates,
+	)
 	p.processCandidates(
 		state,
 		analysis.item.source.String(),
 		analysis.candidates,
 		analysis.item.depth,
 	)
-}
-
-func (p *Pipeline) collectBatch(
-	ctx context.Context,
-	batch []scheduler.Item,
-	headers http.Header,
-	entry *collect.Response,
-	root *url.URL,
-	resolutionBase *url.URL,
-	deferJS bool,
-) []outcome {
-	outcomes := make([]outcome, len(batch))
-	var wait sync.WaitGroup
-	wait.Add(len(batch))
-	for index, item := range batch {
-		go func() {
-			defer wait.Done()
-			outcomes[index] = p.collectOne(
-				ctx, item, headers, entry, root, resolutionBase, deferJS,
-			)
-		}()
-	}
-	wait.Wait()
-	return outcomes
 }
 
 func (p *Pipeline) collectOne(
@@ -1167,12 +1328,12 @@ func (p *Pipeline) collectOne(
 		result.candidates = append(result.candidates, discover.FromWebpack(
 			discoveryBase, response.Body, p.candidateLimit(),
 		)...)
-		documentJS := discover.AnalyzeJS(source, response.Body)
+		documentJS, documentParams := discover.AnalyzeBody(source, response.Body)
 		result.candidates = append(result.candidates, documentJS.Candidates...)
 		result.hosts = append(result.hosts, documentJS.Hosts...)
 		result.hostNotes = append(result.hostNotes, documentJS.Notes...)
 		result.basePaths = append(result.basePaths, discover.BasePathNames(documentJS.BasePaths)...)
-		result.params = append(result.params, discover.ParamsFromAST(source, response.Body)...)
+		result.params = append(result.params, documentParams...)
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, textResult.SPA)
 		result.findings = append(result.findings, textResult.Findings...)
@@ -1188,15 +1349,12 @@ func (p *Pipeline) collectOne(
 			result.findings = append(result.findings, inlineResult.Findings...)
 			result.candidates = append(result.candidates, inlineResult.Candidates...)
 			result.hosts = append(result.hosts, inlineResult.Hosts...)
-			inlineJS := discover.AnalyzeJS(source, []byte(inline))
+			inlineJS, inlineParams := discover.AnalyzeBody(source, []byte(inline))
 			result.candidates = append(result.candidates, inlineJS.Candidates...)
 			result.hosts = append(result.hosts, inlineJS.Hosts...)
 			result.hostNotes = append(result.hostNotes, inlineJS.Notes...)
 			result.basePaths = append(result.basePaths, discover.BasePathNames(inlineJS.BasePaths)...)
-			result.params = append(
-				result.params,
-				discover.ParamsFromAST(source, []byte(inline))...,
-			)
+			result.params = append(result.params, inlineParams...)
 		}
 	case item.Kind == model.ResourceTypeScript || item.Kind == model.ResourceTypeChunk ||
 		strings.Contains(contentType, "javascript"):
@@ -1217,23 +1375,32 @@ func (p *Pipeline) collectOne(
 			markVendor(&result, vendor, vendorCandidates, vendorFindings, vendorParams, vendorHosts)
 		}()
 		if !deferJS {
-			scriptJS := discover.AnalyzeJS(source, response.Body)
+			scriptJS, scriptParams := discover.AnalyzeBody(source, response.Body)
 			result.candidates = append(result.candidates, scriptJS.Candidates...)
 			result.hosts = append(result.hosts, scriptJS.Hosts...)
 			result.hostNotes = append(result.hostNotes, scriptJS.Notes...)
 			result.basePaths = append(result.basePaths, discover.BasePathNames(scriptJS.BasePaths)...)
-			result.params = append(result.params, discover.ParamsFromAST(source, response.Body)...)
+			result.params = append(result.params, scriptParams...)
 		}
-		jsResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
+		// Fetch-first mode reruns the regex engine and AST extractor over the
+		// downloaded bodies after collection, so this pass keeps only the
+		// candidates needed to discover follow-up scripts and chunks. Running
+		// the URL rules alone produces exactly the same candidates while
+		// skipping the sensitive-rule passes whose findings would be dropped.
+		var jsResult discover.JSResult
+		if deferJS {
+			jsResult = discover.FromJavaScriptDiscovery(
+				source, response.Body, p.options.Analyzer,
+			)
+		} else {
+			jsResult = discover.FromJavaScript(source, response.Body, p.options.Analyzer)
+		}
 		mergeSPAEvidence(&result.spa, jsResult.SPA)
 		// In deferred mode the file is analyzed later, so its hosts are
 		// collected there; inline mode has this single pass.
 		if !deferJS {
 			result.hosts = append(result.hosts, jsResult.Hosts...)
 		}
-		// Fetch-first mode reruns the regex engine and AST extractor over the
-		// downloaded bodies after collection, so this pass keeps only the
-		// candidates needed to discover follow-up scripts and chunks.
 		if deferJS {
 			result.candidates = append(result.candidates, jsResult.Candidates...)
 		} else {

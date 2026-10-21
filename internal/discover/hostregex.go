@@ -49,14 +49,16 @@ func HostsFromText(source *url.URL, body []byte) []extract.Candidate {
 	if source != nil {
 		sourceURL = source.String()
 	}
-	return scanHostText(body, 0, string(body), sourceURL, "")
+	return scanHostTextIndexed(newLineIndex(body), 0, string(body), sourceURL, "")
 }
 
-// scanHostText finds host candidates in textValue, which starts at byte
-// textStart inside body. Positions are reported against body so evidence
-// points at the real line of the file; note is attached to every candidate
-// ("comment" for a comment node, empty otherwise).
-func scanHostText(body []byte, textStart int, textValue, sourceURL, note string) []extract.Candidate {
+// scanHostTextIndexed finds host candidates in textValue, which starts at byte
+// textStart inside the indexed body.
+func scanHostTextIndexed(
+	lines *lineIndex,
+	textStart int,
+	textValue, sourceURL, note string,
+) []extract.Candidate {
 	if textValue == "" {
 		return nil
 	}
@@ -85,7 +87,7 @@ func scanHostText(body []byte, textStart int, textValue, sourceURL, note string)
 		// rejected match cannot hide the host it merely contained.
 		claimed = append(claimed, span{start, end})
 		offset := textStart + start
-		line, column := lineColumn(body, offset)
+		line, column := lines.position(offset)
 		combined := joinNotes(note, extraNote)
 		out = append(out, extract.Candidate{
 			Raw:          raw,
@@ -95,7 +97,7 @@ func scanHostText(body []byte, textStart int, textValue, sourceURL, note string)
 			SourceURL:    sourceURL,
 			Line:         line,
 			Column:       column,
-			ContextLines: extractContext(body, offset, contextSpanLines, raw),
+			ContextLines: lines.extract(offset, contextSpanLines, raw),
 		})
 	}
 
