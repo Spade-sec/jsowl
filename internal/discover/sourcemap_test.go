@@ -44,6 +44,30 @@ func TestSourceMapReferenceHandlesExternalAndInlineForms(t *testing.T) {
 	}
 }
 
+func TestParseSourceMapDetailedReportsWhySourcesAreMissing(t *testing.T) {
+	corrupt := ParseSourceMapDetailed([]byte(`{not json`))
+	if corrupt.Err == nil {
+		t.Fatal("corrupt map did not report an error")
+	}
+	missing := ParseSourceMapDetailed([]byte(
+		`{"version":3,"sources":["a.js","b.js"],"sourcesContent":[null,null]}`,
+	))
+	if missing.Err != nil {
+		t.Fatalf("missing content reported an error: %v", missing.Err)
+	}
+	if missing.Sources != 2 || missing.Embedded != 0 || len(missing.Files) != 0 {
+		t.Fatalf("missing = %#v", missing)
+	}
+	embedded := ParseSourceMapDetailed([]byte(
+		`{"version":3,"sources":["webpack:///./src/a.js"],` +
+			`"sourcesContent":["fetch(\"/x\");"]}`,
+	))
+	if embedded.Sources != 1 || embedded.Embedded != 1 ||
+		len(embedded.Files) != 1 || embedded.Files[0].Name != "src/a.js" {
+		t.Fatalf("embedded = %#v", embedded)
+	}
+}
+
 func TestIsSourceMapPath(t *testing.T) {
 	for _, want := range []string{"/static/js/app.6b63242c.js.map", "app.MAP"} {
 		if !isSourceMapPath(want) {

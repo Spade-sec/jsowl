@@ -199,3 +199,184 @@ fetch("/users");
 		t.Errorf("the literal reference disappeared: %v", byURL)
 	}
 }
+
+// TestBasePathProbesLiteralReferenceBeforeJoined pins the two-phase order:
+// the path as written is requested first, and only after every literal
+// endpoint has been probed does the declared prefix get joined and requested.
+func TestBasePathProbesLiteralReferenceBeforeJoined(t *testing.T) {
+	getter := &stubGetter{responses: map[string]collect.Response{
+		"/": {URL: "http://app.test/", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"text/html"}},
+			Body:   []byte(`<script src="/app.js"></script>`)},
+		"/app.js": {URL: "http://app.test/app.js", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/javascript"}},
+			Body: []byte(`
+const api = axios.create({ baseURL: "/api" });
+fetch("/users");
+`)},
+		"/users": {URL: "http://app.test/users", StatusCode: 404,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   []byte(`{"error":"not found"}`)},
+		"/api/users": {URL: "http://app.test/api/users", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   []byte(`{"ok":true}`)},
+	}}
+	config := model.DefaultConfig()
+	config.Mode = model.ModeDirect
+	config.Output.Directory = t.TempDir()
+	config.Output.JSON = false
+	config.Output.HTML = false
+	runner, _ := newStubPipeline(t, config, getter)
+
+	if _, _, err := runner.RunDetailed(context.Background(),
+		model.Target{URL: "http://app.test/"}, http.Header{}, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	getter.mu.Lock()
+	defer getter.mu.Unlock()
+	literal, joined := -1, -1
+	for index, path := range getter.requests {
+		switch path {
+		case "/users":
+			if literal < 0 {
+				literal = index
+			}
+		case "/api/users":
+			if joined < 0 {
+				joined = index
+			}
+		}
+	}
+	if literal < 0 || joined < 0 {
+		t.Fatalf("expected both probes, got %v", getter.requests)
+	}
+	if literal > joined {
+		t.Fatalf("prefixed path probed before literal: %v", getter.requests)
+	}
+}
+
+// TestBasePathSkipsRootedAndNonCallReferences guards the heuristic: a
+// reference already written under a declared prefix is not prefixed twice,
+// and a path assignment (a router path, config value) is not treated as an
+// interface that the base path applies to.
+func TestBasePathSkipsRootedAndNonCallReferences(t *testing.T) {
+	getter := &stubGetter{responses: map[string]collect.Response{
+		"/": {URL: "http://app.test/", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"text/html"}},
+			Body:   []byte(`<script src="/app.js"></script>`)},
+		"/app.js": {URL: "http://app.test/app.js", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/javascript"}},
+			Body: []byte(`
+const api = axios.create({ baseURL: "/api" });
+fetch("/api/users");
+const route = { path: "/dashboard" };
+`)},
+		"/api/users": {URL: "http://app.test/api/users", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   []byte(`{"ok":true}`)},
+		"/dashboard": {URL: "http://app.test/dashboard", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"text/html"}},
+			Body:   []byte(`<html></html>`)},
+	}}
+	config := model.DefaultConfig()
+	config.Mode = model.ModeDirect
+	config.Output.Directory = t.TempDir()
+	config.Output.JSON = false
+	config.Output.HTML = false
+	runner, _ := newStubPipeline(t, config, getter)
+
+	if _, _, err := runner.RunDetailed(context.Background(),
+		model.Target{URL: "http://app.test/"}, http.Header{}, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	getter.mu.Lock()
+	defer getter.mu.Unlock()
+	for _, unwanted := range []string{"/api/api/users", "/api/dashboard"} {
+		for _, path := range getter.requests {
+			if path == unwanted {
+				t.Fatalf("unexpected joined probe %s: %v", unwanted, getter.requests)
+			}
+		}
+	}
+	var literal, route bool
+	for _, path := range getter.requests {
+		switch path {
+		case "/api/users":
+			literal = true
+		case "/dashboard":
+			route = true
+		}
+	}
+	if !literal || !route {
+		t.Fatalf("literal probes missing: %v", getter.requests)
+	}
+}
+
+// TestAutoBasePathJoiningIsOrderIndependent covers the automatic prefix
+// discovery across files: the prefix is declared in a script that is only
+// discovered by the script using it, so the reference is recorded before any
+// prefix is known. The final join pass must still try it, and it must not
+// duplicate the probe when the pass runs again.
+func TestAutoBasePathJoiningIsOrderIndependent(t *testing.T) {
+	getter := &stubGetter{responses: map[string]collect.Response{
+		"/": {URL: "http://app.test/", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"text/html"}},
+			Body:   []byte(`<script src="/app.js"></script>`)},
+		"/app.js": {URL: "http://app.test/app.js", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/javascript"}},
+			Body:   []byte(`import("/config.js");fetch("/users")`)},
+		"/config.js": {URL: "http://app.test/config.js", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/javascript"}},
+			Body:   []byte(`axios.create({baseURL:"/api"})`)},
+		"/api/users": {URL: "http://app.test/api/users", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   []byte(`{"ok":true}`)},
+	}}
+	config := model.DefaultConfig()
+	config.Mode = model.ModeDirect
+	config.Output.Directory = t.TempDir()
+	config.Output.JSON = false
+	config.Output.HTML = false
+	runner, _ := newStubPipeline(t, config, getter)
+
+	result, _, err := runner.RunDetailed(context.Background(),
+		model.Target{URL: "http://app.test/"}, http.Header{}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var joined int
+	byURL := map[string]model.Endpoint{}
+	for _, endpoint := range result.Endpoints {
+		byURL[endpoint.URL] = endpoint
+		if endpoint.URL == "http://app.test/api/users" {
+			joined++
+		}
+	}
+	endpoint, ok := byURL["http://app.test/api/users"]
+	if !ok {
+		t.Fatalf("the declared prefix was not tried: %v", byURL)
+	}
+	if endpoint.Source != "prefix" || endpoint.StatusCode != 200 {
+		t.Fatalf("prefix endpoint = %#v", endpoint)
+	}
+	if joined != 1 {
+		t.Fatalf("prefix endpoint recorded %d times", joined)
+	}
+	if _, ok := byURL["http://app.test/users"]; !ok {
+		t.Fatalf("the literal reference disappeared: %v", byURL)
+	}
+	getter.mu.Lock()
+	defer getter.mu.Unlock()
+	probes := 0
+	for _, path := range getter.requests {
+		if path == "/api/users" {
+			probes++
+		}
+	}
+	if probes != 1 {
+		t.Fatalf("/api/users probed %d times: %v", probes, getter.requests)
+	}
+}

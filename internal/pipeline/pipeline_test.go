@@ -257,6 +257,75 @@ func TestDeferredAnalysisKeepsRegexOnlyEndpointContext(t *testing.T) {
 	}
 }
 
+// TestRunDetailedAcceptsPathOnlyBaseURL verifies that --base-url may be a
+// path-only prefix: it is resolved against the target origin and joined with
+// the references discovered in the page, so "/users" is requested as
+// "/api/users" and a bare relative "v1/orders" as "/api/v1/orders".
+func TestRunDetailedAcceptsPathOnlyBaseURL(t *testing.T) {
+	getter := &stubGetter{responses: map[string]collect.Response{
+		"/": {URL: "http://stub.test/", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"text/html"}},
+			Body:   []byte(`<script>fetch("/users");fetch("v1/orders")</script>`)},
+		"/api/users": {URL: "http://stub.test/api/users", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   []byte(`{"ok":true}`)},
+		"/api/v1/orders": {URL: "http://stub.test/api/v1/orders", StatusCode: 200,
+			Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body:   []byte(`{"ok":true}`)},
+	}}
+	config := model.DefaultConfig()
+	config.Mode = model.ModeDirect
+	pipeline, _ := newStubPipeline(t, config, getter)
+
+	result, _, err := pipeline.RunDetailed(context.Background(),
+		model.Target{URL: "http://stub.test/", BaseURL: "/api"},
+		http.Header{}, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"http://stub.test/api/users",
+		"http://stub.test/api/v1/orders",
+	} {
+		found := false
+		for _, endpoint := range result.Endpoints {
+			if endpoint.URL == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("endpoint %s missing: %v", want, findEndpointURLs(result))
+		}
+	}
+	getter.mu.Lock()
+	defer getter.mu.Unlock()
+	for _, want := range []string{"/api/users", "/api/v1/orders"} {
+		requested := false
+		for _, path := range getter.requests {
+			if path == want {
+				requested = true
+				break
+			}
+		}
+		if !requested {
+			t.Fatalf("%s was not requested: %v", want, getter.requests)
+		}
+	}
+}
+
+func TestRunDetailedRejectsBareRelativeBaseURL(t *testing.T) {
+	config := model.DefaultConfig()
+	config.Mode = model.ModeDirect
+	pipeline, _ := newStubPipeline(t, config, &stubGetter{})
+	_, _, err := pipeline.RunDetailed(context.Background(),
+		model.Target{URL: "http://stub.test/", BaseURL: "api"},
+		http.Header{}, nil, nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid base URL") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestDeferredAnalysisPersistsToDiskAndFindsEndpoints(t *testing.T) {
 	getter := &stubGetter{responses: map[string]collect.Response{
 		"/": {URL: "http://stub.test/", StatusCode: 200,
