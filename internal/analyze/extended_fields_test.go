@@ -7,7 +7,7 @@ func TestExtendedSensitiveConfigurationFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const id = "hae.密钥凭证.扩展敏感配置你"
+	const id = "hae.密钥凭证.密钥提取"
 	const value = "DemoSecret_123=-"
 	positive := []string{
 		`client_secret = "DemoSecret_123=-"`,
