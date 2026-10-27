@@ -68,6 +68,10 @@ type BrowserResult struct {
 	Routes  []BrowserRoute
 	Network []NetworkRecord
 	Cookies []*http.Cookie
+	// LoadTimedOut reports that the entry page did not reach its load event
+	// within the configured soft cap. HTML, URLs and Network still carry
+	// everything observed up to that point; the scan is partial, not failed.
+	LoadTimedOut bool
 }
 
 // BrowserCollector renders one entry URL and observes its runtime resources.

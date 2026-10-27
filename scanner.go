@@ -274,9 +274,7 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 				}
 			} else {
 				result = mergeResults(result, browserResult)
-				result.BrowserStatus = model.BrowserStatus{
-					Attempted: true, Used: true,
-				}
+				result.BrowserStatus = browserResult.BrowserStatus
 			}
 		}
 	}
@@ -494,7 +492,21 @@ func (s *Scanner) scanWithBrowser(
 		ctx, target, headers, &entry, seeds, previouslySeen,
 	)
 	if result != nil {
-		result.BrowserStatus = model.BrowserStatus{Attempted: true, Used: true}
+		result.BrowserStatus = model.BrowserStatus{
+			Attempted: true, Used: true, LoadTimedOut: rendered.LoadTimedOut,
+		}
+		if err == nil && rendered.LoadTimedOut {
+			// The stage still succeeded; this diagnostic tells the report why
+			// runtime coverage may be incomplete for this target.
+			result.Issues = append(result.Issues, model.Issue{
+				Code:  "browser_load_timeout",
+				Stage: "collect",
+				URL:   root.String(),
+				Message: "entry page did not reach its load event within " +
+					"browser.load_timeout; analysis continued with the rendered " +
+					"DOM and the requests observed so far",
+			})
+		}
 	}
 	return result, err
 }

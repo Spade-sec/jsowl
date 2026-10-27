@@ -78,7 +78,7 @@ func (c *Collector) Collect(
 	}
 	timeout := c.config.Timeout
 	if timeout <= 0 {
-		timeout = 45 * time.Second
+		timeout = 120 * time.Second
 	}
 	scanContext, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -270,7 +270,8 @@ func (c *Collector) collectOnce(
 	if err := page.Navigate(target.String()); err != nil {
 		return collect.BrowserResult{}, fmt.Errorf("navigate browser page: %w", err)
 	}
-	if err := page.WaitLoad(); err != nil {
+	loadTimedOut, err := waitForLoad(ctx, page.WaitLoad, c.config.LoadTimeout)
+	if err != nil {
 		return collect.BrowserResult{}, fmt.Errorf("wait for page load: %w", err)
 	}
 	abandonIdleWait(ctx, waitForIdle, c.config.IdleMax)
@@ -333,7 +334,7 @@ func (c *Collector) collectOnce(
 	return collect.BrowserResult{
 		HTML: []byte(html), URLs: urls, Scripts: injectedScripts,
 		Routes: injectedRoutes, Network: records,
-		Cookies: convertCookies(browserCookies),
+		Cookies: convertCookies(browserCookies), LoadTimedOut: loadTimedOut,
 	}, nil
 }
 
@@ -853,6 +854,42 @@ func containsFold(values []string, candidate string) bool {
 		}
 	}
 	return false
+}
+
+// waitForLoad waits for the page's load event. With limit > 0 the wait is a
+// soft cap: a page that keeps a subresource pending (a slow chunk, a hanging
+// image or iframe) never reaches "complete", and letting the whole browser
+// stage fail there discards everything already rendered and observed. When the
+// cap elapses the wait is abandoned in the background and abandoned reports
+// that the caller should continue with partial output. limit <= 0 keeps the
+// previous behavior: the wait is bounded only by the browser stage context.
+func waitForLoad(
+	ctx context.Context,
+	wait func() error,
+	limit time.Duration,
+) (abandoned bool, err error) {
+	if limit <= 0 {
+		return false, wait()
+	}
+	done := make(chan error, 1)
+	go func() { done <- wait() }()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return false, err
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-timer.C:
+		// A load that completed at the same instant as the cap should count
+		// as completed rather than as a partial render.
+		select {
+		case err := <-done:
+			return false, err
+		default:
+			return true, nil
+		}
+	}
 }
 
 func waitDuration(ctx context.Context, duration time.Duration) error {

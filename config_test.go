@@ -21,6 +21,12 @@ func TestDefaultConfigProvidesBoundedScanDefaults(t *testing.T) {
 	if cfg.Browser.Idle != 800*time.Millisecond {
 		t.Fatalf("Browser.Idle = %s, want 800ms", cfg.Browser.Idle)
 	}
+	if cfg.Browser.Timeout != 120*time.Second {
+		t.Fatalf("Browser.Timeout = %s, want 120s", cfg.Browser.Timeout)
+	}
+	if cfg.Browser.LoadTimeout != 30*time.Second {
+		t.Fatalf("Browser.LoadTimeout = %s, want 30s", cfg.Browser.LoadTimeout)
+	}
 	if cfg.Concurrency.ResourcesPerTarget != 16 {
 		t.Fatalf("ResourcesPerTarget = %d, want 16", cfg.Concurrency.ResourcesPerTarget)
 	}

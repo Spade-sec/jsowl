@@ -47,7 +47,8 @@ browser:
   wait: 3s
   idle: 800ms
   idle_max: 5s
-  timeout: 45s
+  load_timeout: 30s
+  timeout: 120s
   headless: true
   no_sandbox: false
   collector_script: ""

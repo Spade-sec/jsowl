@@ -19,7 +19,12 @@ browser:
   # 空闲等待的上限：轮询型 SPA 的网络永远不会静止 idle 时长，
   # 到达上限后放弃等待、直接用已收集内容拍快照。0 表示不限制（旧行为）。
   idle_max: 5s
-  timeout: 45s
+  # 页面 load 事件的软上限：子资源迟迟不完成时不再让整个浏览器阶段失败，
+  # 而是用已渲染的 DOM 与已观测请求继续采集，并在报告中标记 load_timed_out。
+  # 0 表示不限制（回到“等满整个 timeout 再失败”的旧行为）。
+  load_timeout: 30s
+  # 整个浏览器阶段（启动、入口加载、空闲等待、观察期与路由爬取）的总上限。
+  timeout: 120s
   headless: true
   # 运行时自动填表并提交（算法适配自 projectdiscovery/katana，MIT）。
   # 提交产生的请求会被 CDP 捕获，其真实参数（键、值、类型）以 runtime

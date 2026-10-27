@@ -246,7 +246,15 @@ type BrowserConfig struct {
 	// runs to Timeout and the injection results are lost. When IdleMax
 	// elapses, waiting is abandoned and the snapshot proceeds with what has
 	// been collected so far. 0 disables the cap.
-	IdleMax          time.Duration `yaml:"idle_max" json:"idle_max"`
+	IdleMax time.Duration `yaml:"idle_max" json:"idle_max"`
+	// LoadTimeout caps the wait for the entry page's load event. A page that
+	// keeps a subresource pending (slow chunk, hanging image or iframe) never
+	// reaches "complete"; without this cap the whole browser stage fails at
+	// Timeout and every runtime observation is lost. When the cap elapses,
+	// collection continues with the already-rendered DOM and the requests
+	// observed so far, and the result is marked as a partial load. 0 restores
+	// the uncapped behavior (fail once the browser stage itself times out).
+	LoadTimeout      time.Duration `yaml:"load_timeout" json:"load_timeout"`
 	Timeout          time.Duration `yaml:"timeout" json:"timeout"`
 	Headless         bool          `yaml:"headless" json:"headless"`
 	NoSandbox        bool          `yaml:"no_sandbox" json:"no_sandbox"`
@@ -491,10 +499,14 @@ func (r *Rule) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type BrowserStatus struct {
-	Attempted bool   `json:"attempted"`
-	Used      bool   `json:"used"`
-	Degraded  bool   `json:"degraded"`
-	Reason    string `json:"reason,omitempty"`
+	Attempted bool `json:"attempted"`
+	Used      bool `json:"used"`
+	Degraded  bool `json:"degraded"`
+	// LoadTimedOut records that the entry page did not reach its load event
+	// within browser.load_timeout and collection continued with the partial
+	// render. The browser stage still succeeded; results may be incomplete.
+	LoadTimedOut bool   `json:"load_timed_out,omitempty"`
+	Reason       string `json:"reason,omitempty"`
 }
 
 type Resource struct {

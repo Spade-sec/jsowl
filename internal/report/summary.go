@@ -414,6 +414,8 @@ func buildSummary(result *model.Result, now time.Time) reportSummary {
 	}
 	if result.BrowserStatus.Degraded {
 		summary.BrowserNote = "浏览器阶段降级：" + result.BrowserStatus.Reason
+	} else if result.BrowserStatus.LoadTimedOut {
+		summary.BrowserNote = "浏览器阶段在页面 load 事件前达到 browser.load_timeout，已用已渲染内容与已观测请求继续采集，运行时覆盖面可能不完整。"
 	} else if result.BrowserStatus.Attempted && !result.BrowserStatus.Used {
 		summary.BrowserNote = "浏览器阶段未启用，运行时请求未采集。"
 	}

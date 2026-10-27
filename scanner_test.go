@@ -280,6 +280,56 @@ func TestAutoMergesBrowserResourcesWithoutDuplicates(t *testing.T) {
 	}
 }
 
+// A partial entry render (load soft cap reached) is still a successful
+// browser stage; it must keep the runtime results, stay non-degraded, and
+// leave a diagnostic explaining the possibly incomplete coverage.
+func TestAutoKeepsPartialRenderWhenLoadTimesOut(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		_ *http.Request,
+	) {
+		writer.Header().Set("Content-Type", "text/html")
+		_, _ = writer.Write([]byte(`<main id="app"></main>`))
+	}))
+	defer server.Close()
+
+	browser := &fakeBrowser{result: collect.BrowserResult{
+		HTML:         []byte(`<main id="app"><span id="partial"></span></main>`),
+		LoadTimedOut: true,
+	}}
+	config := DefaultConfig()
+	config.Mode = ModeAuto
+	tempOutputRedirects(t, &config)
+	scanner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner.browserFactory = func(model.BrowserConfig) (collect.BrowserCollector, error) {
+		return browser, nil
+	}
+
+	result, err := scanner.Scan(context.Background(), Target{URL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := result.BrowserStatus
+	if !status.Used || status.Degraded || !status.LoadTimedOut {
+		t.Fatalf("browser status = %#v", status)
+	}
+	found := false
+	for _, issue := range result.Issues {
+		if issue.Code == "browser_load_timeout" {
+			found = true
+			if issue.Stage != "collect" {
+				t.Fatalf("issue stage = %q", issue.Stage)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("browser_load_timeout issue missing: %#v", result.Issues)
+	}
+}
+
 func TestAutoDoesNotRefetchDirectResourcesDuringBrowserMerge(t *testing.T) {
 	var scriptRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(

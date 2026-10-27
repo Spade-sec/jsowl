@@ -30,11 +30,16 @@ func DefaultConfig() Config {
 			Cookies:       make(map[string]string),
 		},
 		Browser: BrowserConfig{
-			Wait:     3 * time.Second,
-			Idle:     800 * time.Millisecond,
-			IdleMax:  5 * time.Second,
-			Timeout:  45 * time.Second,
-			Headless: true,
+			Wait:    3 * time.Second,
+			Idle:    800 * time.Millisecond,
+			IdleMax: 5 * time.Second,
+			// Timeout bounds the whole browser stage (launch, entry load,
+			// idle wait, grace period and route crawling). LoadTimeout is a
+			// soft cap inside it: a page that never reaches its load event is
+			// captured partially instead of failing the whole stage.
+			Timeout:     120 * time.Second,
+			LoadTimeout: 30 * time.Second,
+			Headless:    true,
 			// 0 means no route cap: every route the crawl deadline allows
 			// is rendered.
 			MaxRoutes:    0,
@@ -277,7 +282,8 @@ func (c Config) Validate() error {
 		return errors.New("request timeouts must be positive")
 	}
 	if c.Browser.Wait < 0 || c.Browser.Idle < 0 ||
-		c.Browser.IdleMax < 0 || c.Browser.Timeout <= 0 {
+		c.Browser.IdleMax < 0 || c.Browser.LoadTimeout < 0 ||
+		c.Browser.Timeout <= 0 {
 		return errors.New("browser durations are invalid")
 	}
 	if c.Browser.MaxInteractions < 0 {

@@ -337,3 +337,55 @@ func TestFillValueRules(t *testing.T) {
 		}
 	}
 }
+
+// A page whose load event never fires must not fail the whole browser stage:
+// the soft cap abandons the wait and the caller continues with the partial
+// render. Loads that finish in time, errors and the uncapped mode keep their
+// previous behavior.
+func TestWaitForLoadSoftCap(t *testing.T) {
+	block := make(chan struct{})
+	defer close(block)
+
+	abandoned, err := waitForLoad(context.Background(), func() error {
+		<-block
+		return nil
+	}, 20*time.Millisecond)
+	if err != nil || !abandoned {
+		t.Fatalf("waitForLoad() = (%v, %v), want abandoned", abandoned, err)
+	}
+
+	abandoned, err = waitForLoad(context.Background(), func() error {
+		return nil
+	}, time.Second)
+	if err != nil || abandoned {
+		t.Fatalf("completed load = (%v, %v)", abandoned, err)
+	}
+
+	wantErr := errors.New("load failed")
+	abandoned, err = waitForLoad(context.Background(), func() error {
+		return wantErr
+	}, time.Second)
+	if abandoned || !errors.Is(err, wantErr) {
+		t.Fatalf("failed load = (%v, %v)", abandoned, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	abandoned, err = waitForLoad(ctx, func() error {
+		<-block
+		return nil
+	}, time.Hour)
+	if abandoned || !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled load = (%v, %v)", abandoned, err)
+	}
+
+	// limit <= 0 keeps the old, uncapped behavior: the wait runs directly.
+	called := false
+	abandoned, err = waitForLoad(context.Background(), func() error {
+		called = true
+		return nil
+	}, 0)
+	if err != nil || abandoned || !called {
+		t.Fatalf("uncapped load = (%v, %v, called=%v)", abandoned, err, called)
+	}
+}

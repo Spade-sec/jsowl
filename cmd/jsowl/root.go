@@ -363,6 +363,15 @@ func runScans(
 					deps.stderr, "%s: browser degraded, keeping direct results: %s\n",
 					item.Target.URL, status.Reason,
 				)
+			} else if status := item.Result.BrowserStatus; status.LoadTimedOut {
+				// The browser stage succeeded with a partial render: surface
+				// it so incomplete runtime coverage is not mistaken for a
+				// clean scan.
+				_, _ = fmt.Fprintf(
+					deps.stderr,
+					"%s: browser load timeout, kept the rendered snapshot\n",
+					item.Target.URL,
+				)
 			}
 			if reportErr := writeReports(deps, config, item.Target, item.Result); reportErr != nil {
 				failures++
