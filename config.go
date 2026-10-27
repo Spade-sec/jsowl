@@ -44,6 +44,9 @@ const (
 	ModeAuto    = model.ModeAuto
 	ModeDirect  = model.ModeDirect
 	ModeBrowser = model.ModeBrowser
+	// ModeLocal marks a local JavaScript analysis result; it is never a scan
+	// setting.
+	ModeLocal = model.ModeLocal
 )
 
 // DefaultConfig returns a complete, bounded configuration suitable for auto mode.

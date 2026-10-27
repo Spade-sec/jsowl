@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -36,8 +37,12 @@ type dependencies struct {
 	writeJSON      func(string, *jsowl.Result) error
 	writeHTML      func(string, *jsowl.Result) error
 	writeText      func(string, *jsowl.Result) error
-	check          func(context.Context, jsowl.BrowserConfig) jsowl.BrowserCheckReport
-	ensureOutput   func(string) error
+	// analyzeLocation runs the local JavaScript analyzer for --location. The
+	// last argument is the optional base URL relative API references resolve
+	// against; it must be absolute http(s) or empty.
+	analyzeLocation func(context.Context, jsowl.Config, string, string) (*jsowl.Result, error)
+	check           func(context.Context, jsowl.BrowserConfig) jsowl.BrowserCheckReport
+	ensureOutput    func(string) error
 	// ensureUserRules seeds ~/.jsowl/rules.yaml on first run.
 	ensureUserRules func(path string) (bool, error)
 	// loadRules reads a rules file in either supported schema.
@@ -72,6 +77,15 @@ func newRootCommand(deps dependencies) *cobra.Command {
 					return fmt.Errorf("validate rules and configuration: %w", err)
 				}
 				return runCheck(command.Context(), deps, config)
+			}
+			if len(opts.location) > 0 {
+				if err := validateLocalOptions(opts); err != nil {
+					return err
+				}
+				return runLocalScans(
+					command.Context(), deps, config, opts.location,
+					opts.baseURL, opts.silent,
+				)
 			}
 			targets, err := opts.targets()
 			if err != nil {
@@ -134,6 +148,9 @@ func completeDependencies(deps dependencies) dependencies {
 	}
 	if deps.writeText == nil {
 		deps.writeText = jsowl.WriteTextReports
+	}
+	if deps.analyzeLocation == nil {
+		deps.analyzeLocation = jsowl.AnalyzeLocationWithBase
 	}
 	if deps.check == nil {
 		deps.check = jsowl.CheckBrowser
@@ -366,6 +383,69 @@ func runScans(
 	return nil
 }
 
+// validateLocalOptions rejects scan flags that cannot apply to a local
+// analysis. A target list or login browser has no local meaning. --base-url is
+// allowed, but it must be absolute: without -u a path-only prefix has no host.
+func validateLocalOptions(opts *options) error {
+	if len(opts.urls) > 0 || opts.list != "" {
+		return errors.New("--location analyzes local files and cannot be combined with -u or -l")
+	}
+	if opts.login {
+		return errors.New("--location is local analysis and cannot be combined with --login")
+	}
+	if _, err := localBaseURL(opts.baseURL); err != nil {
+		return err
+	}
+	return nil
+}
+
+// runLocalScans analyzes each --location and writes the same report set a live
+// scan produces. A location counts as one unit, so one bad path does not stop
+// the others; the count is reported at the end.
+func runLocalScans(
+	ctx context.Context,
+	deps dependencies,
+	config jsowl.Config,
+	locations []string,
+	baseURL string,
+	silent bool,
+) error {
+	if err := deps.ensureOutput(config.Output.Directory); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
+	}
+	failures := 0
+	for _, location := range locations {
+		location = strings.TrimSpace(location)
+		if location == "" {
+			continue
+		}
+		result, err := deps.analyzeLocation(ctx, config, location, baseURL)
+		if err != nil {
+			failures++
+			_, _ = fmt.Fprintf(deps.stderr, "%s: %v\n", location, err)
+			continue
+		}
+		if reportErr := writeReports(
+			deps, config, jsowl.Target{URL: location}, result,
+		); reportErr != nil {
+			failures++
+			_, _ = fmt.Fprintf(deps.stderr, "%s: %v\n", location, reportErr)
+			continue
+		}
+		if !silent {
+			_, _ = fmt.Fprintf(
+				deps.stdout, "[local] %s: %d endpoints, %d findings -> %s\n",
+				location, len(result.Endpoints), len(result.Findings),
+				result.ReportDirectory,
+			)
+		}
+	}
+	if failures > 0 {
+		return fmt.Errorf("%d local analysis task(s) failed", failures)
+	}
+	return nil
+}
+
 // loginSessionStarter is the optional capability a scanService exposes for
 // manual-login scans; *jsowl.Scanner implements it.
 type loginSessionStarter interface {
@@ -499,12 +579,16 @@ func writeReports(
 	target jsowl.Target,
 	result *jsowl.Result,
 ) error {
-	directory, err := targetReportDirectory(config.Output.Directory, target.URL)
-	if err != nil {
-		return err
-	}
-	if result.ReportDirectory != "" {
-		directory = result.ReportDirectory
+	// A scan result carries the directory assigned for its target. A local
+	// analysis is not addressable by URL, so it must be used as given; only a
+	// legacy result without one falls back to deriving it from the target.
+	directory := result.ReportDirectory
+	if directory == "" {
+		var err error
+		directory, err = targetReportDirectory(config.Output.Directory, target.URL)
+		if err != nil {
+			return err
+		}
 	}
 	if config.Output.JSON {
 		if err := deps.writeJSON(filepath.Join(directory, "report.json"), result); err != nil {

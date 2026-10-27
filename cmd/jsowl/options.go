@@ -22,6 +22,7 @@ import (
 type options struct {
 	urls            []string
 	list            string
+	location        []string
 	config          string
 	output          string
 	mode            string
@@ -46,11 +47,13 @@ type options struct {
 func (o *options) register(flags *pflag.FlagSet) {
 	flags.StringArrayVarP(&o.urls, "url", "u", nil, "target URL (repeatable)")
 	flags.StringVarP(&o.list, "list", "l", "", "file containing target URLs")
+	flags.StringArrayVar(&o.location, "location", nil,
+		"local JavaScript file or directory to analyze (repeatable; reads local files and may request discovered APIs)")
 	flags.StringVarP(&o.config, "config", "c", "", configFlagHelp())
 	flags.StringVarP(&o.output, "output", "o", "", "report output directory")
 	flags.StringVarP(&o.mode, "mode", "m", "", "auto, direct, or browser")
 	flags.StringVarP(&o.proxy, "proxy", "p", "", "HTTP(S) or SOCKS5 proxy URL")
-	flags.StringVar(&o.baseURL, "base-url", "", "base URL for relative discoveries")
+	flags.StringVar(&o.baseURL, "base-url", "", "base URL or path prefix (e.g. /api) for relative discoveries; --location requires a full http(s) URL")
 	flags.StringArrayVarP(&o.headers, "header", "H", nil, "request header Name: value")
 	flags.StringArrayVar(&o.scopes, "scope", nil,
 		"restrict crawling to these comma-separated domains (repeatable; root origin always allowed)")
@@ -142,20 +145,73 @@ func normalizeAffFlag(args []string) []string {
 }
 
 func applyBaseURL(targets []jsowl.Target, raw string) error {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
+	base, err := parseBaseURL(raw, true)
+	if err != nil {
+		return err
 	}
-	base, err := url.Parse(raw)
-	if err != nil || !base.IsAbs() || base.Host == "" ||
-		(base.Scheme != "http" && base.Scheme != "https") ||
-		base.User != nil {
-		return fmt.Errorf("invalid base URL %q", raw)
+	if base == nil {
+		return nil
 	}
 	for index := range targets {
 		targets[index].BaseURL = base.String()
 	}
 	return nil
+}
+
+// localBaseURL validates --base-url for --location. A local analysis has no
+// -u target, so a path-only prefix ("/api") has no host to resolve against:
+// that would require guessing, which is rejected instead.
+func localBaseURL(raw string) (string, error) {
+	base, err := parseBaseURL(raw, false)
+	if err != nil {
+		trimmed := strings.TrimSpace(raw)
+		if strings.HasPrefix(trimmed, "/") && !strings.HasPrefix(trimmed, "//") {
+			return "", fmt.Errorf(
+				"invalid --base-url %q for --location: a path-only prefix has no host without -u; pass a full http(s) URL",
+				raw,
+			)
+		}
+		return "", err
+	}
+	if base == nil {
+		return "", nil
+	}
+	return base.String(), nil
+}
+
+// parseBaseURL validates the shared --base-url syntax. allowPathOnly permits
+// a path prefix, which a live target resolves against its own origin.
+func parseBaseURL(raw string, allowPathOnly bool) (*url.URL, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	base, err := url.Parse(raw)
+	if err != nil || base.User != nil {
+		return nil, invalidBaseURLError(raw)
+	}
+	switch {
+	case base.IsAbs():
+		// An absolute base URL must be a plain http(s) URL.
+		if base.Host == "" ||
+			(base.Scheme != "http" && base.Scheme != "https") {
+			return nil, invalidBaseURLError(raw)
+		}
+	case allowPathOnly && strings.HasPrefix(raw, "/") &&
+		!strings.HasPrefix(raw, "//"):
+		// A path-only base ("/api") is resolved against each target's own
+		// origin by the pipeline, so one flag works across hosts.
+	default:
+		return nil, invalidBaseURLError(raw)
+	}
+	return base, nil
+}
+
+func invalidBaseURLError(raw string) error {
+	return fmt.Errorf(
+		"invalid base URL %q; expected an http(s) URL or a path starting with /",
+		raw,
+	)
 }
 
 func parseHeader(raw string) (string, string, error) {

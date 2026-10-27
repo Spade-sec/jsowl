@@ -89,6 +89,8 @@ type outcome struct {
 	hosts     []extract.Candidate
 	hostNotes []extract.Note
 	spa       discover.SPAEvidence
+	// issues carries analysis diagnostics (corrupt or missing source maps).
+	issues []model.Issue
 	// vendor marks the body as a third-party library bundle.
 	vendor bool
 }
@@ -113,7 +115,12 @@ type runState struct {
 	// basePathCapped records the cap diagnostic once.
 	basePathEndpoints int
 	basePathCapped    bool
-	reportDirectory   string
+	// prefixEligible marks endpoints whose reference came from a request call
+	// site (fetch/axios/XHR/AST-observed call). Only those are tried under a
+	// declared prefix: generic path assignments are mostly router or config
+	// values, and prefixing them adds probes without adding interfaces.
+	prefixEligible  map[string]struct{}
+	reportDirectory string
 	// hosts aggregates the content-discovered host assets for this target.
 	hosts          *extract.Aggregator
 	spa            *discover.SPAEvidence
@@ -123,6 +130,19 @@ type runState struct {
 	root           *url.URL
 	resolutionBase *url.URL
 	probeEvents    chan<- model.ProbeEvent
+	// local marks a local JavaScript analysis: it reads no remote documents,
+	// scripts, chunks or source maps, and only probes discovered API URLs.
+	local bool
+	// localUnrooted marks a local analysis without --base-url. Relative
+	// references cannot be resolved then; they are kept as static results.
+	localUnrooted bool
+	// sourceSeen and sourceMapSeen deduplicate recovered source files and
+	// source map references across the whole local run.
+	sourceSeen    map[string]struct{}
+	sourceMapSeen map[string]struct{}
+	// localIssueSeen deduplicates per-reference local diagnostics, such as an
+	// unresolved relative API mentioned by the same bundle more than once.
+	localIssueSeen map[string]struct{}
 }
 
 // emitProbe publishes one completed API probe without ever blocking the scan:
@@ -326,7 +346,7 @@ func (p *Pipeline) absorbSourceMap(
 		return
 	}
 	if len(content) > 0 {
-		absorbRecoveredSources(result, base, content, p.options.Analyzer, p.options.Config.Scope.SkipLibraryBundles)
+		mergeRecoveredOutcome(result, p.recoverSourceMapFiles(base, content, nil))
 		return
 	}
 	if reference == "" {
@@ -349,43 +369,410 @@ func (p *Pipeline) absorbSourceMap(
 // absorbRecoveredSources runs the extractors over every original embedded in a
 // map, so recovered sources contribute paths, parameters and findings that the
 // minified bundle hid. This mirrors shuji's sources recovery.
-func absorbRecoveredSources(
-	result *outcome,
+func (p *Pipeline) absorbRecoveredSources(result *outcome, origin *url.URL, body []byte) {
+	mergeRecoveredOutcome(result, p.recoverSourceMapFiles(origin, body, nil))
+}
+
+// recoverSourceMapFiles restores every original a map embeds and analyzes it
+// with the same extractors a live script goes through. Online and local
+// analysis share this function; seen, when non-nil, deduplicates recovered
+// source identities across a local run.
+func (p *Pipeline) recoverSourceMapFiles(
 	origin *url.URL,
 	body []byte,
-	engine *analyze.Engine,
-	skipLibraries bool,
-) {
-	for _, file := range discover.ParseSourceMap(body) {
+	seen map[string]struct{},
+) deferredAnalysis {
+	analysis := deferredAnalysis{}
+	parsed := discover.ParseSourceMapDetailed(body)
+	if parsed.Err != nil {
+		analysis.issues = append(analysis.issues, model.Issue{
+			Code: "sourcemap_parse_failed", Stage: "analyze",
+			URL: issueURL(origin), Message: parsed.Err.Error(),
+		})
+		return analysis
+	}
+	if parsed.Sources > 0 && parsed.Embedded == 0 {
+		analysis.issues = append(analysis.issues, model.Issue{
+			Code: "sourcemap_sources_missing", Stage: "analyze",
+			URL: issueURL(origin),
+			Message: "source map embeds no sourcesContent; sources were not " +
+				"restored because external source files are not read",
+		})
+		return analysis
+	}
+	for _, file := range parsed.Files {
 		source := origin
-		if fileURL, err := url.Parse(file.Name); err == nil {
-			source = origin.ResolveReference(fileURL)
+		if reference, err := url.Parse(file.Name); err == nil && origin != nil {
+			source = origin.ResolveReference(reference)
 		}
-		content := []byte(file.Content)
-		isVendor := discover.IsThirdPartyBundle(content)
-		if skipLibraries && isVendor {
-			// The recovered original is a library file; skip it the same way
-			// a bundled library script is skipped.
+		if source == nil {
 			continue
 		}
-		candidatesFrom, findingsFrom := len(result.candidates), len(result.findings)
-		paramsFrom, hostsFrom := len(result.params), len(result.hosts)
-		textResult := discover.FromJavaScript(source, content, engine)
-		result.findings = append(result.findings, textResult.Findings...)
-		result.candidates = append(result.candidates, textResult.Candidates...)
-		result.hosts = append(result.hosts, textResult.Hosts...)
+		key := source.String()
+		if seen != nil {
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+		content := []byte(file.Content)
+		vendor := discover.IsThirdPartyBundle(content)
+		if vendor && p.options.Config.Scope.SkipLibraryBundles {
+			continue
+		}
+		candidatesFrom, findingsFrom := len(analysis.candidates), len(analysis.findings)
+		paramsFrom, hostsFrom := len(analysis.params), len(analysis.hosts)
+		textResult := discover.FromJavaScript(source, content, p.options.Analyzer)
+		mergeSPAEvidence(&analysis.spa, textResult.SPA)
+		analysis.findings = append(analysis.findings, textResult.Findings...)
+		analysis.candidates = append(analysis.candidates, textResult.Candidates...)
+		analysis.hosts = append(analysis.hosts, textResult.Hosts...)
 		recoveredJS, recoveredParams := discover.AnalyzeBody(source, content)
-		result.candidates = append(result.candidates, recoveredJS.Candidates...)
-		result.hosts = append(result.hosts, recoveredJS.Hosts...)
-		result.hostNotes = append(result.hostNotes, recoveredJS.Notes...)
-		result.basePaths = append(result.basePaths, discover.BasePathNames(recoveredJS.BasePaths)...)
-		result.params = append(result.params, recoveredParams...)
-		markVendor(result, isVendor, candidatesFrom, findingsFrom, paramsFrom, hostsFrom)
+		analysis.candidates = append(analysis.candidates, recoveredJS.Candidates...)
+		analysis.hosts = append(analysis.hosts, recoveredJS.Hosts...)
+		analysis.hostNotes = append(analysis.hostNotes, recoveredJS.Notes...)
+		analysis.basePaths = append(
+			analysis.basePaths, discover.BasePathNames(recoveredJS.BasePaths)...,
+		)
+		analysis.params = append(analysis.params, recoveredParams...)
+		markRecoveredVendor(
+			&analysis, vendor, candidatesFrom, findingsFrom, paramsFrom, hostsFrom,
+		)
+	}
+	return analysis
+}
+
+// markRecoveredVendor labels the slices one recovered source contributed.
+func markRecoveredVendor(
+	analysis *deferredAnalysis,
+	vendor bool,
+	candidatesFrom, findingsFrom, paramsFrom, hostsFrom int,
+) {
+	if !vendor {
+		return
+	}
+	for index := candidatesFrom; index < len(analysis.candidates); index++ {
+		analysis.candidates[index].Vendor = true
+	}
+	for index := findingsFrom; index < len(analysis.findings); index++ {
+		analysis.findings[index].Vendor = true
+	}
+	for index := paramsFrom; index < len(analysis.params); index++ {
+		analysis.params[index].Vendor = true
+	}
+	for index := hostsFrom; index < len(analysis.hosts); index++ {
+		analysis.hosts[index].Vendor = true
 	}
 }
 
-// RunDetailed runs the shared pipeline with optional browser-rendered entry
-// content and runtime URL seeds, returning aggregate SPA evidence.
+// mergeRecoveredOutcome folds restored sources into one resource outcome.
+func mergeRecoveredOutcome(result *outcome, recovered deferredAnalysis) {
+	result.findings = append(result.findings, recovered.findings...)
+	result.candidates = append(result.candidates, recovered.candidates...)
+	result.hosts = append(result.hosts, recovered.hosts...)
+	result.hostNotes = append(result.hostNotes, recovered.hostNotes...)
+	result.basePaths = append(result.basePaths, recovered.basePaths...)
+	result.params = append(result.params, recovered.params...)
+	result.issues = append(result.issues, recovered.issues...)
+	mergeSPAEvidence(&result.spa, recovered.spa)
+}
+
+func issueURL(candidate *url.URL) string {
+	if candidate == nil {
+		return ""
+	}
+	return candidate.String()
+}
+
+// LocalFile is one local JavaScript body to analyze. URL is the file:// URL
+// used as the finding/endpoint source, so every result keeps the local origin
+// it was read from.
+type LocalFile struct {
+	URL  string
+	Body []byte
+}
+
+// SourceMapLoader resolves a sourceMappingURL written relative to a local
+// script. It returns the resolved map URL and its body. Remote references are
+// never passed to the loader: the local analysis records them as skipped.
+type SourceMapLoader func(source *url.URL, reference string) (string, []byte, error)
+
+// LocalInput describes one local analysis run. Target is the display target
+// (the resolved local path); BaseURL, when non-empty, is an absolute http(s)
+// URL that relative API references resolve against. Diagnostics are input
+// problems discovered while reading files (a file that could not be read).
+type LocalInput struct {
+	Target  string
+	BaseURL string
+	Files   []LocalFile
+	// SourceMaps holds source map files the user pointed at explicitly. They
+	// are parsed as maps, never analyzed as JavaScript.
+	SourceMaps    []LocalFile
+	ReadSourceMap SourceMapLoader
+	Diagnostics   []model.Issue
+}
+
+// RunLocal analyzes local JavaScript through the same extraction, candidate,
+// probe and finalization stages as a live scan. It never fetches documents,
+// scripts, chunks or source maps; only discovered API URLs are requested, and
+// only when the local authorization rule allows them.
+//
+// Resolution rules:
+//   - With BaseURL, relative references resolve against it (using the same
+//     prefix semantics as --base-url) and the usual scope policy decides
+//     whether they may be probed.
+//   - Without BaseURL, a relative reference has no host, so it stays a static
+//     result and a diagnostic records why it was not probed.
+//   - An absolute HTTP(S) URL written in the code is its own probe anchor: it
+//     is probed unless restrict_domains narrows the scope. This is what makes
+//     `fetch("https://api.example/x")` actionable without -u.
+func (p *Pipeline) RunLocal(
+	ctx context.Context,
+	input LocalInput,
+	headers http.Header,
+) (*model.Result, discover.SPAEvidence, error) {
+	var root *url.URL
+	var targetScope *scope.Scope
+	var err error
+	rawBase := strings.TrimSpace(input.BaseURL)
+	if rawBase != "" {
+		root, err = url.Parse(rawBase)
+		if err != nil || root.User != nil || !root.IsAbs() ||
+			root.Host == "" ||
+			(root.Scheme != "http" && root.Scheme != "https") {
+			return nil, discover.SPAEvidence{}, fmt.Errorf(
+				"invalid local base URL %q; expected an absolute http(s) URL", rawBase,
+			)
+		}
+		targetScope, err = scope.NewLocal(root, p.options.Config.Scope)
+	} else {
+		targetScope, err = scope.NewLocal(nil, p.options.Config.Scope)
+	}
+	if err != nil {
+		return nil, discover.SPAEvidence{}, err
+	}
+
+	result := &model.Result{
+		ReportDirectory: p.options.ReportDirectory,
+		Target:          input.Target,
+		Mode:            model.ModeLocal,
+		Resources:       make([]model.Resource, 0),
+		Endpoints:       make([]model.Endpoint, 0),
+		Findings:        make([]model.Finding, 0),
+		Issues:          append([]model.Issue(nil), input.Diagnostics...),
+		Technologies:    make([]string, 0),
+	}
+	queue := scheduler.New(
+		p.options.Config.Limits.MaxResources,
+		p.options.Config.Limits.MaxDepth,
+	)
+	spa := discover.SPAEvidence{}
+	state := &runState{
+		result:          result,
+		queue:           queue,
+		endpointIndex:   make(map[string]int),
+		findingSeen:     make(map[string]struct{}),
+		paramSeen:       make(map[string]struct{}),
+		prefixEligible:  make(map[string]struct{}),
+		reportDirectory: result.ReportDirectory,
+		hosts:           extract.NewAggregator(p.hostExtractor, model.HostOriginContent),
+		spa:             &spa,
+		deferJS:         false,
+		targetScope:     targetScope,
+		root:            root,
+		resolutionBase:  root,
+		probeEvents:     p.options.ProbeEvents,
+		local:           true,
+		localUnrooted:   root == nil,
+		sourceSeen:      make(map[string]struct{}),
+		sourceMapSeen:   make(map[string]struct{}),
+		localIssueSeen:  make(map[string]struct{}),
+	}
+
+	for _, file := range input.Files {
+		if err := ctx.Err(); err != nil {
+			return result, spa, err
+		}
+		source, parseErr := url.Parse(file.URL)
+		if parseErr != nil {
+			result.Issues = append(result.Issues, model.Issue{
+				Code: "local_source_invalid", Stage: "analyze",
+				URL: file.URL, Message: parseErr.Error(),
+			})
+			continue
+		}
+		vendor := discover.IsThirdPartyBundle(file.Body)
+		resource := model.Resource{
+			URL:         source.String(),
+			Type:        model.ResourceTypeScript,
+			ContentType: "application/javascript",
+			Size:        int64(len(file.Body)),
+		}
+		result.Resources = append(result.Resources, resource)
+		if vendor && p.options.Config.Scope.SkipLibraryBundles {
+			// The license banner identifies a third-party library. The file is
+			// still reported as a resource, exactly like the live pipeline.
+			continue
+		}
+		analysis := p.analyzeSource(source, file.Body)
+		analysis.item = deferredJS{source: source}
+		analysis.vendor = vendor
+		p.absorbLocalSourceMap(&analysis, source, file.Body, input.ReadSourceMap, state)
+		p.mergeDeferred(state, analysis)
+	}
+
+	// A .map the user pointed at is parsed as a source map, never as
+	// JavaScript text. Its recovered originals go through the same candidate
+	// handling as any other local source.
+	for _, mapFile := range input.SourceMaps {
+		source, parseErr := url.Parse(mapFile.URL)
+		if parseErr != nil {
+			result.Issues = append(result.Issues, model.Issue{
+				Code: "local_source_invalid", Stage: "analyze",
+				URL: mapFile.URL, Message: parseErr.Error(),
+			})
+			continue
+		}
+		result.Resources = append(result.Resources, model.Resource{
+			URL:         source.String(),
+			Type:        model.ResourceTypeSourceMap,
+			ContentType: "application/json",
+			Size:        int64(len(mapFile.Body)),
+		})
+		analysis := p.recoverSourceMapFiles(source, mapFile.Body, state.sourceSeen)
+		analysis.item = deferredJS{source: source}
+		p.mergeDeferred(state, analysis)
+	}
+
+	// API probes discovered by static analysis are drained through the same
+	// queue and response-analysis path as a live scan. The prefix pass may add
+	// more probes; in an unrooted local run it adds static candidates instead.
+	for {
+		if err := p.drain(ctx, state, headers, nil); err != nil {
+			return result, spa, err
+		}
+		if state.localUnrooted {
+			if !p.exploreLocalBasePaths(state) {
+				break
+			}
+			continue
+		}
+		if !p.exploreAllBasePaths(state) {
+			break
+		}
+	}
+
+	p.applyRequestTemplates(result)
+	applyTechnologies(result, spa)
+	if state.hosts != nil {
+		result.Hosts = state.hosts.Assets()
+		state.recordHostNotes(state.hosts.Notes())
+	}
+	finalize(result, p.hostExtractor)
+	return result, spa, nil
+}
+
+// absorbLocalSourceMap restores sources from an inline map or a map file
+// beside the script and folds them into the same analysis. Remote maps are
+// never downloaded; they are recorded as skipped.
+func (p *Pipeline) absorbLocalSourceMap(
+	analysis *deferredAnalysis,
+	source *url.URL,
+	body []byte,
+	loader SourceMapLoader,
+	state *runState,
+) {
+	if !p.options.Config.Scope.ProbeSourceMaps {
+		return
+	}
+	content, reference, ok := discover.SourceMapReference(body)
+	if !ok {
+		return
+	}
+	if len(content) > 0 {
+		key := source.String() + "#inline-map"
+		if _, duplicate := state.sourceMapSeen[key]; duplicate {
+			return
+		}
+		state.sourceMapSeen[key] = struct{}{}
+		p.mergeRecoveredAnalysis(
+			analysis, p.recoverSourceMapFiles(source, content, state.sourceSeen),
+		)
+		return
+	}
+	if reference == "" {
+		return
+	}
+	parsed, parseErr := url.Parse(reference)
+	if parseErr != nil {
+		analysis.issues = append(analysis.issues, model.Issue{
+			Code: "sourcemap_reference_invalid", Stage: "analyze",
+			URL: source.String(), Message: parseErr.Error(),
+		})
+		return
+	}
+	if parsed.IsAbs() || parsed.Host != "" {
+		analysis.issues = append(analysis.issues, model.Issue{
+			Code: "sourcemap_remote_skipped", Stage: "analyze",
+			URL: source.String(),
+			Message: "local analysis does not download remote source maps: " +
+				reference,
+		})
+		return
+	}
+	if loader == nil {
+		analysis.issues = append(analysis.issues, model.Issue{
+			Code: "sourcemap_read_failed", Stage: "analyze",
+			URL: source.String(), Message: "no local source map loader",
+		})
+		return
+	}
+	mapURL, mapBody, loadErr := loader(source, reference)
+	if loadErr != nil {
+		analysis.issues = append(analysis.issues, model.Issue{
+			Code: "sourcemap_read_failed", Stage: "analyze",
+			URL: source.String(), Message: loadErr.Error(),
+		})
+		return
+	}
+	if _, duplicate := state.sourceMapSeen[mapURL]; duplicate {
+		return
+	}
+	state.sourceMapSeen[mapURL] = struct{}{}
+	mapOrigin, err := url.Parse(mapURL)
+	if err != nil {
+		analysis.issues = append(analysis.issues, model.Issue{
+			Code: "sourcemap_reference_invalid", Stage: "analyze",
+			URL: source.String(), Message: err.Error(),
+		})
+		return
+	}
+	if !p.sourceMapAllowed(mapOrigin) {
+		return
+	}
+	// Recovered names are relative to the map, not to the bundle that
+	// referenced it.
+	p.mergeRecoveredAnalysis(
+		analysis, p.recoverSourceMapFiles(mapOrigin, mapBody, state.sourceSeen),
+	)
+}
+
+// mergeRecoveredAnalysis folds sources restored from a map into the analysis
+// of the bundle that referenced it.
+func (p *Pipeline) mergeRecoveredAnalysis(
+	dst *deferredAnalysis,
+	src deferredAnalysis,
+) {
+	dst.findings = append(dst.findings, src.findings...)
+	dst.candidates = append(dst.candidates, src.candidates...)
+	dst.params = append(dst.params, src.params...)
+	dst.hosts = append(dst.hosts, src.hosts...)
+	dst.hostNotes = append(dst.hostNotes, src.hostNotes...)
+	dst.basePaths = append(dst.basePaths, src.basePaths...)
+	dst.issues = append(dst.issues, src.issues...)
+	mergeSPAEvidence(&dst.spa, src.spa)
+}
+
 func (p *Pipeline) RunDetailed(
 	ctx context.Context,
 	target model.Target,
@@ -403,14 +790,33 @@ func (p *Pipeline) RunDetailed(
 		return nil, discover.SPAEvidence{}, err
 	}
 	resolutionBase := root
-	if strings.TrimSpace(target.BaseURL) != "" {
-		parsedBase, parseErr := url.Parse(target.BaseURL)
-		if parseErr != nil || !parsedBase.IsAbs() || parsedBase.Host == "" {
+	if rawBase := strings.TrimSpace(target.BaseURL); rawBase != "" {
+		// The base may be an absolute http(s) URL or a path-only prefix
+		// ("/api"). A path-only base is resolved against the target origin,
+		// so the same flag value works for targets on different hosts.
+		parsedBase, parseErr := url.Parse(rawBase)
+		if parseErr != nil || parsedBase.User != nil {
 			return nil, discover.SPAEvidence{}, fmt.Errorf(
-				"invalid base URL %q", target.BaseURL,
+				"invalid base URL %q", rawBase,
 			)
 		}
-		resolutionBase, err = targetScope.Resolve(target.BaseURL, root)
+		switch {
+		case parsedBase.IsAbs():
+			if parsedBase.Host == "" ||
+				(parsedBase.Scheme != "http" && parsedBase.Scheme != "https") {
+				return nil, discover.SPAEvidence{}, fmt.Errorf(
+					"invalid base URL %q", rawBase,
+				)
+			}
+		case strings.HasPrefix(rawBase, "/") && !strings.HasPrefix(rawBase, "//"):
+			// Path-only prefix, resolved against the target root below.
+		default:
+			return nil, discover.SPAEvidence{}, fmt.Errorf(
+				"invalid base URL %q; expected an http(s) URL or a path starting with /",
+				rawBase,
+			)
+		}
+		resolutionBase, err = targetScope.Resolve(rawBase, root)
 		if err != nil {
 			return nil, discover.SPAEvidence{}, fmt.Errorf("base URL: %w", err)
 		}
@@ -534,6 +940,7 @@ func (p *Pipeline) RunDetailed(
 		endpointIndex:   endpointIndex,
 		findingSeen:     make(map[string]struct{}),
 		paramSeen:       make(map[string]struct{}),
+		prefixEligible:  make(map[string]struct{}),
 		reportDirectory: reportDirectory,
 		hosts:           extract.NewAggregator(p.hostExtractor, model.HostOriginContent),
 		spa:             &spa,
@@ -549,19 +956,34 @@ func (p *Pipeline) RunDetailed(
 	// Fetch-first mode: every script and chunk has been downloaded (and saved)
 	// before the regex engine and AST extractor run over the saved files.
 	// Endpoint candidates discovered here may enqueue fresh API probes, so the
-	// queue is drained again until nothing new is pending.
-	for len(state.pending) > 0 {
-		if err := ctx.Err(); err != nil {
-			return result, spa, err
+	// queue is drained again until nothing new is pending. The loop also
+	// re-runs once all declared prefixes are known, so the automatic prefix
+	// joining does not depend on the order files were analyzed in.
+	for {
+		for len(state.pending) > 0 {
+			if err := ctx.Err(); err != nil {
+				return result, spa, err
+			}
+			batch := state.pending
+			state.pending = nil
+			analyses, err := p.computeBatch(ctx, batch, state.reportDirectory)
+			if err != nil {
+				return result, spa, err
+			}
+			for _, analysis := range analyses {
+				p.mergeDeferred(state, analysis)
+			}
+			if err := p.drain(ctx, state, headers, entry); err != nil {
+				return result, spa, err
+			}
 		}
-		batch := state.pending
-		state.pending = nil
-		analyses, err := p.computeBatch(ctx, batch, state.reportDirectory)
-		if err != nil {
-			return result, spa, err
-		}
-		for _, analysis := range analyses {
-			p.mergeDeferred(state, analysis)
+		// Every prefix declared by the target's JavaScript is known once all
+		// deferred files have been analyzed. Apply them to every recorded
+		// reference here: a reference processed before its declaring file was
+		// analyzed, or found only by the regex rules, must still be tried
+		// under the prefixes. The pass is idempotent.
+		if !p.exploreAllBasePaths(state) {
+			break
 		}
 		if err := p.drain(ctx, state, headers, entry); err != nil {
 			return result, spa, err
@@ -571,27 +993,7 @@ func (p *Pipeline) RunDetailed(
 	if p.options.Config.Scope.ProbeRoutes {
 		p.probeRoutes(ctx, result, headers, root)
 	}
-	if p.options.Config.Output.RequestTemplate {
-		templates := make([]*model.RequestTemplate, len(result.Endpoints))
-		endpoints := make([]*model.Endpoint, len(result.Endpoints))
-		for i := range result.Endpoints {
-			result.Endpoints[i].Template = analyze.BuildTemplate(&result.Endpoints[i])
-			templates[i] = result.Endpoints[i].Template
-			endpoints[i] = &result.Endpoints[i]
-		}
-		// Optional AI enrichment point: the default enricher is a no-op and
-		// returns the deterministic templates unchanged.
-		templateEnricher := p.options.TemplateEnricher
-		if templateEnricher == nil {
-			templateEnricher = analyze.DefaultEnricher{}
-		}
-		refined := templateEnricher.Enrich(templates, endpoints)
-		for i := range result.Endpoints {
-			if refined != nil && i < len(refined) && refined[i] != nil {
-				result.Endpoints[i].Template = refined[i]
-			}
-		}
-	}
+	p.applyRequestTemplates(result)
 	// Optional AI taint refinement point: deterministic kernel annotations
 	// pass through the default no-op unchanged.
 	taintEnricher := p.options.TaintEnricher
@@ -604,16 +1006,7 @@ func (p *Pipeline) RunDetailed(
 		findingEnricher = analyze.DefaultFindingEnricher{}
 	}
 	result = findingEnricher.EnrichFindings(result)
-	if spa.RootNode || spa.DynamicImport || spa.HistoryRouting || spa.DynamicScript {
-		result.Technologies = append(result.Technologies, "spa")
-	}
-	if spa.Webpack {
-		result.Technologies = append(result.Technologies, "webpack")
-	}
-	if spa.RequireJS {
-		result.Technologies = append(result.Technologies, "requirejs")
-	}
-	sort.Strings(result.Technologies)
+	applyTechnologies(result, spa)
 	// Content-discovered hosts, in deterministic order, plus whatever
 	// extraction diagnostics were raised. Scan-associated hosts are derived
 	// inside finalize from the resources, endpoints and findings themselves.
@@ -623,6 +1016,63 @@ func (p *Pipeline) RunDetailed(
 	}
 	finalize(result, p.hostExtractor)
 	return result, spa, nil
+}
+
+// applyRequestTemplates builds the deterministic request template for every
+// endpoint and runs the optional AI refinement hook. Live and local runs share
+// it, so both report the same request shape.
+func (p *Pipeline) applyRequestTemplates(result *model.Result) {
+	if !p.options.Config.Output.RequestTemplate {
+		return
+	}
+	templates := make([]*model.RequestTemplate, len(result.Endpoints))
+	endpoints := make([]*model.Endpoint, len(result.Endpoints))
+	for i := range result.Endpoints {
+		result.Endpoints[i].Template = analyze.BuildTemplate(&result.Endpoints[i])
+		templates[i] = result.Endpoints[i].Template
+		endpoints[i] = &result.Endpoints[i]
+	}
+	// Optional AI enrichment point: the default enricher is a no-op and
+	// returns the deterministic templates unchanged.
+	templateEnricher := p.options.TemplateEnricher
+	if templateEnricher == nil {
+		templateEnricher = analyze.DefaultEnricher{}
+	}
+	refined := templateEnricher.Enrich(templates, endpoints)
+	for i := range result.Endpoints {
+		if refined != nil && i < len(refined) && refined[i] != nil {
+			result.Endpoints[i].Template = refined[i]
+		}
+	}
+}
+
+// applyTechnologies turns SPA evidence into the technology labels the report
+// shows. Only observed signals produce a label; the list is deduplicated and
+// sorted so a multi-file scan reports the same set regardless of file order.
+func applyTechnologies(result *model.Result, spa discover.SPAEvidence) {
+	if spa.RootNode || spa.DynamicImport || spa.HistoryRouting || spa.DynamicScript {
+		result.Technologies = append(result.Technologies, "spa")
+	}
+	if spa.Webpack {
+		result.Technologies = append(result.Technologies, "webpack")
+	}
+	if spa.RequireJS {
+		result.Technologies = append(result.Technologies, "requirejs")
+	}
+	seen := make(map[string]struct{}, len(result.Technologies))
+	unique := result.Technologies[:0]
+	for _, technology := range result.Technologies {
+		if technology == "" {
+			continue
+		}
+		if _, duplicate := seen[technology]; duplicate {
+			continue
+		}
+		seen[technology] = struct{}{}
+		unique = append(unique, technology)
+	}
+	result.Technologies = unique
+	sort.Strings(result.Technologies)
 }
 
 // drain collects and processes queued resources until the queue is empty and
@@ -818,6 +1268,7 @@ func (p *Pipeline) processOutcome(state *runState, collected outcome) error {
 	state.mergeParams(collected.params)
 	state.absorbBasePaths(collected.basePaths)
 	state.mergeHosts(collected.hosts, collected.hostNotes)
+	state.result.Issues = append(state.result.Issues, collected.issues...)
 	p.processCandidates(
 		state, collected.response.URL, collected.candidates, collected.item.Depth,
 	)
@@ -842,42 +1293,79 @@ func (p *Pipeline) processCandidates(
 	var baseOverride *url.URL
 	if state.resolutionBase != state.root {
 		baseOverride = state.resolutionBase
+	} else if state.local && state.root != nil {
+		// A local run's root is the explicit --base-url. It is an API prefix
+		// for every relative reference, unlike a live scan's target root.
+		baseOverride = state.resolutionBase
 	}
 	for _, candidate := range candidates {
+		candidateBase := baseOverride
+		if candidateBase == nil && state.localUnrooted {
+			// Without --base-url a relative reference can still be resolved
+			// when this call site recovered an absolute axios baseURL. The
+			// base applies to this candidate only; it never becomes the
+			// directory-wide base for every other relative API.
+			candidateBase = candidateAbsoluteBase(candidate)
+		}
 		resolved, resolveErr := resolveCandidate(
-			state.targetScope, candidate.Raw, base, baseOverride,
+			state.targetScope, candidate.Raw, base, candidateBase,
 		)
 		if resolveErr != nil {
+			if state.local && isRelativeReference(candidate.Raw) {
+				// No host can be determined. Keep the reference as a static
+				// result and say why it was not requested, then continue with
+				// the rest of the bundle.
+				p.recordLocalUnresolved(state, sourceURL, candidate)
+			}
 			continue
 		}
 		if state.targetScope.IsSuffixBlocked(resolved) {
 			continue
 		}
+		candidateSource := sourceURL
+		if candidate.SourceURL != "" {
+			// Recovered source-map files and inline scripts carry their own
+			// origin; the endpoint should point at it, not only at the bundle.
+			candidateSource = candidate.SourceURL
+		}
 		canonical := scope.Canonical(resolved)
 		nextDepth := depth + 1
 		switch candidate.Kind {
 		case discover.KindScript:
+			if state.local {
+				// Local mode never fetches remote documents, scripts or
+				// chunks, even when an import or script tag names one.
+				continue
+			}
 			if state.targetScope.CanFetchScript(resolved) {
 				state.queue.Add(scheduler.Item{
 					URL: canonical, Kind: model.ResourceTypeScript,
-					SourceURL: sourceURL, Depth: nextDepth,
+					SourceURL: candidateSource, Depth: nextDepth,
 				})
 			}
 		case discover.KindChunk:
+			if state.local {
+				continue
+			}
 			if state.targetScope.CanFetchScript(resolved) {
 				state.queue.Add(scheduler.Item{
 					URL: canonical, Kind: model.ResourceTypeChunk,
-					SourceURL: sourceURL, Depth: nextDepth,
+					SourceURL: candidateSource, Depth: nextDepth,
 				})
 			}
 		case discover.KindSourceMap:
+			if state.local {
+				// A local run recovers maps beside the file (or inline), never
+				// by downloading a remote map.
+				continue
+			}
 			// A leaked map usually restores the whole app, so it is fetched
 			// like a script; library maps are skipped via the blacklist.
 			if p.sourceMapAllowed(resolved) &&
 				state.targetScope.CanFetchScript(resolved) {
 				state.queue.Add(scheduler.Item{
 					URL: canonical, Kind: model.ResourceTypeSourceMap,
-					SourceURL: sourceURL, Depth: nextDepth,
+					SourceURL: candidateSource, Depth: nextDepth,
 				})
 			}
 		case discover.KindEndpoint:
@@ -891,7 +1379,13 @@ func (p *Pipeline) processCandidates(
 				// reference, not an API endpoint.
 				continue
 			}
-			authorized := state.targetScope.CanProbe(resolved)
+			if prefixEligibleCandidate(candidate) {
+				// Remember that this URL came from a request call site. The
+				// prefix pass runs only after every literal reference has been
+				// probed, so the literal path is always requested first.
+				state.prefixEligible[canonical] = struct{}{}
+			}
+			authorized := state.probeAuthorized(resolved)
 			if index, exists := state.endpointIndex[canonical]; exists {
 				enrichEndpoint(
 					&result.Endpoints[index], candidate,
@@ -901,7 +1395,7 @@ func (p *Pipeline) processCandidates(
 				state.endpointIndex[canonical] = len(result.Endpoints)
 				result.Endpoints = append(result.Endpoints, model.Endpoint{
 					Raw: candidate.Raw, URL: canonical,
-					SourceURL: sourceURL, Authorized: authorized,
+					SourceURL: candidateSource, Authorized: authorized,
 					Method:       candidate.Method,
 					Evidence:     candidateEvidence(candidate, resolved),
 					Line:         candidate.Line,
@@ -917,12 +1411,12 @@ func (p *Pipeline) processCandidates(
 			if authorized {
 				state.queue.Add(scheduler.Item{
 					URL: canonical, Kind: model.ResourceTypeAPI,
-					SourceURL: sourceURL, Depth: nextDepth,
+					SourceURL: candidateSource, Depth: nextDepth,
 				})
 			}
-			// The same reference may only be reachable under a prefix the
-			// application declares, so it is tried there too.
-			p.exploreBasePaths(state, candidate, resolved, sourceURL, depth)
+			// A declared base path may only apply to some of the references,
+			// so the prefix pass runs after all literal endpoints have been
+			// requested (see exploreAllBasePaths).
 		case discover.KindRoute:
 			if state.spa.HashRouting && resolved.Fragment == "" &&
 				isRelativeReference(candidate.Raw) {
@@ -936,8 +1430,8 @@ func (p *Pipeline) processCandidates(
 				state.endpointIndex[canonical] = len(result.Endpoints)
 				result.Endpoints = append(result.Endpoints, model.Endpoint{
 					Raw: candidate.Raw, URL: canonical,
-					SourceURL:    sourceURL,
-					Authorized:   state.targetScope.CanProbe(resolved),
+					SourceURL:    candidateSource,
+					Authorized:   state.probeAuthorized(resolved),
 					Type:         routeType(candidate),
 					Source:       candidate.Source,
 					Line:         candidate.Line,
@@ -947,6 +1441,113 @@ func (p *Pipeline) processCandidates(
 			}
 		}
 	}
+}
+
+// probeAuthorized applies the scope policy to one resolved candidate. An
+// unrooted local run treats an absolute URL written in the code as its own
+// authorization anchor (restrict_domains and the suffix blacklist still win);
+// every other mode keeps the regular same-origin/allowlist policy.
+func (state *runState) probeAuthorized(resolved *url.URL) bool {
+	if state.localUnrooted {
+		return state.targetScope.CanProbeExplicit(resolved)
+	}
+	return state.targetScope.CanProbe(resolved)
+}
+
+// candidateAbsoluteBase returns the absolute axios-instance baseURL recovered
+// at this call site, if any. A placeholdered base is not reliable enough to
+// turn a relative path into a request.
+func candidateAbsoluteBase(candidate discover.Candidate) *url.URL {
+	if candidate.Spec == nil {
+		return nil
+	}
+	raw := strings.TrimSpace(candidate.Spec.BaseURL)
+	if raw == "" || candidate.Spec.BaseURLKind == model.EvidencePlaceholder {
+		return nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil
+	}
+	return parsed
+}
+
+// recordLocalUnresolved keeps a relative reference as a static report row
+// when no host is available and records one diagnostic per reference.
+func (p *Pipeline) recordLocalUnresolved(
+	state *runState,
+	sourceURL string,
+	candidate discover.Candidate,
+) {
+	raw := strings.TrimSpace(candidate.Raw)
+	if raw == "" {
+		return
+	}
+	if candidate.Kind == discover.KindEndpoint {
+		if discover.IsNoiseEndpoint(raw) {
+			return
+		}
+		if parsed, err := url.Parse(raw); err == nil &&
+			parsed.Path != "" && discover.IsStaticAssetPath(parsed.Path) {
+			return
+		}
+	} else if candidate.Kind != discover.KindRoute {
+		return
+	}
+
+	result := state.result
+	candidateSource := sourceURL
+	if candidate.SourceURL != "" {
+		candidateSource = candidate.SourceURL
+	}
+	typeName := "link"
+	evidence := ""
+	if candidate.Kind == discover.KindEndpoint {
+		typeName = "api"
+		evidence = model.EvidenceStatic
+		if prefixEligibleCandidate(candidate) {
+			state.prefixEligible[raw] = struct{}{}
+		}
+	} else {
+		typeName = routeType(candidate)
+	}
+	if index, exists := state.endpointIndex[raw]; exists {
+		if typeName == "api" {
+			enrichEndpoint(&result.Endpoints[index], candidate, evidence)
+		}
+		return
+	}
+	state.endpointIndex[raw] = len(result.Endpoints)
+	result.Endpoints = append(result.Endpoints, model.Endpoint{
+		Raw: raw, URL: raw,
+		SourceURL: candidateSource, Authorized: false,
+		Method:       candidate.Method,
+		Evidence:     evidence,
+		Line:         candidate.Line,
+		Column:       candidate.Column,
+		ContextLines: candidate.ContextLines,
+		Vendor:       candidate.Vendor,
+		BodyParams:   candidate.BodyParams,
+		Spec:         candidate.Spec,
+		Source:       candidate.Source,
+		Type:         typeName,
+	})
+	if candidate.Kind != discover.KindEndpoint {
+		return
+	}
+	key := "local_endpoint_unresolved\x00" + raw
+	if _, duplicate := state.localIssueSeen[key]; duplicate {
+		return
+	}
+	state.localIssueSeen[key] = struct{}{}
+	result.Issues = append(result.Issues, model.Issue{
+		Code:  "local_endpoint_unresolved",
+		Stage: "discover",
+		URL:   candidateSource,
+		Message: "relative API reference " + raw +
+			" has no host without --base-url; kept as static evidence",
+	})
 }
 
 // enrichRecordedEndpoints folds the match context of regex candidates into
@@ -1132,6 +1733,8 @@ type deferredAnalysis struct {
 	hostNotes       []extract.Note
 	spa             discover.SPAEvidence
 	readErr         error
+	// issues records analysis diagnostics such as a corrupt source map.
+	issues []model.Issue
 }
 
 // computeBatch loads and analyzes deferred JavaScript bodies with a bounded
@@ -1210,14 +1813,25 @@ func (p *Pipeline) analyzeDeferred(
 		analysis.readErr = errors.New("no saved file or in-memory body to analyze")
 		return analysis
 	}
-	jsResult := discover.FromJavaScript(item.source, body, p.options.Analyzer)
+	return p.mergeSourceAnalysis(analysis, p.analyzeSource(item.source, body))
+}
+
+// analyzeSource runs the full extraction pass over one JavaScript body. The
+// live deferred phase and the local analysis share it, so both see the same
+// candidates, findings, parameters, hosts, base paths and SPA evidence.
+func (p *Pipeline) analyzeSource(
+	source *url.URL,
+	body []byte,
+) deferredAnalysis {
+	analysis := deferredAnalysis{}
+	jsResult := discover.FromJavaScript(source, body, p.options.Analyzer)
 	analysis.findings = jsResult.Findings
 	analysis.spa = jsResult.SPA
 	analysis.hosts = append(analysis.hosts, jsResult.Hosts...)
 	analysis.regexCandidates = jsResult.Candidates
 	// One parse yields both the API candidates and the host candidates;
 	// host discovery never re-parses the file.
-	jsAnalysis, params := discover.AnalyzeBody(item.source, body)
+	jsAnalysis, params := discover.AnalyzeBody(source, body)
 	analysis.candidates = jsAnalysis.Candidates
 	analysis.hosts = append(analysis.hosts, jsAnalysis.Hosts...)
 	analysis.hostNotes = append(analysis.hostNotes, jsAnalysis.Notes...)
@@ -1225,6 +1839,24 @@ func (p *Pipeline) analyzeDeferred(
 	analysis.basePaths = append(analysis.basePaths, discover.BasePathNames(jsAnalysis.BasePaths)...)
 	analysis.params = params
 	return analysis
+}
+
+// mergeSourceAnalysis carries the positional item metadata from one deferred
+// analysis onto fresh extraction output.
+func (p *Pipeline) mergeSourceAnalysis(
+	base deferredAnalysis,
+	extracted deferredAnalysis,
+) deferredAnalysis {
+	base.issues = append(base.issues, extracted.issues...)
+	base.findings = extracted.findings
+	base.candidates = extracted.candidates
+	base.regexCandidates = extracted.regexCandidates
+	base.basePaths = extracted.basePaths
+	base.params = extracted.params
+	base.hosts = extracted.hosts
+	base.hostNotes = extracted.hostNotes
+	base.spa = extracted.spa
+	return base
 }
 
 // mergeDeferred folds one analysis result into the run state.
@@ -1236,6 +1868,7 @@ func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
 		})
 		return
 	}
+	state.result.Issues = append(state.result.Issues, analysis.issues...)
 	mergeSPAEvidence(state.spa, analysis.spa)
 	if analysis.vendor {
 		for index := range analysis.findings {
@@ -1263,12 +1896,19 @@ func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
 	state.absorbBasePaths(analysis.basePaths)
 	state.mergeHosts(analysis.hosts, analysis.hostNotes)
 	// The deferred analysis pass reruns the same URL rules over the saved
-	// file. Those candidates only fill fields the download-phase discovery
-	// pass skipped (match context above all); they must run before the AST
-	// candidates so first-wins enrichment matches the download ordering.
-	p.enrichRecordedEndpoints(
-		state, analysis.item.source.String(), analysis.regexCandidates,
-	)
+	// file. A live scan already recorded those endpoints during download and
+	// only needs their match context; a local run has no download pass, so the
+	// regex candidates create the endpoints themselves.
+	if state.local {
+		p.processCandidates(
+			state, analysis.item.source.String(), analysis.regexCandidates,
+			analysis.item.depth,
+		)
+	} else {
+		p.enrichRecordedEndpoints(
+			state, analysis.item.source.String(), analysis.regexCandidates,
+		)
+	}
 	p.processCandidates(
 		state,
 		analysis.item.source.String(),
@@ -1428,7 +2068,7 @@ func (p *Pipeline) collectOne(
 		strings.HasSuffix(strings.ToLower(source.Path), ".map"):
 		// A map embeds the unminified originals; run the same extractors over
 		// each of them, the way shuji restores sources.
-		absorbRecoveredSources(&result, source, response.Body, p.options.Analyzer, p.options.Config.Scope.SkipLibraryBundles)
+		p.absorbRecoveredSources(&result, source, response.Body)
 	case isTextualContentType(contentType):
 		textResult := discover.FromJavaScript(source, response.Body, p.options.Analyzer)
 		mergeSPAEvidence(&result.spa, textResult.SPA)
@@ -1647,8 +2287,8 @@ func basePathReference(raw string) string {
 	return parsed.Path
 }
 
-// exploreBasePaths registers one reference under every prefix the target's
-// JavaScript declared, so the probe stage can tell which prefix the
+// exploreBasePaths registers one call-site reference under every prefix the
+// target's JavaScript declared, so the probe stage can tell which prefix the
 // application really serves the interface on. Only probeable (in-scope)
 // endpoints are tried, and the total is capped per target.
 func (p *Pipeline) exploreBasePaths(
@@ -1657,19 +2297,23 @@ func (p *Pipeline) exploreBasePaths(
 	resolved *url.URL,
 	sourceURL string,
 	depth int,
-) {
+) bool {
 	if !p.options.Config.Scope.ExploreBasePaths || len(state.basePaths) == 0 {
-		return
+		return false
 	}
 	path := basePathReference(candidate.Raw)
 	if path == "" {
-		return
+		return false
 	}
+	if state.pathUnderDeclaredPrefix(path) {
+		// The reference is already expressed under one of the declared
+		// prefixes (or is the declaration value itself, such as
+		// baseURL: "/api"). Putting another prefix in front of it would
+		// build a path no application serves.
+		return false
+	}
+	added := false
 	for _, prefix := range state.basePaths {
-		if path == prefix || strings.HasPrefix(path, prefix+"/") {
-			// The reference already carries the prefix; the endpoint exists.
-			continue
-		}
 		joined, err := state.targetScope.Resolve(prefix+path, resolved)
 		if err != nil || state.targetScope.IsSuffixBlocked(joined) ||
 			!state.targetScope.CanProbe(joined) {
@@ -1681,7 +2325,7 @@ func (p *Pipeline) exploreBasePaths(
 		}
 		if state.basePathEndpoints >= maxBasePathEndpoints {
 			state.noteBasePathLimit()
-			return
+			return added
 		}
 		state.basePathEndpoints++
 		state.endpointIndex[canonical] = len(state.result.Endpoints)
@@ -1698,11 +2342,145 @@ func (p *Pipeline) exploreBasePaths(
 			ContextLines: candidate.ContextLines,
 			Type:         "api",
 		})
-		state.queue.Add(scheduler.Item{
+		if state.queue.Add(scheduler.Item{
 			URL: canonical, Kind: model.ResourceTypeAPI,
 			SourceURL: sourceURL, Depth: depth + 1,
-		})
+		}) {
+			added = true
+		}
 	}
+	return added
+}
+
+// exploreAllBasePaths applies every declared prefix to every recorded
+// call-site reference. This is the only prefix pass: it runs after all
+// deferred files have been analyzed, so the literal endpoint has always been
+// requested before its prefixed variants, and the result does not depend on
+// the order files were analyzed in.
+//
+// Two heuristics keep the probe count down. Only references discovered at a
+// request call site are joined; generic path assignments are mostly router or
+// config values, not interfaces this app serves under another prefix. And a
+// reference already written under a declared prefix is skipped rather than
+// prefixed again.
+//
+// It reports whether any new probe was queued, so the caller can drain again.
+func (p *Pipeline) exploreAllBasePaths(state *runState) bool {
+	if !p.options.Config.Scope.ExploreBasePaths || len(state.basePaths) == 0 {
+		return false
+	}
+	limit := len(state.result.Endpoints)
+	added := false
+	for index := 0; index < limit; index++ {
+		endpoint := &state.result.Endpoints[index]
+		if endpoint.Type != "api" || endpoint.Source == basePathSource {
+			// Routes and full URLs are not prefix candidates, and a
+			// prefix-derived endpoint must not be prefixed again.
+			continue
+		}
+		if _, eligible := state.prefixEligible[endpoint.URL]; !eligible {
+			// A path assignment or a quoted string, not a request call.
+			continue
+		}
+		if basePathReference(endpoint.Raw) == "" {
+			continue
+		}
+		resolved, err := url.Parse(endpoint.URL)
+		if err != nil || resolved.Host == "" {
+			continue
+		}
+		if p.exploreBasePaths(state, discover.Candidate{
+			Raw: endpoint.Raw, Method: endpoint.Method,
+			Line: endpoint.Line, Column: endpoint.Column,
+			ContextLines: endpoint.ContextLines,
+		}, resolved, endpoint.SourceURL, 1) {
+			added = true
+		}
+	}
+	return added
+}
+
+// exploreLocalBasePaths is the unrooted local counterpart of
+// exploreAllBasePaths. With no host there is nothing to request, so the
+// prefixed variants are added as static report rows only. The literal
+// reference is always kept and the rows stay unauthorized.
+func (p *Pipeline) exploreLocalBasePaths(state *runState) bool {
+	if !state.localUnrooted || !p.options.Config.Scope.ExploreBasePaths ||
+		len(state.basePaths) == 0 {
+		return false
+	}
+	limit := len(state.result.Endpoints)
+	added := false
+	for index := 0; index < limit; index++ {
+		endpoint := &state.result.Endpoints[index]
+		if endpoint.Type != "api" || endpoint.Source == basePathSource {
+			continue
+		}
+		if _, eligible := state.prefixEligible[endpoint.Raw]; !eligible {
+			continue
+		}
+		path := basePathReference(endpoint.Raw)
+		if path == "" || state.pathUnderDeclaredPrefix(path) {
+			continue
+		}
+		for _, prefix := range state.basePaths {
+			joined := prefix + path
+			if _, exists := state.endpointIndex[joined]; exists {
+				continue
+			}
+			if state.basePathEndpoints >= maxBasePathEndpoints {
+				state.noteBasePathLimit()
+				return added
+			}
+			state.basePathEndpoints++
+			state.endpointIndex[joined] = len(state.result.Endpoints)
+			state.result.Endpoints = append(state.result.Endpoints, model.Endpoint{
+				Raw:          joined,
+				URL:          joined,
+				SourceURL:    endpoint.SourceURL,
+				Authorized:   false,
+				Method:       endpoint.Method,
+				Evidence:     model.EvidenceStatic,
+				Source:       basePathSource,
+				Line:         endpoint.Line,
+				Column:       endpoint.Column,
+				ContextLines: endpoint.ContextLines,
+				Type:         "api",
+			})
+			added = true
+		}
+	}
+	return added
+}
+
+// pathUnderDeclaredPrefix reports whether a reference already sits under one
+// of the prefixes the target declares. Such a reference is already expressed
+// relative to the application's base, so it needs no further joining.
+func (state *runState) pathUnderDeclaredPrefix(path string) bool {
+	for _, prefix := range state.basePaths {
+		if path == prefix || strings.HasPrefix(path, prefix+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// prefixEligibleCandidate reports whether a discovered reference came from a
+// request call site and is therefore worth trying under a declared prefix.
+// AST candidates are calls by construction; the regex API rules match
+// fetch/axios/XMLHttpRequest call sites. Generic path assignments
+// (url.path-variable) and already-rooted paths (url.api-prefix) are not
+// included: joining those under another prefix mostly produces paths no
+// application serves.
+func prefixEligibleCandidate(candidate discover.Candidate) bool {
+	if candidate.Source == "ast" {
+		return true
+	}
+	switch candidate.RuleID {
+	case "url.api-call", "url.xhr-open":
+		return true
+	}
+	return false
 }
 
 // routeType distinguishes true framework routes (dedicated router rules or

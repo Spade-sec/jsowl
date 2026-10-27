@@ -466,6 +466,8 @@ func modeLabel(mode model.Mode) string {
 		return "仅直连（不启动浏览器）"
 	case model.ModeBrowser:
 		return "仅浏览器（CDP）"
+	case model.ModeLocal:
+		return "本地文件（读取本地 JS，可请求发现的 API）"
 	}
 	if mode == "" {
 		return "未记录"

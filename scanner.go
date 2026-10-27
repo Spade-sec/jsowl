@@ -159,18 +159,15 @@ func cloneConfig(config model.Config) model.Config {
 	return cloned
 }
 
-// Scan executes an isolated scan for one target and returns partial diagnostics on failure.
-func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
-	root, err := url.Parse(target.URL)
-	if err != nil {
-		return nil, fmt.Errorf("parse target URL: %w", err)
-	}
-
+// buildHeaders merges the configured request headers with per-target
+// overrides and selects the User-Agent. Live scans and local API probing share
+// it, so both send exactly the same header set.
+func (s *Scanner) buildHeaders(extra http.Header) (http.Header, string, error) {
 	headers := make(http.Header)
 	for name, value := range s.config.Request.Headers {
 		headers.Set(name, value)
 	}
-	for name, values := range target.Headers {
+	for name, values := range extra {
 		headers.Del(name)
 		for _, value := range values {
 			headers.Add(name, value)
@@ -178,9 +175,23 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 	}
 	userAgent, err := ua.ForTarget(s.config.Request.UserAgent, headers, rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("select User-Agent: %w", err)
+		return nil, "", fmt.Errorf("select User-Agent: %w", err)
 	}
 	headers.Set("User-Agent", userAgent)
+	return headers, userAgent, nil
+}
+
+// Scan executes an isolated scan for one target and returns partial diagnostics on failure.
+func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
+	root, err := url.Parse(target.URL)
+	if err != nil {
+		return nil, fmt.Errorf("parse target URL: %w", err)
+	}
+
+	headers, userAgent, err := s.buildHeaders(target.Headers)
+	if err != nil {
+		return nil, err
+	}
 
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -274,6 +285,74 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 		// The browser pass merges endpoints after the pipeline already
 		// finalized its counts; refresh them so the report header matches
 		// the rows it renders.
+		pipeline.Finalize(result)
+		result.StartedAt = started
+		result.FinishedAt = time.Now()
+		result.UserAgent = userAgent
+	}
+	return result, err
+}
+
+// scanLocal analyzes local JavaScript through the same request setup and
+// pipeline configuration a live scan uses. Only API probes leave the process;
+// documents, scripts, chunks and remote source maps are never fetched. The
+// caller owns directory naming so report layout stays compatible with the
+// existing --location behavior.
+func (s *Scanner) scanLocal(
+	ctx context.Context,
+	input pipeline.LocalInput,
+	reportDirectory string,
+	started time.Time,
+) (*Result, error) {
+	headers, userAgent, err := s.buildHeaders(nil)
+	if err != nil {
+		return nil, err
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("create cookie jar: %w", err)
+	}
+	cookies := make([]*http.Cookie, 0, len(s.config.Request.Cookies))
+	for name, value := range s.config.Request.Cookies {
+		cookies = append(cookies, &http.Cookie{Name: name, Value: value})
+	}
+	if input.BaseURL != "" {
+		// Cookies need a host. With --base-url that host is known; without it
+		// only explicit absolute API URLs are probed and there is no single
+		// host to attach the configured cookies to.
+		base, parseErr := url.Parse(input.BaseURL)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse local base URL: %w", parseErr)
+		}
+		jar.SetCookies(base, cookies)
+	}
+
+	client, err := direct.New(
+		s.config.Request,
+		s.config.Limits.MaxBodySize,
+		jar,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+
+	targetContext, cancel := context.WithTimeout(ctx, s.config.Request.TargetTimeout)
+	defer cancel()
+	var getter collect.Getter = client
+	if s.requestSink != nil {
+		getter = reportingGetter{Getter: client, sink: s.requestSink}
+	}
+	resourcePipeline := pipeline.New(pipeline.Options{
+		ReportDirectory: reportDirectory,
+		Getter:          getter, Analyzer: s.analyzer, Config: s.config,
+		ProbeEvents:     s.probeSink,
+		AnalysisLimiter: s.analysisLimiter,
+	})
+	// AI refinement is deliberately not wired into local analysis.
+	result, _, err := resourcePipeline.RunLocal(targetContext, input, headers)
+	if result != nil {
+		normalizeHashRoutes(result)
 		pipeline.Finalize(result)
 		result.StartedAt = started
 		result.FinishedAt = time.Now()

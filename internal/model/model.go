@@ -15,6 +15,11 @@ const (
 	ModeAuto    Mode = "auto"
 	ModeDirect  Mode = "direct"
 	ModeBrowser Mode = "browser"
+	// ModeLocal marks analysis of local JavaScript files. Local mode reads
+	// files instead of remote documents, scripts or chunks, but it may still
+	// request the API endpoints it discovers. It is a result mode only and is
+	// never a valid scan configuration value.
+	ModeLocal Mode = "local"
 )
 
 type RuleCategory string

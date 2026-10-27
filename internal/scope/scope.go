@@ -30,11 +30,31 @@ func New(root *url.URL, config model.ScopeConfig) (*Scope, error) {
 	if err := validateHTTPURL(root); err != nil {
 		return nil, fmt.Errorf("root URL: %w", err)
 	}
+	return newScope(root, config)
+}
 
+// NewLocal builds a scope for a local JavaScript analysis. It may have no root
+// origin at all: relative references then cannot be resolved, and only
+// absolute URLs explicitly written in the analyzed code can be probed (see
+// CanProbeExplicit). When base is non-nil it becomes the root origin, so
+// relative references resolve against it and the usual same-origin policy
+// applies.
+func NewLocal(base *url.URL, config model.ScopeConfig) (*Scope, error) {
+	if base != nil {
+		if err := validateHTTPURL(base); err != nil {
+			return nil, fmt.Errorf("base URL: %w", err)
+		}
+	}
+	return newScope(base, config)
+}
+
+func newScope(root *url.URL, config model.ScopeConfig) (*Scope, error) {
 	s := &Scope{
-		root:       cloneURL(root),
 		config:     config,
 		allowExact: make(map[string]struct{}, len(config.AllowDomains)),
+	}
+	if root != nil {
+		s.root = cloneURL(root)
 	}
 	for _, entry := range config.AllowDomains {
 		host := strings.ToLower(strings.TrimSpace(entry))
@@ -98,6 +118,9 @@ func (s *Scope) Resolve(raw string, base *url.URL) (*url.URL, error) {
 	if base == nil {
 		base = s.root
 	}
+	if base == nil {
+		return nil, errors.New("no base URL to resolve against")
+	}
 	resolved := base.ResolveReference(parsed)
 	if err := validateHTTPURL(resolved); err != nil {
 		return nil, err
@@ -143,6 +166,21 @@ func (s *Scope) CanProbe(candidate *url.URL) bool {
 		}
 	}
 	return false
+}
+
+// CanProbeExplicit reports whether an absolute URL written verbatim in the
+// analyzed JavaScript may be probed by a local analysis that has no root
+// origin. The URL itself is the authorization anchor, but configured
+// restrictions still win: with restrict_domains set, only those domains (plus
+// the root origin, when one exists) may be probed.
+func (s *Scope) CanProbeExplicit(candidate *url.URL) bool {
+	if validateHTTPURL(candidate) != nil {
+		return false
+	}
+	if s.restricted() {
+		return s.matchesRestriction(candidate)
+	}
+	return true
 }
 
 // restricted reports whether an explicit domain restriction is active.
@@ -237,6 +275,9 @@ func validateHTTPURL(candidate *url.URL) error {
 }
 
 func sameOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
 	return strings.EqualFold(left.Scheme, right.Scheme) &&
 		normalizedHostname(left) == normalizedHostname(right) &&
 		effectivePort(left) == effectivePort(right)

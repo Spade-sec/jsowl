@@ -79,19 +79,36 @@ type SourceFile struct {
 	Content string
 }
 
-// ParseSourceMap pairs a map's "sources" with the "sourcesContent" it embeds.
-// Only names and text are read; the mappings table is not needed to recover
-// the originals, which is exactly how shuji restores sources.
-func ParseSourceMap(body []byte) []SourceFile {
+// SourceMapParseResult reports what a source map body contained. Files holds
+// the recovered originals; Sources counts the names the map declared, and
+// Embedded counts the non-empty sourcesContent entries. Err is set when the
+// body is not valid JSON, so callers can distinguish a corrupt map from one
+// that simply does not embed its sources.
+type SourceMapParseResult struct {
+	Files    []SourceFile
+	Sources  int
+	Embedded int
+	Err      error
+}
+
+// ParseSourceMapDetailed is ParseSourceMap plus the diagnostics a local
+// analysis needs: whether the map was readable and why no source was restored.
+func ParseSourceMapDetailed(body []byte) SourceMapParseResult {
 	var raw struct {
 		Sources        []string  `json:"sources"`
 		SourcesContent []*string `json:"sourcesContent"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil
+		return SourceMapParseResult{Err: err}
+	}
+	result := SourceMapParseResult{Sources: len(raw.Sources)}
+	for _, content := range raw.SourcesContent {
+		if content != nil && *content != "" {
+			result.Embedded++
+		}
 	}
 	if len(raw.Sources) == 0 || len(raw.SourcesContent) == 0 {
-		return nil
+		return result
 	}
 	capacity := len(raw.Sources)
 	if maxSourceMapSources > 0 && capacity > maxSourceMapSources {
@@ -115,7 +132,15 @@ func ParseSourceMap(body []byte) []SourceFile {
 		}
 		files = append(files, SourceFile{Name: clean, Content: *content})
 	}
-	return files
+	result.Files = files
+	return result
+}
+
+// ParseSourceMap pairs a map's "sources" with the "sourcesContent" it embeds.
+// Only names and text are read; the mappings table is not needed to recover
+// the originals, which is exactly how shuji restores sources.
+func ParseSourceMap(body []byte) []SourceFile {
+	return ParseSourceMapDetailed(body).Files
 }
 
 // CleanSourceName turns a map's source reference into a safe relative path:
