@@ -102,17 +102,28 @@ Rod 的路径、等待、网络空闲、超时、窗口模式和注入脚本只�
 ## 作用域控制（`scope`）
 
 - `scope.skip_library_bundles` 默认 `true`。开启后扫描读取脚本头部的版权注释（`/*! ... */` 形式或含 `@license`、`@preserve`、`Copyright`、`licensed under` 的注释），若注释里出现已知库名（jQuery、lodash、axios、Vue、React、Element UI、echarts、core-js 等），就判定该脚本是第三方库 bundle，**跳过它的正则与 AST 解析**——库文件体量极大却不含目标业务接口，跳过既提速又降噪；资源本身仍会记录在资源报告里。source map 还原出的原始文件走同一判定。把 `skip_library_bundles` 设为 `false` 时**仍会解析**这些库文件，但结果全部打上 `vendor` 标记：API 报告与敏感信息报告的对应行会显示虚线 `vendor` 徽标，JSON 里为 `"vendor": true`——便于把库噪声与业务结果分开看。同一路径若同时被业务代码引用，标记会被清除（业务引用优先）。
-- `scope.probe_source_maps` 默认 `true`。开启后扫描会探测 JS source map：既解析脚本里 `//# sourceMappingURL=` 指向的 `.map`（含内联 base64 形式），也直接抓取以 `.map` 结尾的资源；拿到 map 后按 shuji 的方式把 `sourcesContent` 里的**原始未压缩源码**取出，重新跑一遍正则与 AST 提取，因此路径、参数与敏感信息都按还原后的源码统计。`source_map_blacklist` 里的片段命中 map 路径时跳过下载，默认覆盖 `chunk-vendors`、`chunk-libs`、`node_modules`、`axios`、`lodash`、`element-ui` 等库 bundle，避免为体积巨大的厂商 map 浪费请求与磁盘。
+- `scope.probe_source_maps` 默认 `true`。开启后扫描会探测 JS source map：既解析脚本里 `//# sourceMappingURL=` 指向的 `.map`（含内联 base64 形式），也直接抓取以 `.map` 结尾的资源；拿到 map 后按 shuji 的方式把 `sourcesContent` 里的**原始未压缩源码**取出，重新跑一遍正则与 AST 提取，因此路径、参数与敏感信息都按还原后的源码统计。`source_map_blacklist` 里的片段命中 map 路径时跳过下载，默认覆盖 `chunk-vendors`、`chunk-libs`、`node_modules`、`axios`、`lodash`、`element-ui` 等库 bundle，避免为体积巨大的厂商 map 浪费请求与磁盘。`--location` 本地分析同样支持内联 map 与本地相对 `.map` 文件，但不会下载远端 map，而是记录 `sourcemap_remote_skipped` 诊断。
 - `scope.suffix_blacklist` 在请求入队前按 URL path 过滤，忽略后缀大小写、query 和 fragment；`.css` 与 `.svg` 默认过滤，`.js`、`.json`、`.map`、`.txt`、`.xml` 默认不会过滤。
 - `--base-url` 不会替换入口目标，只改变相对引用（script / chunk / API / route）的解析基准，绝对 URL 与协议相对引用保持原值。
   **带路径的 base URL 按“前缀”处理**：`--base-url https://host/api` 时，源码里的 `/users` 解析为
   `https://host/api/users`（而不是 `https://host/users`）；已经是 `/api/users` 的引用不会再叠加前缀，
   无前导斜杠的相对引用按目录拼接（`users` → `/api/users`）。不设 `--base-url` 时解析行为完全不变。
+  `--base-url` 也可以只写路径（如 `/api` 或 `/api/`），此时按每个目标的 origin 解析成
+  `https://<目标>/api` 再按上面的前缀规则拼接，同一参数可用于不同主机的目标；纯相对形式（`api`）
+  和协议相对形式（`//host/api`）不接受，避免与前缀语义混淆。
 - `scope.explore_base_paths` 默认 `true`。开启后，扫描会收集 JavaScript 里声明的接口前缀
-  （`axios.create({ baseURL: /api })`、`apiPrefix = /v1`，以及 `"baseUrl":"/api"` 这类配置文本），
-  把每个以 `/` 开头的相对引用在这些前缀下各拼一次并**探测**，因此“应用实际把接口挂在哪个前缀下”
-  由响应结果给出，而不是靠猜。每个目标最多沿用 8 个前缀、最多增加 200 条探测端点，超出会写入
-  `base_path_probe_capped` 诊断；这些端点以 `提取方式 = 前缀拼接`（`source: prefix`）标注，原引用仍然保留。
+  （`axios.create({ baseURL: /api })`、`apiPrefix = /v1`，以及 `"baseUrl":"/api"` 这类配置文本）。
+  只有真正来自请求调用点的引用才参与拼接：`fetch`/`axios.*` 等 API 调用、`XMLHttpRequest.open`，
+  以及 AST 识别出的调用。普通的路径赋值（`path: "/dashboard"`、`url: "/home"`）和已经写在某个
+  已声明前缀下的引用（例如声明了 `/api` 时的 `/api/users`，或前缀声明值本身 `/api`）不会再被拼接，
+  因此不会为页面路由和本来就正确的接口制造噪声。拼接探测统一安排在字面引用全部探测完成之后执行，
+  所以请求与报告的顺序始终是“先原始路径、再前缀路径”；这一步也在所有延迟分析结束后统一补做，
+  因此不受文件分析顺序影响：前缀声明文件即使比引用它的文件更晚被下载、分析，引用仍会被尝试；
+  同一引用重复处理不会重复探测。每个目标最多沿用 8 个前缀、最多增加 200 条探测端点，
+  超出会写入 `base_path_probe_capped` 诊断；这些端点以 `提取方式 = 前缀拼接`（`source: prefix`）标注，
+  原引用仍然保留。该机制只处理以 `/` 开头的引用；`fetch("users")` 这类无前导斜杠的单段相对引用
+  在提取阶段就按噪声过滤，不会参与前缀拼接。
+- 本地分析（`--location`）沿用同一套作用域规则：`--base-url` 提供完整 http(s) 基准时，相对引用按上面的前缀语义解析并走常规 `CanProbe` 校验；未提供基准时，只有源码中显式写出的绝对 http(s) API 才获得探测授权（`scope.restrict_domains` 仍然生效），无法解析的相对引用保持静态并记录 `local_endpoint_unresolved` 诊断，不会自动借用其他文件中的主机作为目录级基准。
 
 ## 主机资产（`hosts`）
 

@@ -22,6 +22,7 @@
 | **敏感信息提取** | 兼容 [HaE](https://github.com/gh0stkey/HaE) 规则格式，正则 + AST 双引擎，内置密钥/凭证/指纹规则集 |
 | **运行时交互** | 自动填表提交、事件点击、SPA 路由爬取，捕获页面真实发出的 API 请求（可选，默认关闭） |
 | **登录态扫描** | `--login` 打开可见浏览器手动登录后，携带会话 Cookie 完成整批扫描（可带 `-u`，也可不带 `-u` 在浏览器里自行导航） |
+| **本地 JS 分析** | `--location` 直接读取本地 JS 文件或目录，复用同一套规则、AST 提取与分析流水线；可请求发现的 API，但不会爬取远端页面或下载远端 JS |
 | **AI 辅助分析** | `-ai` 接入大模型做参数完整性与敏感发现评级（可选，需配置 API Key） |
 | **MCP Server** | 通过 [Model Context Protocol](https://modelcontextprotocol.io) 把扫描能力暴露给任意 LLM 客户端 |
 | **多格式报告** | JSON + 自包含交互式 HTML 总览与分项报告（API / URL / 敏感信息 / 参数 / 路由 / 资源）+ 纯文本清单 |
@@ -45,6 +46,9 @@ jsowl -u https://example.com --login          # 手动登录后带会话扫描
 jsowl --login                                 # 不指定 URL：打开浏览器自行导航，登录后扫描当前页
 jsowl -u https://example.com --aff            # 开启运行时自动填表与交互
 jsowl -l targets.txt -o reports               # 批量目标 + 自定义输出目录
+jsowl --location ./dist/assets/app.js         # 分析本地 JS，可请求其中发现的 API
+jsowl --location ./dist --base-url https://example.com/api  # 相对 API 按该前缀解析
+jsowl --location ./dist                       # 递归分析目录下的 JS/TS 文件
 jsowl --check                                 # 检查配置、规则与本地浏览器
 ```
 
