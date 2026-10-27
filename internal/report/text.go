@@ -49,7 +49,7 @@ func isFullURL(raw string) bool {
 // renderURLs lists every full http(s) URL observed across endpoints and
 // resources, one per line, deduplicated and sorted.
 func renderURLs(result *model.Result) []byte {
-	out := textHeader("完整 URL", result.Target)
+	var out []byte
 	seen := make(map[string]struct{})
 	urls := make([]string, 0)
 	add := func(raw string) {
@@ -84,19 +84,11 @@ func sanitizeText(value string) string {
 	return strings.ToValidUTF8(value, "�")
 }
 
-func textHeader(title, target string) []byte {
-	var b strings.Builder
-	b.WriteString("# JsOwl " + title + "\n")
-	b.WriteString("# 目标: " + target + "\n")
-	b.WriteString("# 敏感数据，请妥善保管\n")
-	return []byte(b.String())
-}
-
 // renderAPIAbsolute lists every absolute path ("/a/b/c?x=1"), one per line,
 // deduplicated and sorted. It uses the same classification as the API report
 // so the counts agree; full URLs live in url.txt instead.
 func renderAPIAbsolute(result *model.Result) []byte {
-	out := textHeader("API 绝对路径", result.Target)
+	var out []byte
 	seen := make(map[string]struct{}, len(result.Endpoints))
 	paths := make([]string, 0, len(result.Endpoints))
 	for _, endpoint := range result.Endpoints {
@@ -120,7 +112,7 @@ func renderAPIAbsolute(result *model.Result) []byte {
 // renderAPIRelative lists every relative path ("a/b/c", "./a/b?x=1"), one per
 // line, deduplicated and sorted.
 func renderAPIRelative(result *model.Result) []byte {
-	out := textHeader("API 相对路径", result.Target)
+	var out []byte
 	seen := make(map[string]struct{}, len(result.Endpoints))
 	paths := make([]string, 0, len(result.Endpoints))
 	for _, endpoint := range result.Endpoints {
@@ -143,7 +135,7 @@ func renderAPIRelative(result *model.Result) []byte {
 
 // renderRoutes lists every framework route path, one per line.
 func renderRoutes(result *model.Result) []byte {
-	out := textHeader("框架路由", result.Target)
+	var out []byte
 	count := 0
 	for _, endpoint := range result.Endpoints {
 		if endpoint.Type != "route" {
@@ -176,7 +168,7 @@ func renderParameters(result *model.Result) []byte {
 // renderSensitive lists every sensitive-category finding with its severity,
 // matched value and source location.
 func renderSensitive(result *model.Result) []byte {
-	out := textHeader("敏感信息", result.Target)
+	var out []byte
 	count := 0
 	for _, finding := range result.Findings {
 		if finding.Category != model.RuleCategorySensitive {
@@ -227,7 +219,7 @@ func renderHostValues(result *model.Result, kinds ...model.HostKind) []byte {
 	sort.Strings(values)
 
 	title := hostValuesTitle(kinds)
-	out := textHeader(title, result.Target)
+	var out []byte
 	for _, value := range values {
 		out = append(out, []byte(value+"\n")...)
 	}
