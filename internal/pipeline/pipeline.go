@@ -662,6 +662,9 @@ func (p *Pipeline) RunLocal(
 		}
 	}
 
+	// Local analysis has no download phase, so the write endpoints recovered
+	// from the files are probed here, exactly like a live scan.
+	p.probePostEndpoints(ctx, state, headers, nil)
 	p.applyRequestTemplates(result)
 	applyTechnologies(result, spa)
 	if state.hosts != nil {
@@ -990,6 +993,10 @@ func (p *Pipeline) RunDetailed(
 		}
 	}
 
+	// Every write endpoint recovered from the code or observed at runtime gets
+	// its one chance to answer: a POST with the empty JSON object. This runs
+	// after analysis so the method and content type are final.
+	p.probePostEndpoints(ctx, state, headers, previouslySeen)
 	if p.options.Config.Scope.ProbeRoutes {
 		p.probeRoutes(ctx, result, headers, root)
 	}
@@ -1256,14 +1263,7 @@ func (p *Pipeline) processOutcome(state *runState, collected outcome) error {
 		}
 	}
 
-	for _, finding := range collected.findings {
-		key := finding.RuleID + "\x00" + finding.SourceURL + "\x00" + finding.Value
-		if _, duplicate := state.findingSeen[key]; duplicate {
-			continue
-		}
-		state.findingSeen[key] = struct{}{}
-		result.Findings = append(result.Findings, finding)
-	}
+	state.mergeFindings(collected.findings)
 
 	state.mergeParams(collected.params)
 	state.absorbBasePaths(collected.basePaths)
@@ -1884,14 +1884,7 @@ func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
 			analysis.params[index].Vendor = true
 		}
 	}
-	for _, finding := range analysis.findings {
-		key := finding.RuleID + "\x00" + finding.SourceURL + "\x00" + finding.Value
-		if _, duplicate := state.findingSeen[key]; duplicate {
-			continue
-		}
-		state.findingSeen[key] = struct{}{}
-		state.result.Findings = append(state.result.Findings, finding)
-	}
+	state.mergeFindings(analysis.findings)
 	state.mergeParams(analysis.params)
 	state.absorbBasePaths(analysis.basePaths)
 	state.mergeHosts(analysis.hosts, analysis.hostNotes)

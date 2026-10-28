@@ -311,6 +311,14 @@ type ScopeConfig struct {
 	SuffixBlacklist        []string `yaml:"suffix_blacklist" json:"suffix_blacklist"`
 	FetchExternalScripts   bool     `yaml:"fetch_external_scripts" json:"fetch_external_scripts"`
 	ProbeExternalEndpoints bool     `yaml:"probe_external_endpoints" json:"probe_external_endpoints"`
+	// ProbePost sends one POST probe to every authorized endpoint the analysis
+	// recovered as a POST call. The request body follows the recovered
+	// Content-Type: an empty JSON object for JSON, the recovered field names
+	// with empty values for form encoding, a boundary-correct empty multipart
+	// form, and an empty body for every other type. A GET cannot exercise a
+	// write endpoint, so this is the only way to observe its status, response
+	// fields and sensitive values. On by default; false keeps the scan GET-only.
+	ProbePost bool `yaml:"probe_post" json:"probe_post"`
 	// ProbeRoutes optionally GETs framework routes and compares their body
 	// against the index page to tell server-backed routes from SPA fallbacks.
 	ProbeRoutes bool `yaml:"probe_routes" json:"probe_routes"`

@@ -68,6 +68,7 @@ func DefaultConfig() Config {
 		},
 		Scope: ScopeConfig{
 			FetchExternalScripts: true,
+			ProbePost:            true,
 			ProbeSourceMaps:      true,
 			SkipLibraryBundles:   true,
 			ExploreBasePaths:     true,

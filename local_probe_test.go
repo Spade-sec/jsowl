@@ -15,6 +15,7 @@ import (
 type localRequestRecorder struct {
 	mutex   sync.Mutex
 	paths   []string
+	methods []string
 	headers []http.Header
 }
 
@@ -22,7 +23,14 @@ func (r *localRequestRecorder) add(request *http.Request) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.paths = append(r.paths, request.URL.Path)
+	r.methods = append(r.methods, request.Method)
 	r.headers = append(r.headers, request.Header.Clone())
+}
+
+func (r *localRequestRecorder) methodsSnapshot() []string {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	return append([]string(nil), r.methods...)
 }
 
 func (r *localRequestRecorder) snapshot() ([]string, []http.Header) {

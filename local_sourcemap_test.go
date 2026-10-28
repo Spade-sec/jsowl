@@ -280,7 +280,14 @@ const token = "SECRET_ABC123";`
 		t.Fatalf("recovered sensitive finding missing: %#v", result.Findings)
 	}
 	paths, _ := recorder.snapshot()
-	if len(paths) != 1 || paths[0] != "/api/mapped" {
-		t.Fatalf("requested paths = %v", paths)
+	// The endpoint is a POST + JSON call site: the regular GET probe runs
+	// first, then the empty-JSON POST probe.
+	methodCounts := map[string]int{}
+	for _, method := range recorder.methodsSnapshot() {
+		methodCounts[method]++
+	}
+	if len(paths) != 2 || paths[0] != "/api/mapped" || paths[1] != "/api/mapped" ||
+		methodCounts[http.MethodGet] != 1 || methodCounts[http.MethodPost] != 1 {
+		t.Fatalf("requested paths = %v methods = %v", paths, methodCounts)
 	}
 }
