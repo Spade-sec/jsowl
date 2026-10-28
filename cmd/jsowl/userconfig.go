@@ -78,6 +78,11 @@ scope:
   restrict_domains: []
   fetch_external_scripts: true
   probe_external_endpoints: false
+  # 对分析还原为 POST 的已授权接口发一次 POST 探测，请求体按 Content-Type 构造：
+  # JSON 用 {}，表单用「字段名=空值」，multipart 用带 boundary 的空表单，
+  # 其余类型用空正文。GET 无法触发写接口，否则看不到它的响应。
+  # 不提交真实字段值，不发送 PUT/PATCH/DELETE；设为 false 恢复仅 GET。
+  probe_post: true
   probe_routes: false
   probe_source_maps: true
   skip_library_bundles: true

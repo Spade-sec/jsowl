@@ -48,6 +48,7 @@ scope:
   suffix_blacklist: [.png, .jpg, .svg, .css, .woff2, .mp4, .zip]
   fetch_external_scripts: true
   probe_external_endpoints: false
+  probe_post: true
 output:
   directory: ./jsowl-report
   json: true
@@ -62,11 +63,11 @@ output:
 - `browser`：使用 Rod 和本地 Chrome/Chromium 渲染页面，在网络空闲后继续等待异步 JavaScript。
 - `auto`：默认先运行快速 direct 扫描；检测到 SPA、动态 import、History 路由等信号后再启动 Rod。浏览器不可用时保留 direct 结果并记录降级原因（stderr 提示 `browser degraded`，原因记录在报告的 `browser_status` 中）。
 
-同源或显式 allowlist 的 API 仅使用 GET 获取并继续执行正则匹配；不会提交表单或发送 POST/PUT/PATCH/DELETE。页面明确引用的跨域脚本默认允许下载分析；跨域 API 默认不会探测。`Authorization`、`Cookie`、`X-API-Key` 等目标请求头仅发送到同源；跨域脚本只携带 UA、Accept 等安全协商头。
+同源或显式 allowlist 的 API 使用 GET 获取并继续执行正则匹配。分析还原为 POST 的接口（`axios.post('/x', {...})`、`fetch('/x', {method:'POST', ...})`，或运行时观测到 POST）会额外收到一次 POST 探测，请求体按调用点声明的 Content-Type 构造：JSON 为空对象 `{}`，form-urlencoded 为「字段名=空值」，multipart 为带 boundary 的空字段表单，其他类型为空正文。该探测仍受作用域与授权约束，不提交真实字段值，不发送 PUT/PATCH/DELETE。页面明确引用的跨域脚本默认允许下载分析；跨域 API 默认不会探测。`Authorization`、`Cookie`、`X-API-Key` 等目标请求头仅发送到同源；跨域脚本只携带 UA、Accept 等安全协商头。
 
 未配置 User-Agent 时，每个目标随机选择一个现代桌面 UA，并在该目标的 Surf、Rod、chunk 和 API 请求中保持一致。可选保存 JS/chunk；API 响应正文永不保存。
 
-上述 GET 限制针对 JsOwl 主动发起的 API 探测。Rod 会按站点原生行为执行页面 JavaScript，不改写或阻断页面自身的请求方法，因此目标脚本本身可能发出 POST 等请求。
+这里的请求约束针对 JsOwl 主动发起的探测：POST 探测只带请求结构，不复制源码恢复出的字段值，也不会发送 PUT/PATCH/DELETE。Rod 会按站点原生行为执行页面 JavaScript，不改写或阻断页面自身的请求方法，因此目标脚本本身可能发出任意请求。POST 探测返回的 JSON 字段名会并入接口的响应参数，响应正文同样会跑一遍敏感信息规则——写接口的响应体正是靠这一步才能被观察到。
 
 ## 浏览器选项
 
@@ -126,6 +127,7 @@ Rod 的路径、等待、网络空闲、超时、窗口模式和注入脚本只�
   超出会写入 `base_path_probe_capped` 诊断；这些端点以 `提取方式 = 前缀拼接`（`source: prefix`）标注，
   原引用仍然保留。该机制只处理以 `/` 开头的引用；`fetch("users")` 这类无前导斜杠的单段相对引用
   在提取阶段就按噪声过滤，不会参与前缀拼接。
+- `scope.probe_post` 默认 `true`。对分析还原为 POST 的已授权接口发一次 POST 探测，请求体按调用点声明的 Content-Type 构造，且只带结构、不带任何真实值：`application/json` 发空对象 `{}`；`application/x-www-form-urlencoded` 把恢复出的字段名拼成 `a=&b=`；`multipart/form-data` 生成带正确 boundary 的空字段表单；其他显式类型（`text/plain`、`application/xml`、二进制等）发空正文。Content-Type 缺失但已恢复出请求体字段的调用点（axios 对对象体默认按 JSON 序列化）按 JSON 处理；既没有 Content-Type 也没有请求体的调用点不探测。探测与 GET 共用同一并发上限和 `CanProbe` 作用域校验，已在本轮扫描中探测过的 URL 不会重复写。结果用于补全接口状态码与响应字段名，并对响应正文执行敏感信息规则（写接口的响应体只能通过这一步观察到）；请求失败写入 `post_probe_failed` 诊断。设为 `false` 即恢复严格的仅 GET 行为。
 - 本地分析（`--location`）沿用同一套作用域规则：`--base-url` 提供完整 http(s) 基准时，相对引用按上面的前缀语义解析并走常规 `CanProbe` 校验；未提供基准时，只有源码中显式写出的绝对 http(s) API 才获得探测授权（`scope.restrict_domains` 仍然生效），无法解析的相对引用保持静态并记录 `local_endpoint_unresolved` 诊断，不会自动借用其他文件中的主机作为目录级基准。
 
 ## 主机资产（`hosts`）

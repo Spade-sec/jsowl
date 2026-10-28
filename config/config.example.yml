@@ -112,6 +112,12 @@ scope:
     - .css
   fetch_external_scripts: true
   probe_external_endpoints: false
+  # 对分析还原为 POST 的已授权接口发一次 POST 探测，请求体按 Content-Type 构造：
+  # JSON 用 {}，x-www-form-urlencoded 用「字段名=空值」，multipart/form-data
+  # 用带正确 boundary 的空表单，其余类型用空正文。
+  # GET 无法触发写接口，没有这一步就看不到它的响应状态、响应字段与敏感信息。
+  # 不提交真实字段值，不发送 PUT/PATCH/DELETE；设为 false 恢复仅 GET。
+  probe_post: true
   # 识别版权注释（/*! ... */、@license、Copyright 等）判定第三方库 bundle 并跳过
   # 正则/AST 解析：库代码体量大但不含目标业务接口，跳过可显著提速并降噪。默认开启。
   # 设为 false 时仍解析，但结果会打上 vendor 标记（JSON: "vendor": true，报告显示徽标）。
