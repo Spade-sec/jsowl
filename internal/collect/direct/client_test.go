@@ -2,6 +2,7 @@ package direct
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -160,6 +161,55 @@ func TestClientRetriesTransportFailureOnly(t *testing.T) {
 	}
 	if attempts.Load() != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts.Load())
+	}
+}
+
+func TestClientPostSendsBodyWithHeaders(t *testing.T) {
+	type observedRequest struct {
+		method      string
+		body        string
+		contentType string
+	}
+	observed := make(chan observedRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		observed <- observedRequest{
+			method:      request.Method,
+			body:        string(body),
+			contentType: request.Header.Get("Content-Type"),
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	client, err := New(model.RequestConfig{Timeout: time.Second}, 1024, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	response, err := client.Post(
+		context.Background(),
+		parseDirectURL(t, server.URL+"/api/login"),
+		headers,
+		[]byte("{}"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := <-observed
+	if request.method != http.MethodPost {
+		t.Fatalf("method = %q, want POST", request.method)
+	}
+	if request.body != "{}" || request.contentType != "application/json" {
+		t.Fatalf("observed request = %#v", request)
+	}
+	if response.StatusCode != http.StatusOK || string(response.Body) != `{"ok":true}` {
+		t.Fatalf("response = %#v", response)
 	}
 }
 

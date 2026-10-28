@@ -1,6 +1,7 @@
 package direct
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -64,6 +65,27 @@ func (c *Client) Get(
 	target *url.URL,
 	headers http.Header,
 ) (collect.Response, error) {
+	return c.do(ctx, http.MethodGet, target, headers, nil)
+}
+
+// Post sends one POST request with the supplied body. It exists for the
+// empty-JSON probe of interfaces the analysis recovered as POST + JSON.
+func (c *Client) Post(
+	ctx context.Context,
+	target *url.URL,
+	headers http.Header,
+	body []byte,
+) (collect.Response, error) {
+	return c.do(ctx, http.MethodPost, target, headers, body)
+}
+
+func (c *Client) do(
+	ctx context.Context,
+	method string,
+	target *url.URL,
+	headers http.Header,
+	requestBody []byte,
+) (collect.Response, error) {
 	if target == nil {
 		return collect.Response{}, errors.New("target URL is nil")
 	}
@@ -71,14 +93,19 @@ func (c *Client) Get(
 	var response *http.Response
 	var err error
 	for attempt := 0; attempt <= c.retry; attempt++ {
+		var payload io.Reader
+		if requestBody != nil {
+			// A fresh reader per attempt: the first attempt consumes it.
+			payload = bytes.NewReader(requestBody)
+		}
 		request, requestErr := http.NewRequestWithContext(
 			ctx,
-			http.MethodGet,
+			method,
 			target.String(),
-			nil,
+			payload,
 		)
 		if requestErr != nil {
-			return collect.Response{}, fmt.Errorf("create GET request: %w", requestErr)
+			return collect.Response{}, fmt.Errorf("create %s request: %w", method, requestErr)
 		}
 		request.Header = headers.Clone()
 
@@ -87,7 +114,7 @@ func (c *Client) Get(
 			break
 		}
 		if ctx.Err() != nil || attempt == c.retry {
-			return collect.Response{}, fmt.Errorf("GET %s: %w", target, err)
+			return collect.Response{}, fmt.Errorf("%s %s: %w", method, target, err)
 		}
 	}
 	defer response.Body.Close()

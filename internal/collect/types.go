@@ -22,6 +22,13 @@ type Getter interface {
 	Get(context.Context, *url.URL, http.Header) (Response, error)
 }
 
+// Poster sends one request carrying a body. JsOwl uses it only for the POST
+// probe of an interface the analysis recovered as a POST call with a JSON
+// payload; the body is always the empty JSON object.
+type Poster interface {
+	Post(context.Context, *url.URL, http.Header, []byte) (Response, error)
+}
+
 // RequestEvent describes a completed request. Size counts collected body bytes
 // for HTTP requests and decoded Network.dataReceived bytes for browser requests.
 type RequestEvent struct {
@@ -38,8 +45,9 @@ type NetworkRecord struct {
 	StatusCode   int
 	ContentType  string
 	ResourceType string
-	// Method is the observed HTTP verb; POST/PUT/PATCH matter most because
-	// JsOwl itself never sends them.
+	// Method is the observed HTTP verb. POST/PUT/PATCH matter most because a
+	// write request is only observable at runtime; JsOwl's own POST probe is
+	// restricted to the empty JSON object and never mirrors these payloads.
 	Method string
 	// InitiatorURL, Line and Column locate the script that issued the
 	// request, when the browser reported a stack.

@@ -17,6 +17,62 @@ func (f eventGetter) Get(ctx context.Context, u *url.URL, h http.Header) (collec
 	return f(ctx, u, h)
 }
 
+func TestRequestEventReportsPostMethod(t *testing.T) {
+	events := make(chan RequestEvent, 1)
+	getter := reportingGetter{sink: events, Getter: posterGetter{
+		post: func(_ context.Context, u *url.URL, _ http.Header, body []byte) (collect.Response, error) {
+			if string(body) != "{}" {
+				t.Errorf("probe body = %q, want empty JSON object", body)
+			}
+			return collect.Response{URL: u.String(), StatusCode: 201, Body: []byte("{}")}, nil
+		},
+	}}
+	target, _ := url.Parse("http://example.test/api/login")
+	if _, err := getter.Post(context.Background(), target, nil, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	event := <-events
+	if event.Method != http.MethodPost || event.URL != target.String() ||
+		!event.Success || event.StatusCode != 201 || event.Size != 2 {
+		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestRequestEventRejectsPostWithoutPoster(t *testing.T) {
+	events := make(chan RequestEvent, 1)
+	getter := reportingGetter{sink: events, Getter: eventGetter(
+		func(context.Context, *url.URL, http.Header) (collect.Response, error) {
+			return collect.Response{}, nil
+		},
+	)}
+	target, _ := url.Parse("http://example.test/api/login")
+	if _, err := getter.Post(context.Background(), target, nil, []byte("{}")); err == nil {
+		t.Fatal("Post() error = nil for a collector without POST support")
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("event reported for an unsupported POST: %+v", event)
+	default:
+	}
+}
+
+type posterGetter struct {
+	post func(context.Context, *url.URL, http.Header, []byte) (collect.Response, error)
+}
+
+func (g posterGetter) Get(context.Context, *url.URL, http.Header) (collect.Response, error) {
+	return collect.Response{}, nil
+}
+
+func (g posterGetter) Post(
+	ctx context.Context,
+	target *url.URL,
+	headers http.Header,
+	body []byte,
+) (collect.Response, error) {
+	return g.post(ctx, target, headers, body)
+}
+
 func TestRequestEventsArriveBeforeSlowConcurrentRequest(t *testing.T) {
 	blocked, release := make(chan struct{}), make(chan struct{})
 	done := make(chan struct{})
