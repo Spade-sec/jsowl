@@ -346,6 +346,104 @@ type issueSummary struct {
 	Retryable int           `json:"retryable"`
 }
 
+// completenessSummary is the report-facing view of the scan's completeness:
+// two phase verdicts plus the auditable per-resource counts, so a scan that
+// ran out of collection budget but analyzed every fetched file is never
+// mistaken for a complete scan.
+type completenessSummary struct {
+	Collection phaseSummary    `json:"collection"`
+	Analysis   phaseSummary    `json:"analysis"`
+	Coverage   coverageSummary `json:"coverage"`
+	// Status is the one-line verdict: 完整扫描, 采集不完整（已获取 JS 分析完成）,
+	// 采集不完整（部分 JS 未分析） or 分析不完整.
+	Status string `json:"status"`
+	// Complete is true only when both phases finished.
+	Complete bool `json:"complete"`
+}
+
+type phaseSummary struct {
+	Complete bool   `json:"complete"`
+	Reason   string `json:"reason,omitempty"`
+	Label    string `json:"label"`
+}
+
+type coverageSummary struct {
+	Discovered        int              `json:"discovered"`
+	Fetched           int              `json:"fetched"`
+	FetchFailed       int              `json:"fetchFailed"`
+	FetchSkipped      int              `json:"fetchSkipped"`
+	FetchNotAttempted int              `json:"fetchNotAttempted"`
+	Analyzed          int              `json:"analyzed"`
+	AnalysisFailed    int              `json:"analysisFailed"`
+	AnalysisSkipped   int              `json:"analysisSkipped"`
+	AnalysisPending   int              `json:"analysisPending"`
+	Unfinished        []unfinishedItem `json:"unfinished,omitempty"`
+	UnfinishedOmitted int              `json:"unfinishedOmitted,omitempty"`
+}
+
+type unfinishedItem struct {
+	URL    string `json:"url"`
+	Stage  string `json:"stage"`
+	State  string `json:"state"`
+	Reason string `json:"reason"`
+}
+
+// buildCompletenessSummary adapts the scan result's completeness record for
+// the report. A nil record (older results, library callers) yields nil so the
+// UI can omit the section instead of inventing a verdict.
+func buildCompletenessSummary(result *model.Result) *completenessSummary {
+	if result.Completeness == nil {
+		return nil
+	}
+	source := result.Completeness
+	summary := &completenessSummary{
+		Collection: phaseSummary{
+			Complete: source.Collection.Complete,
+			Reason:   source.Collection.Reason,
+			Label:    "网络采集",
+		},
+		Analysis: phaseSummary{
+			Complete: source.Analysis.Complete,
+			Reason:   source.Analysis.Reason,
+			Label:    "JS 本地分析",
+		},
+		Coverage: coverageSummary{
+			Discovered:        source.Coverage.Discovered,
+			Fetched:           source.Coverage.Fetched,
+			FetchFailed:       source.Coverage.FetchFailed,
+			FetchSkipped:      source.Coverage.FetchSkipped,
+			FetchNotAttempted: source.Coverage.FetchNotAttempted,
+			Analyzed:          source.Coverage.Analyzed,
+			AnalysisFailed:    source.Coverage.AnalysisFailed,
+			AnalysisSkipped:   source.Coverage.AnalysisSkipped,
+			AnalysisPending:   source.Coverage.AnalysisPending,
+			UnfinishedOmitted: source.Coverage.UnfinishedOmitted,
+		},
+	}
+	for _, item := range source.Coverage.Unfinished {
+		summary.Coverage.Unfinished = append(summary.Coverage.Unfinished, unfinishedItem{
+			URL: item.URL, Stage: item.Stage, State: item.State, Reason: item.Reason,
+		})
+	}
+	summary.Complete = summary.Collection.Complete && summary.Analysis.Complete
+	switch {
+	case !summary.Collection.Complete && summary.Analysis.Complete:
+		summary.Status = "采集不完整（已获取 JS 分析完成）"
+	case !summary.Collection.Complete && !summary.Analysis.Complete:
+		summary.Status = "采集不完整（部分已获取 JS 未分析）"
+	case summary.Collection.Complete && !summary.Analysis.Complete:
+		summary.Status = "分析不完整（已完成的结果已保留）"
+	default:
+		summary.Status = "完整扫描"
+	}
+	// A finished phase is not the same as a successful one: analysis failures
+	// must stay visible in the headline instead of reading as "all analyzed".
+	if failed := summary.Coverage.AnalysisFailed; failed > 0 {
+		summary.Status += fmt.Sprintf("，其中 %d 个 JS 分析失败", failed)
+	}
+	return summary
+}
+
 // reportSummary is embedded into the interactive report as JSON.
 type reportSummary struct {
 	Target      string `json:"target"`
@@ -361,23 +459,24 @@ type reportSummary struct {
 	BrowserNote string `json:"browserNote,omitempty"`
 	UserAgent   string `json:"userAgent"`
 
-	AttackMetrics   []metric         `json:"attackMetrics"`
-	AttackNote      string           `json:"attackNote"`
-	SeverityMetrics []severityMetric `json:"severityMetrics"`
-	FindingTotal    metric           `json:"findingTotal"`
-	Types           []countBucket    `json:"types"`
-	Domains         []domainBucket   `json:"domains"`
-	Methods         []countBucket    `json:"methods"`
-	Resources       resourceSummary  `json:"resources"`
-	Issues          issueSummary     `json:"issues"`
-	Groups          []findingGroup   `json:"groups"`
-	Key             []findingGroup   `json:"key"`
-	Priority        []priorityItem   `json:"priority"`
-	Hosts           hostSummary      `json:"hosts"`
-	Params          []string         `json:"params"`
-	GroupHits       int              `json:"groupHits"`
-	HasAIAssessment bool             `json:"hasAiAssessment"`
-	AICount         int              `json:"aiCount"`
+	AttackMetrics   []metric             `json:"attackMetrics"`
+	AttackNote      string               `json:"attackNote"`
+	SeverityMetrics []severityMetric     `json:"severityMetrics"`
+	FindingTotal    metric               `json:"findingTotal"`
+	Types           []countBucket        `json:"types"`
+	Domains         []domainBucket       `json:"domains"`
+	Methods         []countBucket        `json:"methods"`
+	Resources       resourceSummary      `json:"resources"`
+	Issues          issueSummary         `json:"issues"`
+	Completeness    *completenessSummary `json:"completeness,omitempty"`
+	Groups          []findingGroup       `json:"groups"`
+	Key             []findingGroup       `json:"key"`
+	Priority        []priorityItem       `json:"priority"`
+	Hosts           hostSummary          `json:"hosts"`
+	Params          []string             `json:"params"`
+	GroupHits       int                  `json:"groupHits"`
+	HasAIAssessment bool                 `json:"hasAiAssessment"`
+	AICount         int                  `json:"aiCount"`
 }
 
 // maxKeyFindings caps the overview list; the full set stays in the groups
@@ -454,6 +553,7 @@ func buildSummary(result *model.Result, now time.Time) reportSummary {
 	)
 	summary.Resources = resourceSummaryOf(result.Resources)
 	summary.Issues = issueSummaryOf(result.Issues)
+	summary.Completeness = buildCompletenessSummary(result)
 	summary.Key = keyFindings(groups)
 	summary.Priority = priorityList(groups)
 	summary.Params = collectParameterNames(result)
@@ -1070,11 +1170,14 @@ func issueSummaryOf(issues []model.Issue) issueSummary {
 
 // issueCodeLabels spells out the diagnostic codes the pipeline emits.
 var issueCodeLabels = map[string]string{
-	"resource_get_failed": "资源获取失败",
-	"body_truncated":      "正文被截断",
-	"js_not_saved":        "脚本未落盘",
-	"js_save_failed":      "脚本落盘失败",
-	"js_analysis_failed":  "脚本分析失败",
+	"resource_get_failed":      "资源获取失败",
+	"body_truncated":           "正文被截断",
+	"js_not_saved":             "脚本未落盘",
+	"js_save_failed":           "脚本落盘失败",
+	"js_analysis_failed":       "脚本分析失败",
+	"collect_budget_exhausted": "采集预算耗尽",
+	"post_probe_skipped":       "POST 探测未执行",
+	"route_probe_skipped":      "路由探测未执行",
 	// Host extraction diagnostics. They report a degraded extraction, never a
 	// scan finding.
 	extract.NotePSLUnavailable:   "公共后缀列表不可用",
@@ -1164,6 +1267,9 @@ func collectParameterNames(result *model.Result) []string {
 	}
 	for _, endpoint := range result.Endpoints {
 		collect(endpoint.URL)
+		for _, segment := range model.URLPathSegments(endpoint.URL) {
+			params[segment] = struct{}{}
+		}
 		for _, name := range endpoint.BodyParams {
 			params[name] = struct{}{}
 		}

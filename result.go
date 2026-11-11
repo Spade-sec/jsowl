@@ -37,6 +37,7 @@ const (
 	ParamScenarioURLQuery           = model.ParamScenarioURLQuery
 	ParamScenarioConfigObject       = model.ParamScenarioConfigObject
 	ParamScenarioRouteParam         = model.ParamScenarioRouteParam
+	ParamScenarioURLPath            = model.ParamScenarioURLPath
 )
 
 // ParamScenarioLabel renders a scenario code in its report-facing form.
@@ -47,6 +48,22 @@ type Statistics = model.Statistics
 
 // BrowserStatus describes browser usage or auto-mode degradation.
 type BrowserStatus = model.BrowserStatus
+
+// Completeness separates collection completeness from local analysis
+// completeness and carries the per-resource coverage counts. Nil on a Result
+// means the producer did not record a verdict.
+type Completeness = model.Completeness
+
+// PhaseCompleteness is one phase's completion verdict with its reason.
+type PhaseCompleteness = model.PhaseCompleteness
+
+// Coverage counts what happened to every unique JavaScript resource the scan
+// discovered; the fetch and analysis states each partition their parent
+// count exactly.
+type Coverage = model.Coverage
+
+// UnfinishedResource is one resource that did not reach a terminal state.
+type UnfinishedResource = model.UnfinishedResource
 
 // ResourceType classifies collected resources.
 type ResourceType = model.ResourceType

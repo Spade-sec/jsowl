@@ -180,6 +180,11 @@
   .pagination .page-info{font-size:12.5px;color:var(--muted)}
   .note-list{margin:6px 0 0;padding-left:18px;font-size:12.5px;color:var(--muted)}
   .note-list li{margin-bottom:4px}
+  .completeness-banner{border:1px solid var(--medium);background:var(--medium-soft);border-radius:var(--radius);padding:10px 12px;font-size:12.5px}
+  .completeness-banner.complete{border-color:var(--ok);background:var(--ok-soft)}
+  .completeness-banner .banner-title{font-weight:700;margin:0 0 4px}
+  .completeness-banner p{margin:2px 0}
+  .completeness-banner ul{margin:4px 0 0;padding-left:18px}
   .param-list{display:flex;flex-wrap:wrap;gap:6px;max-height:340px;overflow:auto}
   .param-chip{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:2px 7px}
   .link-button{background:none;border:none;color:var(--accent);padding:0;font-size:12.5px;text-decoration:underline}
@@ -304,6 +309,9 @@
 
       <!-- ======================================================= 总览 -->
       <section class="tab-panel" id="panel-overview" role="tabpanel">
+        <div class="section" id="completeness-section" hidden>
+          <div class="completeness-banner" id="completeness-banner"></div>
+        </div>
         <div class="section">
           <div class="section-head">
             <h2>攻击面指标</h2>
@@ -592,6 +600,7 @@
               <a class="btn-ghost copy-btn" href="路由报告.html">路由探测报告</a>
               <a class="btn-ghost copy-btn" href="资源报告.html">资源报告</a>
               <a class="btn-ghost copy-btn" href="主机资产报告.html">主机资产报告</a>
+              <a class="btn-ghost copy-btn" href="AI分析报告.html">AI 分析报告</a>
             </div>
           </div>
         </div>

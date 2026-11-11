@@ -1,7 +1,11 @@
 mode: auto
 
 request:
+  # 单次 HTTP 请求的上限。
   timeout: 15s
+  # 单个目标的网络采集总预算（下载、GET/POST 探测与浏览器阶段共用）。
+  # 预算耗尽后停止派发新的网络请求并保留已获取结果；已获取 JS 的本地分析
+  # 不受此预算限制，只受 Ctrl+C 或调用方取消约束。
   target_timeout: 5m
   retry: 1
   proxy: ""
@@ -41,6 +45,7 @@ browser:
   aggressive: false
   # 仅在受限容器/靶场中 Chrome 沙箱无法启动时开启；默认保持 false。
   no_sandbox: false
+  ignore_certificate_errors: false
   # 可覆盖为 collect_resource_urls.js 的绝对路径。
   collector_script: ""
   disable_injection: false
@@ -187,9 +192,12 @@ ai:
                                     # anthropic-messages / gemini-native
   # model: "glm-4-flash"
   # max_requests: 20                 # 单次扫描 AI 请求上限
+  # mode: "agent"                   # fast（默认）/ agent（扫描后分析循环）
+  # max_steps: 10                   # agent 模式循环轮数上限（默认 10）
 
 # 敏感信息规则默认由项目目录下的 config/rules.yml 提供（HaE 原生格式，
 # 修改即生效）；仓库外运行时回退到首次运行播种的 ~/.jsowl/rules.yaml，
 # 再回退到内嵌规则集。下面的 rules_file 用于改用其他规则文件，设置后
 # 以上来源都不再加载。相对路径以本配置文件所在目录为基准。
 # rules_file: ./rules.yml
+

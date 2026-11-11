@@ -3,7 +3,9 @@ package model
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -109,6 +111,7 @@ const (
 	ParamScenarioURLQuery           = "url_query"            // /api?page=1&size=10
 	ParamScenarioConfigObject       = "config_object"        // config: { timeout: 5000 }
 	ParamScenarioRouteParam         = "route_param"          // /user/:userId/profile
+	ParamScenarioURLPath            = "url_path"             // /api/ra — path segments api, ra
 )
 
 // ParamScenarioLabel maps a scenario code to its report-facing name.
@@ -132,6 +135,8 @@ func ParamScenarioLabel(code string) string {
 		return "配置对象"
 	case ParamScenarioRouteParam:
 		return "路由参数"
+	case ParamScenarioURLPath:
+		return "路径段"
 	}
 	return code
 }
@@ -156,6 +161,100 @@ func RouteParamNames(raw string) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// URLPathSegments returns the literal path segments of a URL: /api/ra yields
+// api, ra. Hash routes count too — /#/user/list yields user, list — matching
+// RouteParamNames. Segments dedupe and keep URL order.
+func URLPathSegments(raw string) []string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	paths := []string{parsed.Path}
+	if fragment := parsed.Fragment; fragment != "" {
+		// SPA hash routes carry the real path in the fragment: /#/user/list
+		// or the AngularJS hashbang #!/user/list; a query inside the
+		// fragment belongs to the fragment, not the path.
+		fragment = strings.TrimPrefix(fragment, "!")
+		if idx := strings.IndexByte(fragment, '?'); idx >= 0 {
+			fragment = fragment[:idx]
+		}
+		paths = append(paths, fragment)
+	}
+	segments := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	for _, path := range paths {
+		for _, segment := range strings.Split(path, "/") {
+			if !isPathSegmentParameter(segment) {
+				continue
+			}
+			if _, duplicate := seen[segment]; duplicate {
+				continue
+			}
+			seen[segment] = struct{}{}
+			segments = append(segments, segment)
+		}
+	}
+	return segments
+}
+
+// isPathSegmentParameter filters the segments that are positions rather than
+// parameter-like names: framework placeholders (:userId, {id}) are covered by
+// route_param, and segments carrying a dot are file names (config.json), not
+// parameters. Numeric segments stay — /order/12345 exposes a fuzzable path
+// position.
+func isPathSegmentParameter(segment string) bool {
+	return segment != "" && !strings.ContainsAny(segment, ".:{}")
+}
+
+// SeverityRank orders severities by weight: info < low < medium < high <
+// critical. Severity values are plain strings whose alphabetical order does
+// not match their weight, so any "top N by severity" cut must rank first.
+func SeverityRank(severity Severity) int {
+	switch severity {
+	case SeverityCritical:
+		return 4
+	case SeverityHigh:
+		return 3
+	case SeverityMedium:
+		return 2
+	case SeverityLow:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// SegmentEqual compares two endpoint paths ignoring surrounding slashes.
+func SegmentEqual(path, reference string) bool {
+	return strings.Trim(strings.TrimSpace(path), "/") == strings.Trim(strings.TrimSpace(reference), "/")
+}
+
+// SegmentSuffixMatch reports whether reference matches the tail of path at
+// a path-segment boundary: "/user" matches "/api/user" but not
+// "/admin/user". Query strings are ignored on both sides. Used wherever an
+// AI-claimed or user-supplied path must be validated against discovered
+// endpoints, where a raw substring check would accept hallucinations.
+func SegmentSuffixMatch(path, reference string) bool {
+	path = strings.Trim(strings.TrimSpace(path), "/")
+	reference = strings.Trim(strings.TrimSpace(reference), "/")
+	if reference == "" {
+		return false
+	}
+	if idx := strings.IndexByte(path, '?'); idx >= 0 {
+		path = path[:idx]
+	}
+	if idx := strings.IndexByte(reference, '?'); idx >= 0 {
+		reference = reference[:idx]
+	}
+	if path == reference {
+		return true
+	}
+	if !strings.HasSuffix(path, reference) {
+		return false
+	}
+	return path[len(path)-len(reference)-1] == '/'
 }
 
 // ParamHit records one parameter name extracted from source code, together
@@ -254,12 +353,13 @@ type BrowserConfig struct {
 	// collection continues with the already-rendered DOM and the requests
 	// observed so far, and the result is marked as a partial load. 0 restores
 	// the uncapped behavior (fail once the browser stage itself times out).
-	LoadTimeout      time.Duration `yaml:"load_timeout" json:"load_timeout"`
-	Timeout          time.Duration `yaml:"timeout" json:"timeout"`
-	Headless         bool          `yaml:"headless" json:"headless"`
-	NoSandbox        bool          `yaml:"no_sandbox" json:"no_sandbox"`
-	CollectorScript  string        `yaml:"collector_script" json:"collector_script"`
-	DisableInjection bool          `yaml:"disable_injection" json:"disable_injection"`
+	LoadTimeout             time.Duration `yaml:"load_timeout" json:"load_timeout"`
+	Timeout                 time.Duration `yaml:"timeout" json:"timeout"`
+	Headless                bool          `yaml:"headless" json:"headless"`
+	IgnoreCertificateErrors bool          `yaml:"ignore_certificate_errors" json:"ignore_certificate_errors"`
+	NoSandbox               bool          `yaml:"no_sandbox" json:"no_sandbox"`
+	CollectorScript         string        `yaml:"collector_script" json:"collector_script"`
+	DisableInjection        bool          `yaml:"disable_injection" json:"disable_injection"`
 	// CrawlRoutes renders each discovered framework route so the endpoints a
 	// view loads are observed too. Front-end route guards are frequently not
 	// authorization, so navigating straight to a view often renders it and
@@ -411,6 +511,37 @@ type AIConfig struct {
 	// MaxRequests caps AI calls per scan (default 20) so a large target
 	// cannot run away with the budget.
 	MaxRequests int `yaml:"max_requests" json:"max_requests"`
+	// Mode selects the analysis strategy:
+	//   fast (default) — the three one-shot enrichers, one batched call each,
+	//     run inline during pipeline finalization.
+	//   agent — a post-scan agent loop: after every collection and probe has
+	//     finished, the model iterates over the full evidence (endpoints,
+	//     findings, downloaded sources) through read-only tools and writes a
+	//     report-level supplement plus per-endpoint/per-finding verdicts.
+	Mode string `yaml:"mode" json:"mode"`
+	// MaxSteps caps the agent loop's observe→act rounds in agent mode
+	// (default 10). 0 applies the default; negative values are rejected.
+	MaxSteps int `yaml:"max_steps" json:"max_steps"`
+}
+
+// AIModeFast and AIModeAgent are the ai.mode values.
+const (
+	AIModeFast  = "fast"
+	AIModeAgent = "agent"
+)
+
+// AgentMode reports whether the AI phase should run as the post-scan agent
+// loop; an empty mode keeps the historical fast enrichers.
+func (c AIConfig) AgentMode() bool {
+	return strings.EqualFold(strings.TrimSpace(c.Mode), AIModeAgent)
+}
+
+// NormalizedMode resolves the configured mode to its canonical name.
+func (c AIConfig) NormalizedMode() string {
+	if c.AgentMode() {
+		return AIModeAgent
+	}
+	return AIModeFast
 }
 
 // Target describes one isolated scan target and its request state.
@@ -597,6 +728,65 @@ type AIReview struct {
 	// needs but the static layer could not recover — advisory, never merged
 	// into the body itself.
 	SuggestedParams []string `json:"suggested_params,omitempty"`
+	// FuzzPlans upgrades {{fuzz:...}} placeholders to typed plans: what the
+	// field likely is, how to vary it and which candidate values to try.
+	// Agent mode only; advisory — packet values stay placeholders.
+	FuzzPlans []FuzzPlan `json:"fuzz_plans,omitempty"`
+}
+
+// FuzzPlan is one typed fuzzing suggestion for one request field.
+type FuzzPlan struct {
+	// Field is the parameter key (or "url" for path/query-level plans) the
+	// plan targets.
+	Field string `json:"field"`
+	// Strategy classifies the variation: enum (fixed candidate list),
+	// id-substitute (another object's identifier), boundary (type and edge
+	// cases), format (a required shape such as a token), or a free label.
+	Strategy string `json:"strategy,omitempty"`
+	// Values lists concrete candidate values, when the plan has them.
+	Values []string `json:"values,omitempty"`
+	// Note explains the reasoning in one sentence.
+	Note string `json:"note,omitempty"`
+}
+
+// AIPriority is one entry of the agent's "test these first" queue.
+type AIPriority struct {
+	// Target identifies the item: an endpoint raw path or a finding value.
+	Target string `json:"target"`
+	// Kind says which population the target belongs to: endpoint or finding.
+	Kind string `json:"kind,omitempty"`
+	// Reason justifies the priority in one sentence.
+	Reason string `json:"reason,omitempty"`
+	// Tests names the concrete tests to run against the target.
+	Tests []string `json:"tests,omitempty"`
+}
+
+// AIAgentStats records how the post-scan agent phase ran, so a report can
+// show whether the AI supplement is complete, truncated or absent.
+type AIAgentStats struct {
+	// Status: ok (final report merged), partial (budget ran out mid-loop),
+	// or failed (the upstream never produced a usable report).
+	Status string `json:"status"`
+	// Steps counts completed loop rounds; Requests counts AI API calls spent.
+	Steps    int `json:"steps,omitempty"`
+	Requests int `json:"requests,omitempty"`
+	// Reviews, Taints and Ratings count merged items that passed validation.
+	Reviews int `json:"reviews,omitempty"`
+	Taints  int `json:"taints,omitempty"`
+	Ratings int `json:"ratings,omitempty"`
+	// Reason explains a partial/failed outcome in one sentence.
+	Reason string `json:"reason,omitempty"`
+}
+
+// AISummary is the agent's report-level supplement: an executive overview,
+// a prioritized testing queue and cross-cutting notes. Every field is
+// advisory prose; deterministic results are never rewritten from it.
+type AISummary struct {
+	Overview   string       `json:"overview,omitempty"`
+	Priorities []AIPriority `json:"priorities,omitempty"`
+	Notes      []string     `json:"notes,omitempty"`
+	// Stats records how the agent phase ran; nil when it did not run.
+	Stats *AIAgentStats `json:"stats,omitempty"`
 }
 
 // HeaderTpl is one reconstructed header line; Evidence distinguishes headers
@@ -770,6 +960,84 @@ type HostAsset struct {
 	Sources []HostEvidence `json:"sources,omitempty"`
 }
 
+// Completeness separates what the network collected from what local analysis
+// finished, so a scan whose collection budget ran out but which analyzed every
+// fetched file is never mistaken for a complete scan — nor reported as a
+// failure that lost its results. Nil on a Result means the producer predates
+// completeness tracking and the report must not invent a verdict.
+type Completeness struct {
+	// Collection reports whether network collection (downloads and probes)
+	// finished within its budget without caller cancellation.
+	Collection PhaseCompleteness `json:"collection"`
+	// Analysis reports whether every fetched JavaScript resource reached a
+	// terminal analysis state (analyzed, failed, or skipped by policy).
+	Analysis PhaseCompleteness `json:"analysis"`
+	// Coverage counts unique JavaScript resources per state. Counts refer to
+	// unique canonical URLs, never to repeated discoveries or requests; when
+	// collection is incomplete, Discovered is a lower bound.
+	Coverage Coverage `json:"coverage"`
+}
+
+// PhaseCompleteness is one phase's completion verdict. Complete=false always
+// carries a Reason; Complete=true leaves it empty.
+type PhaseCompleteness struct {
+	Complete bool   `json:"complete"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// Coverage counts what happened to every unique JavaScript resource (scripts
+// and chunks) the run discovered. The fetch states partition Discovered:
+// Fetched + FetchFailed + FetchSkipped + FetchNotAttempted = Discovered. The
+// analysis states partition Fetched: Analyzed + AnalysisFailed +
+// AnalysisSkipped + AnalysisPending = Fetched.
+type Coverage struct {
+	// Discovered is the number of unique JS resources the run discovered.
+	// A lower bound whenever collection is incomplete.
+	Discovered int `json:"discovered"`
+	// Fetched counts resources whose GET succeeded.
+	Fetched int `json:"fetched"`
+	// FetchFailed counts resources whose GET returned an error.
+	FetchFailed int `json:"fetch_failed"`
+	// FetchSkipped counts resources excluded before any request by policy:
+	// scope rules, the suffix blacklist, or the resource/depth limits.
+	FetchSkipped int `json:"fetch_skipped"`
+	// FetchNotAttempted counts discovered resources never requested because
+	// collection stopped first (budget exhausted or caller cancelled).
+	FetchNotAttempted int `json:"fetch_not_attempted"`
+	// Analyzed counts fetched resources whose extraction pass succeeded.
+	Analyzed int `json:"analyzed"`
+	// AnalysisFailed counts fetched resources whose file could not be read or
+	// analyzed. These are listed in Unfinished with the error.
+	AnalysisFailed int `json:"analysis_failed"`
+	// AnalysisSkipped counts fetched resources whose analysis the policy
+	// skipped (third-party library bundles with skip_library_bundles).
+	AnalysisSkipped int `json:"analysis_skipped"`
+	// AnalysisPending counts fetched resources never analyzed because the run
+	// was cancelled before their deferred analysis ran.
+	AnalysisPending int `json:"analysis_pending"`
+	// Unfinished lists every resource that did not reach a terminal state,
+	// with the stage and reason. Capped at MaxUnfinishedList entries.
+	Unfinished []UnfinishedResource `json:"unfinished,omitempty"`
+	// UnfinishedOmitted counts Unfinished entries beyond the cap. The counts
+	// above are always exact; only the list is truncated.
+	UnfinishedOmitted int `json:"unfinished_omitted,omitempty"`
+}
+
+// MaxUnfinishedList caps the Unfinished list so a target with thousands of
+// out-of-scope resources cannot flood the report. Counts stay exact.
+const MaxUnfinishedList = 200
+
+// UnfinishedResource is one resource that did not reach a terminal state.
+type UnfinishedResource struct {
+	URL string `json:"url"`
+	// Stage is "collect" or "analyze".
+	Stage string `json:"stage"`
+	// State is one of: fetch_failed, fetch_skipped, not_attempted,
+	// analysis_failed, analysis_pending.
+	State  string `json:"state"`
+	Reason string `json:"reason"`
+}
+
 // Result is the deterministic, serializable output of one target scan.
 type Result struct {
 	// ReportDirectory is assigned once per scan and shared by all its writers.
@@ -799,7 +1067,16 @@ type Result struct {
 	// counts into one unexplained number.
 	ScanHosts  []HostAsset `json:"scan_hosts,omitempty"`
 	Statistics Statistics  `json:"statistics"`
-	Issues     []Issue     `json:"issues"`
+	// Completeness separates collection completeness from local analysis
+	// completeness and carries per-resource coverage counts. Nil on results
+	// produced before this field existed; the report must not invent a
+	// verdict for it.
+	Completeness *Completeness `json:"completeness,omitempty"`
+	// AI is the agent's report-level supplement (ai.mode: agent only): an
+	// executive overview, a prioritized testing queue and phase statistics.
+	// Advisory prose — nothing here rewrites the deterministic results.
+	AI     *AISummary `json:"ai,omitempty"`
+	Issues []Issue    `json:"issues"`
 }
 
 type BatchItem struct {

@@ -63,6 +63,11 @@ output:
 - `browser`：使用 Rod 和本地 Chrome/Chromium 渲染页面，在网络空闲后继续等待异步 JavaScript。
 - `auto`：默认先运行快速 direct 扫描；检测到 SPA、动态 import、History 路由等信号后再启动 Rod。浏览器不可用时保留 direct 结果并记录降级原因（stderr 提示 `browser degraded`，原因记录在报告的 `browser_status` 中）。
 
+`request.timeout`（默认 `15s`）是单次 HTTP 请求的上限；`request.target_timeout`（默认 `5m`）是单个目标的**网络采集总预算**，覆盖脚本/chunk 下载、GET/POST 探测与浏览器阶段。两点语义需要注意：
+
+- 预算只约束网络采集。已获取 JS 的本地分析（正则/AST 提取、落盘文件解析）不受该预算影响，只受调用方取消（Ctrl+C 或调用方 context）约束，因此预算耗尽后所有已获取 JS 仍会分析完成。
+- 预算耗尽后停止派发新的网络请求：队列中未抓取的脚本、未探测的接口会记录为未完成（`fetch_not_attempted`、`post_probe_skipped` 等），不会重新开启无限采集。此时 Scan 返回的错误仍保留 `errors.Is(err, context.DeadlineExceeded)` 的识别能力，同时返回包含已完成结果的报告；报告 `completeness` 段分别标注“网络采集不完整 / JS 本地分析完成”。
+
 同源或显式 allowlist 的 API 使用 GET 获取并继续执行正则匹配。分析还原为 POST 的接口（`axios.post('/x', {...})`、`fetch('/x', {method:'POST', ...})`，或运行时观测到 POST）会额外收到一次 POST 探测，请求体按调用点声明的 Content-Type 构造：JSON 为空对象 `{}`，form-urlencoded 为「字段名=空值」，multipart 为带 boundary 的空字段表单，其他类型为空正文。该探测仍受作用域与授权约束，不提交真实字段值，不发送 PUT/PATCH/DELETE。页面明确引用的跨域脚本默认允许下载分析；跨域 API 默认不会探测。`Authorization`、`Cookie`、`X-API-Key` 等目标请求头仅发送到同源；跨域脚本只携带 UA、Accept 等安全协商头。
 
 未配置 User-Agent 时，每个目标随机选择一个现代桌面 UA，并在该目标的 Surf、Rod、chunk 和 API 请求中保持一致。可选保存 JS/chunk；API 响应正文永不保存。

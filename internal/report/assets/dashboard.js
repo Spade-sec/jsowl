@@ -914,7 +914,72 @@
     }
   }
 
+  // renderCompletenessBanner shows the scan completeness verdict at the top
+  // of the overview: two phase verdicts (collection vs local analysis) plus
+  // the auditable per-resource counts and the unfinished list. Counts are
+  // unique resources; when collection is incomplete the discovered count is
+  // a lower bound, never a claim about every script the site has.
+  function renderCompletenessBanner() {
+    var section = byId('completeness-section');
+    var banner = byId('completeness-banner');
+    if (!section || !banner) return;
+    var completeness = summary.completeness;
+    if (!completeness) {
+      section.hidden = true;
+      clear(banner);
+      return;
+    }
+    section.hidden = false;
+    banner.className = 'completeness-banner' + (completeness.complete ? ' complete' : '');
+    var nodes = [h('p', { class: 'banner-title', text: '扫描完整性：' + (completeness.status || '—') })];
+    var collection = completeness.collection || {};
+    var analysis = completeness.analysis || {};
+    nodes.push(h('p', {
+      text: '网络采集：' + (collection.complete ? '完成' : '不完整') +
+        (collection.reason ? '（' + collection.reason + '）' : '') +
+        '；JS 本地分析：' + (analysis.complete ? '完成' : '不完整') +
+        (analysis.reason ? '（' + analysis.reason + '）' : '')
+    }));
+    var coverage = completeness.coverage || {};
+    nodes.push(h('p', {
+      text: '唯一 JS 资源：发现 ' + (coverage.discovered || 0) +
+        '，获取成功 ' + (coverage.fetched || 0) +
+        '（分析成功 ' + (coverage.analyzed || 0) +
+        '，分析失败 ' + (coverage.analysisFailed || 0) +
+        '，策略跳过 ' + (coverage.analysisSkipped || 0) +
+        '，未分析 ' + (coverage.analysisPending || 0) + '），' +
+        '获取失败 ' + (coverage.fetchFailed || 0) +
+        '，策略跳过 ' + (coverage.fetchSkipped || 0) +
+        '，未抓取 ' + (coverage.fetchNotAttempted || 0)
+    }));
+    if (!completeness.complete) {
+      nodes.push(h('p', {
+        text: '采集不完整时“已发现数量”是下限，不代表该网站全部 JS；重复发现同一资源不重复计数。'
+      }));
+    }
+    var unfinished = coverage.unfinished || [];
+    if (unfinished.length > 0) {
+      var list = h('ul');
+      var shown = Math.min(unfinished.length, 20);
+      for (var index = 0; index < shown; index++) {
+        var item = unfinished[index];
+        list.appendChild(h('li', {
+          text: '[' + item.stage + '/' + item.state + '] ' + item.url +
+            (item.reason ? ' — ' + item.reason : '')
+        }));
+      }
+      nodes.push(list);
+      var omitted = (coverage.unfinishedOmitted || 0) + (unfinished.length - shown);
+      if (omitted > 0) {
+        nodes.push(h('p', { text: '…另有 ' + omitted + ' 条未列出（计数已包含在上面的统计中；完整列表见 扫描完整性.txt 与 report.json）。' }));
+      }
+    }
+    clear(banner);
+    nodes.forEach(function (node) { banner.appendChild(node); });
+  }
+
   function renderOverview() {
+    renderCompletenessBanner();
     renderMetricCards(byId('attack-metrics'), summary.attackMetrics || []);
     renderSeverityCards(byId('security-metrics'));
     renderHostMetrics();
@@ -1546,8 +1611,9 @@
       renderParams();
       return;
     }
-    rows.forEach(function (row) {
-      body.appendChild(h('tr', null, [
+    byId('routes-count').textContent = plural(rows.length, '条路由');
+    chunkAppend(body, rows, function (row) {
+      return h('tr', null, [
         h('td', { class: 'path-cell' }, h('code', { text: row.url })),
         h('td', { text: row.extractor }),
         h('td', null, h('span', {
@@ -1556,9 +1622,8 @@
         })),
         h('td', { class: 'source-cell' }, h('code', { text: row.source })),
         h('td', { text: row.probe })
-      ]));
+      ]);
     });
-    byId('routes-count').textContent = plural(rows.length, '条路由');
     renderParams();
   }
 
@@ -1574,8 +1639,8 @@
       container.appendChild(h('p', { class: 'empty', text: params.length === 0 ? '本次未提取到参数名' : '没有匹配的参数名' }));
       return;
     }
-    names.forEach(function (name) {
-      container.appendChild(h('code', { class: 'param-chip', text: name }));
+    chunkAppend(container, names, function (name) {
+      return h('code', { class: 'param-chip', text: name });
     });
   }
 
@@ -1660,9 +1725,9 @@
     if (rows.length === 0) {
       body.appendChild(h('tr', null, h('td', { colspan: '5', class: 'empty', text: '本次扫描没有诊断信息' })));
     }
-    rows.forEach(function (issue) {
+    chunkAppend(body, rows, function (issue) {
       var href = safeHref(issue.url);
-      body.appendChild(h('tr', null, [
+      return h('tr', null, [
         h('td', null, h('code', { text: issue.code })),
         h('td', { text: issue.stage }),
         h('td', { class: 'url-cell' }, href
@@ -1670,7 +1735,7 @@
           : h('code', { text: issue.url || '—' })),
         h('td', { text: issue.message }),
         h('td', { text: issue.retryable })
-      ]));
+      ]);
     });
     byId('issues-count').textContent = plural(rows.length, '条诊断记录');
 
@@ -1685,6 +1750,12 @@
     var notes = byId('issue-notes');
     clear(notes);
     notes.appendChild(h('li', { text: '诊断信息只记录非致命问题；出现诊断不代表扫描失败，但会影响对应资源的完整性。' }));
+    if (summary.completeness && !summary.completeness.complete) {
+      notes.appendChild(h('li', {
+        text: '扫描完整性：' + (summary.completeness.status || '不完整') +
+          '；唯一资源计数与未完成清单见总览完整性区块和 扫描完整性.txt。'
+      }));
+    }
     if (summary.browserNote) {
       notes.appendChild(h('li', { text: summary.browserNote }));
     }
@@ -1948,6 +2019,17 @@
     return null;
   }
 
+  // The print document is a second full rendering of the report. Building it
+  // at load time doubles the initial work for a view most readers never open,
+  // so it is built on demand and reused until the scope changes.
+  var printBuilt = false;
+
+  function ensurePrintDoc() {
+    if (printBuilt) return;
+    buildPrintDoc();
+    printBuilt = true;
+  }
+
   function buildPrintDoc() {
     var scope = printGroups();
     var container = clear(byId('print-doc'));
@@ -1987,6 +2069,9 @@
         h('tr', null, [h('td', { text: 'User-Agent' }), h('td', { text: text(summary.userAgent) || '未记录' })]),
         h('tr', null, [h('td', { text: '采集方式' }), h('td', { text: '静态下载 JavaScript 并做正则/AST 分析；启用浏览器阶段时叠加 CDP 运行时观测。' })]),
         h('tr', null, [h('td', { text: '浏览器阶段' }), h('td', { text: summary.browserUsed ? '已启用' : '未启用或降级' + (summary.browserNote ? '：' + summary.browserNote : '') })]),
+        h('tr', null, [h('td', { text: '扫描完整性' }), h('td', { text: summary.completeness ? (summary.completeness.status || '—') +
+          '（网络采集' + (summary.completeness.collection && summary.completeness.collection.complete ? '完成' : '不完整') +
+          '，JS 本地分析' + (summary.completeness.analysis && summary.completeness.analysis.complete ? '完成' : '不完整') + '）' : '未记录' })]),
         h('tr', null, [h('td', { text: '范围说明' }), h('td', { text: text(summary.attackNote) })])
       ]),
       printParagraph('边界说明：JsOwl 负责“采集与规则匹配”，不代替人工测试。报告中的攻击面来自自动发现，可能存在未采集到的资源与端点；发现的规则命中需要人工确认是否真实、是否可利用。本报告不构成完整的渗透测试结论。')
@@ -2227,6 +2312,56 @@
 
   // --------------------------------------------------------------- tabs
 
+  // Panels are built on first activation and then reused: re-clicking a tab
+  // used to rebuild every row, which is what made the report feel frozen on a
+  // large scan. The build is deferred one frame so the tab flips visibly
+  // before the table is populated.
+  var panelBuilt = Object.create(null);
+  var panelRenderers = {
+    endpoints: renderEndpoints,
+    hosts: renderHosts,
+    routes: renderRoutes,
+    resources: renderResources,
+    diagnostics: renderDiagnostics
+  };
+  var chunkTasks = new WeakMap();
+
+  // chunkAppend appends rows in slices across animation frames, so a table
+  // with thousands of rows never blocks one long frame. A newer render of the
+  // same container cancels the pending one instead of interleaving rows.
+  function chunkAppend(container, rows, build) {
+    var previous = chunkTasks.get(container);
+    if (previous) previous.cancelled = true;
+    var task = { cancelled: false };
+    chunkTasks.set(container, task);
+    var index = 0;
+    var CHUNK = 150;
+    function step() {
+      if (task.cancelled) return;
+      var fragment = document.createDocumentFragment();
+      var end = Math.min(rows.length, index + CHUNK);
+      while (index < end) {
+        var node = build(rows[index], index);
+        if (node) fragment.appendChild(node);
+        index++;
+      }
+      container.appendChild(fragment);
+      if (index < rows.length) requestAnimationFrame(step);
+    }
+    step();
+  }
+
+  function ensurePanel(name) {
+    var render = panelRenderers[name];
+    if (!render || panelBuilt[name]) return;
+    panelBuilt[name] = 'pending';
+    requestAnimationFrame(function () {
+      if (panelBuilt[name] !== 'pending') return;
+      render();
+      panelBuilt[name] = 'done';
+    });
+  }
+
   function activateTab(name) {
     state.tab = name;
     document.querySelectorAll('[data-tab]').forEach(function (button) {
@@ -2237,11 +2372,7 @@
     document.querySelectorAll('.tab-panel').forEach(function (panel) {
       panel.hidden = panel.id !== 'panel-' + name;
     });
-    if (name === 'endpoints') renderEndpoints();
-    if (name === 'hosts') renderHosts();
-    if (name === 'routes') renderRoutes();
-    if (name === 'resources') renderResources();
-    if (name === 'diagnostics') renderDiagnostics();
+    ensurePanel(name);
   }
 
   // --------------------------------------------------------------- init
@@ -2371,21 +2502,26 @@
     // Print
     byId('print-scope').addEventListener('change', function (event) {
       state.printScope = event.target.value;
-      buildPrintDoc();
+      // A previously built document belongs to the old scope: drop it and let
+      // the next print rebuild.
+      printBuilt = false;
     });
     byId('print-button').addEventListener('click', function () {
-      buildPrintDoc();
+      ensurePrintDoc();
       window.print();
     });
+    window.addEventListener('beforeprint', ensurePrintDoc);
 
     state.printScope = groups.length > 500 ? 'summary' : 'full';
     byId('print-scope').value = state.printScope;
-    buildPrintDoc();
-    renderTree();
-    renderOverview();
+    // The overview (charts + key findings) and the tree rail are the heaviest
+    // first-paint work; deferring them one frame keeps the page responsive as
+    // soon as it opens. Every other tab renders on first activation.
+    requestAnimationFrame(function () {
+      renderTree();
+      renderOverview();
+    });
     renderFindings();
-    renderHosts();
-    renderParams();
     activateTab('overview');
   }
 

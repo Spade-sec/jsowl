@@ -27,6 +27,8 @@ func WriteTextReports(directory string, result *model.Result) error {
 		{"internal_hosts.txt", func() []byte { return renderHostValues(result, model.HostKindInternal) }},
 		{"敏感信息.txt", func() []byte { return renderSensitive(result) }},
 		{"路由.txt", func() []byte { return renderRoutes(result) }},
+		{"扫描完整性.txt", func() []byte { return renderCompleteness(result) }},
+		{"AI分析.txt", func() []byte { return renderAI(result) }},
 	}
 	for _, file := range files {
 		path := filepath.Join(directory, file.name)
@@ -186,6 +188,114 @@ func renderSensitive(result *model.Result) []byte {
 		return append(out, []byte("（未发现敏感信息）\n")...)
 	}
 	return out
+}
+
+// renderAI writes the agent's report-level supplement (ai.mode: agent): an
+// executive overview, the prioritized testing queue and phase statistics.
+// Everything here is advisory prose; the deterministic reports above carry
+// the scan's actual findings.
+func renderAI(result *model.Result) []byte {
+	if result.AI == nil {
+		return []byte("（本次未运行 AI agent 分析；需 -ai 且 ai.mode: agent）\n")
+	}
+	var out strings.Builder
+	ai := result.AI
+	if stats := ai.Stats; stats != nil {
+		line := fmt.Sprintf("AI agent: %s（%d 轮 / %d 次请求", stats.Status, stats.Steps, stats.Requests)
+		if stats.Reviews+stats.Taints+stats.Ratings > 0 {
+			line += fmt.Sprintf("，合并 复核%d 污点%d 评级%d", stats.Reviews, stats.Taints, stats.Ratings)
+		}
+		line += "）"
+		if stats.Reason != "" {
+			line += "\n  说明: " + stats.Reason
+		}
+		out.WriteString(line + "\n\n")
+	}
+	if ai.Overview != "" {
+		out.WriteString("## 总评\n" + sanitizeText(ai.Overview) + "\n\n")
+	}
+	if len(ai.Priorities) > 0 {
+		out.WriteString("## 优先测试队列\n")
+		for i, priority := range ai.Priorities {
+			fmt.Fprintf(&out, "%d. %s", i+1, priority.Target)
+			if priority.Kind != "" {
+				out.WriteString(" [" + priority.Kind + "]")
+			}
+			out.WriteString("\n")
+			if priority.Reason != "" {
+				out.WriteString("   理由: " + sanitizeText(priority.Reason) + "\n")
+			}
+			for _, test := range priority.Tests {
+				out.WriteString("   测试: " + sanitizeText(test) + "\n")
+			}
+		}
+		out.WriteString("\n")
+	}
+	if len(ai.Notes) > 0 {
+		out.WriteString("## 横切观察\n")
+		for _, note := range ai.Notes {
+			out.WriteString("- " + sanitizeText(note) + "\n")
+		}
+		out.WriteString("\n")
+	}
+	if out.Len() == 0 {
+		return []byte("（AI agent 未产出摘要内容）\n")
+	}
+	return []byte(out.String())
+}
+
+// renderCompleteness writes the scan completeness status: whether network
+// collection and local analysis each finished, the auditable per-resource
+// counts, and every unfinished resource with its reason. Counts refer to
+// unique canonical resources; when collection is incomplete, the discovered
+// count is a lower bound, never a claim about every script the site has.
+func renderCompleteness(result *model.Result) []byte {
+	completeness := result.Completeness
+	if completeness == nil {
+		return []byte("（本次结果未记录完整性状态）\n")
+	}
+	var out strings.Builder
+	phaseLine := func(label string, phase model.PhaseCompleteness) string {
+		status := "完成"
+		if !phase.Complete {
+			status = "不完整"
+		}
+		line := label + ": " + status
+		if phase.Reason != "" {
+			line += "（" + sanitizeText(phase.Reason) + "）"
+		}
+		return line
+	}
+	out.WriteString(phaseLine("网络采集", completeness.Collection) + "\n")
+	out.WriteString(phaseLine("JS 本地分析", completeness.Analysis) + "\n\n")
+	coverage := completeness.Coverage
+	out.WriteString("统计口径：唯一资源数（按解析后 URL 去重；重复发现不重复计数）。\n")
+	if !completeness.Collection.Complete {
+		out.WriteString("注意：采集不完整时，已发现数量是下限，不代表该网站全部 JS。\n")
+	}
+	fmt.Fprintf(&out, "发现 JS: %d（获取成功 %d + 获取失败 %d + 策略跳过 %d + 未抓取 %d）\n",
+		coverage.Discovered, coverage.Fetched, coverage.FetchFailed,
+		coverage.FetchSkipped, coverage.FetchNotAttempted)
+	fmt.Fprintf(&out, "已获取 JS: %d（分析成功 %d + 分析失败 %d + 策略跳过 %d + 未分析 %d）\n",
+		coverage.Fetched, coverage.Analyzed, coverage.AnalysisFailed,
+		coverage.AnalysisSkipped, coverage.AnalysisPending)
+	if len(coverage.Unfinished) == 0 && coverage.UnfinishedOmitted == 0 {
+		out.WriteString("\n无未完成资源。\n")
+		return []byte(out.String())
+	}
+	out.WriteString("\n未完成资源:\n")
+	for _, item := range coverage.Unfinished {
+		line := "- [" + item.Stage + "/" + item.State + "] " + item.URL
+		if item.Reason != "" {
+			line += " — " + sanitizeText(item.Reason)
+		}
+		out.WriteString(line + "\n")
+	}
+	if coverage.UnfinishedOmitted > 0 {
+		fmt.Fprintf(&out, "…另有 %d 条未列出（计数已包含在上面的统计中）。\n",
+			coverage.UnfinishedOmitted)
+	}
+	return []byte(out.String())
 }
 
 // renderHostValues writes the normalized, deduplicated values of the requested

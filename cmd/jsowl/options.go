@@ -20,24 +20,26 @@ import (
 // options carries every CLI-supplied value. Zero values mean "not set"; only
 // flags the user actually passed (Changed) override the configuration layers.
 type options struct {
-	urls            []string
-	list            string
-	location        []string
-	config          string
-	output          string
-	mode            string
-	proxy           string
-	baseURL         string
-	headers         []string
-	scopes          []string
-	threads         int
-	silent          bool
-	version         bool
-	check           bool
-	autoFormFill    bool
-	maxInteractions int
-	ai              bool
-	login           bool
+	urls                    []string
+	list                    string
+	location                []string
+	config                  string
+	output                  string
+	mode                    string
+	proxy                   string
+	baseURL                 string
+	headers                 []string
+	scopes                  []string
+	threads                 int
+	silent                  bool
+	version                 bool
+	check                   bool
+	autoFormFill            bool
+	maxInteractions         int
+	ai                      bool
+	aiMode                  string
+	login                   bool
+	ignoreCertificateErrors bool
 }
 
 // register binds all flags. The declaration order is the --help order.
@@ -60,6 +62,7 @@ func (o *options) register(flags *pflag.FlagSet) {
 	flags.IntVarP(&o.threads, "threads", "t", 0, "per-target resource concurrency")
 	flags.BoolVarP(&o.silent, "silent", "s", false, "suppress successful result lines")
 	flags.BoolVarP(&o.version, "version", "v", false, "print version")
+	flags.BoolVar(&o.ignoreCertificateErrors, "ignore-certificate-errors", false, "ignore HTTPS certificate errors in the browser")
 	flags.BoolVar(&o.check, "check", false, "check config, rules, and browser")
 	flags.BoolVar(&o.autoFormFill, "aff", false,
 		"automatic form fill: fill and submit page forms AND click interactive elements at runtime (katana-style, may trigger write paths); enables browser.auto_form and browser.trigger_events together")
@@ -67,6 +70,8 @@ func (o *options) register(flags *pflag.FlagSet) {
 		"cap form submits plus event clicks per page (default 20)")
 	flags.BoolVar(&o.ai, "ai", false,
 		"enable AI-assisted analysis (needs ai.api_key in config): parameter completeness/authenticity review, unknown-taint origin inference, sensitive-finding value rating")
+	flags.StringVar(&o.aiMode, "ai-mode", "",
+		"AI analysis strategy: fast (one-shot enrichers, default) or agent (post-scan loop that re-reads endpoints, findings and downloaded JS through read-only tools before writing its report)")
 	flags.BoolVar(&o.login, "login", false,
 		"open a visible browser to log in manually first, then scan with that authenticated session (forces browser mode, serial targets; session cookies are reused across browser recycles); works with or without -u — without a target it opens a blank tab and scans the page you navigate to")
 }
@@ -74,6 +79,9 @@ func (o *options) register(flags *pflag.FlagSet) {
 // applyOverrides folds the flags the user passed into the layered
 // configuration. Flags that were not given leave the config value untouched.
 func (o *options) applyOverrides(command *cobra.Command, config *jsowl.Config) error {
+	if command.Flags().Changed("ignore-certificate-errors") {
+		config.Browser.IgnoreCertificateErrors = o.ignoreCertificateErrors
+	}
 	if command.Flags().Changed("output") {
 		config.Output.Directory = o.output
 	}
@@ -95,6 +103,9 @@ func (o *options) applyOverrides(command *cobra.Command, config *jsowl.Config) e
 	}
 	if command.Flags().Changed("ai") {
 		config.AI.Enabled = o.ai
+	}
+	if command.Flags().Changed("ai-mode") {
+		config.AI.Mode = o.aiMode
 	}
 	if command.Flags().Changed("max-interactions") {
 		config.Browser.MaxInteractions = o.maxInteractions

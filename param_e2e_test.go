@@ -70,7 +70,7 @@ fetch("/api/items?page=1&size=10");
 	// The route scenario comes from a framework route; inject one the way a
 	// static route extraction would.
 	result.Endpoints = append(result.Endpoints, Endpoint{
-		URL: result.Target + "/#/user/:userId/profile",
+		URL:       result.Target + "/#/user/:userId/profile",
 		SourceURL: scriptURL(server.URL), Type: "route",
 		Evidence: EvidenceStatic, Source: "ast",
 	})
@@ -92,6 +92,12 @@ fetch("/api/items?page=1&size=10");
 	if !seen("userId", ParamScenarioRouteParam) {
 		t.Fatalf("route_param userId missing from %+v", result.Params)
 	}
+	// 路径段: /api/login 与 /api/items 的字面段也进参数清单。
+	for _, name := range []string{"api", "login", "items"} {
+		if !seen(name, ParamScenarioURLPath) {
+			t.Fatalf("url_path %s missing from %+v", name, result.Params)
+		}
+	}
 
 	// Reports carry the scenario badges.
 	if err := WriteSplitReports(config.Output.Directory, result); err != nil {
@@ -102,7 +108,7 @@ fetch("/api/items?page=1&size=10");
 		t.Fatal(err)
 	}
 	html := string(data)
-	for _, want := range []string{"对象属性", "解构赋值", "嵌套解构", "函数参数", "变量赋值", "配置对象"} {
+	for _, want := range []string{"对象属性", "解构赋值", "嵌套解构", "函数参数", "变量赋值", "配置对象", "路径段"} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("parameter report missing badge %q", want)
 		}

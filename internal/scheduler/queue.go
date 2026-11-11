@@ -36,19 +36,37 @@ func New(maxItems, maxDepth int) *Queue {
 
 // Add appends a unique in-budget item and reports whether it was accepted.
 func (q *Queue) Add(item Item) bool {
+	return q.AddDetailed(item) == Added
+}
+
+// AddOutcome reports why an item was or was not enqueued.
+type AddOutcome int
+
+const (
+	// Added: the item was enqueued.
+	Added AddOutcome = iota
+	// Duplicate: the URL was already seen (queued, taken, or marked seen).
+	Duplicate
+	// Rejected: the item exceeded the depth or the resource limit.
+	Rejected
+)
+
+// AddDetailed is Add with a rejection reason, so callers can tell a resource
+// the queue already knows from one the limits excluded.
+func (q *Queue) AddDetailed(item Item) AddOutcome {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	if item.URL == "" || item.Depth > q.maxDepth ||
 		(q.maxItems > 0 && len(q.seen) >= q.maxItems) {
-		return false
+		return Rejected
 	}
 	if _, duplicate := q.seen[item.URL]; duplicate {
-		return false
+		return Duplicate
 	}
 	q.seen[item.URL] = struct{}{}
 	q.items = append(q.items, item)
-	return true
+	return Added
 }
 
 // MarkSeen imports canonical URLs collected by an earlier scan phase without
@@ -129,4 +147,14 @@ func (q *Queue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.items) - q.head
+}
+
+// Pending returns a copy of the queued, not-yet-taken items in insertion
+// order. The drain coordinator uses it to account for resources collection
+// stopped before dispatching.
+func (q *Queue) Pending() []Item {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	remaining := q.items[q.head:]
+	return append([]Item(nil), remaining...)
 }

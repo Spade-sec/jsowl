@@ -195,3 +195,53 @@ func TestHaERulesUnknownFieldsAreTolerated(t *testing.T) {
 		t.Fatalf("lenient decode failed: %+v", rules)
 	}
 }
+
+func TestAIConfigValidateMode(t *testing.T) {
+	base := DefaultConfig()
+	base.AI.Enabled = true
+	base.AI.APIKey = "key"
+	base.AI.BaseURL = "https://upstream.example"
+
+	valid := []string{"", "fast", "agent", "Fast", " AGENT "}
+	for _, mode := range valid {
+		cfg := base
+		cfg.AI.Mode = mode
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("mode %q rejected: %v", mode, err)
+		}
+	}
+	for _, mode := range []string{"deep", "auto", "agent-mode"} {
+		cfg := base
+		cfg.AI.Mode = mode
+		if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ai.mode") {
+			t.Fatalf("mode %q accepted: %v", mode, err)
+		}
+	}
+	cfg := base
+	cfg.AI.MaxSteps = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_steps") {
+		t.Fatalf("negative max_steps accepted: %v", err)
+	}
+}
+
+func TestAIConfigModePredicates(t *testing.T) {
+	cases := map[string]struct {
+		agent      bool
+		normalized string
+	}{
+		"":        {false, AIModeFast},
+		"fast":    {false, AIModeFast},
+		"agent":   {true, AIModeAgent},
+		" Agent ": {true, AIModeAgent},
+		"invalid": {false, AIModeFast},
+	}
+	for mode, want := range cases {
+		cfg := AIConfig{Mode: mode}
+		if cfg.AgentMode() != want.agent {
+			t.Fatalf("AgentMode(%q) = %v", mode, cfg.AgentMode())
+		}
+		if cfg.NormalizedMode() != want.normalized {
+			t.Fatalf("NormalizedMode(%q) = %q", mode, cfg.NormalizedMode())
+		}
+	}
+}

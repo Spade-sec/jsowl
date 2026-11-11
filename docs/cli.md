@@ -46,6 +46,7 @@ jsowl -h
 | `--aff` | 一次开启自动填表提交与运行时事件点击（automatic form fill，见[配置指南](configuration.md)） |
 | `--max-interactions` | 单页渲染的填表提交 + 事件点击总次数上限（默认 20） |
 | `--ai` | 开启 AI 辅助分析，需在配置中设置 `ai.api_key` 与 `ai.base_url` |
+| `--ai-mode` | AI 分析策略：`fast`（默认，一次性增强器）或 `agent`（扫描结束后的分析循环，见下文） |
 | `--login` | 先打开可见浏览器手动登录，再携带该会话完成扫描（可带 `-u`，也可不带） |
 
 ## 本地 JS 分析（`--location`）
@@ -82,7 +83,7 @@ jsowl --login                              # 打开空白浏览器，登录并�
 
 ## AI 辅助分析（`--ai`）
 
-开启后由大模型对扫描结果做三类增强：参数完整性与真实性复核、未知污点来源推断、敏感发现价值评级。需在配置中提供：
+开启后由大模型对扫描结果做增强。需在配置中提供：
 
 ```yaml
 ai:
@@ -90,9 +91,24 @@ ai:
   base_url: "https://open.bigmodel.cn/api/paas/v4"
   model: "glm-4-flash"
   max_requests: 20
+  mode: "fast"       # fast（默认）/ agent
+  max_steps: 10      # agent 模式循环轮数上限
 ```
 
 支持 `openai-chat`、`openai-responses`、`anthropic-messages`、`gemini-native` 四种接口格式，通过 `ai.format` 指定。单次扫描 AI 请求上限由 `max_requests` 控制。
+
+两种分析策略由 `ai.mode`（或 `--ai-mode`）选择：
+
+**`fast`（默认）**：流水线收尾时三类一次性增强器各做一次批量调用——接口请求包的参数完整性与真实性复核、未知污点来源推断、敏感发现价值评级。结论只写入建议字段：请求包复核与 fuzz 计划挂 `Template.AI`，污点只把 `Kind=unknown` 升级为有依据的来源（猜出的上游必须真实存在于已发现接口中），发现评级挂 `Finding.AI`。字面量值与 AST 还原的参数键永远不会被改写。
+
+**`agent`**：扫描全部结束（采集、探测、分析、报告落盘）后启动一个分析循环。模型通过五个只读工具在完整证据上迭代——`list_endpoints`、`get_endpoint`、`get_findings`、`get_context`（读取已持久化的源码片段）、`search_code`（正则搜索已下载的 JS）——直到给出最终报告：逐接口复核与 fuzz 计划、污点收敛、发现评级，外加报告级摘要 `ai`（总评、优先测试队列、横切观察）。约束与 fast 相同：所有结论都是建议层，幻觉引用（不存在的接口/发现/上游）在合并时被丢弃。
+
+agent 模式的边界：
+
+- 工具只读本地证据（扫描结果 + `download_js` 落盘的源码），不产生任何对目标的请求；AI 上游是唯一被访问的外部端点。目标 JS 里植入的提示注入文本被视为数据而非指令。
+- 循环受 `ai.max_steps`（默认 10）与 `ai.max_requests` 双重约束；预算耗尽或上游故障时报告照常产出，`ai.stats.status` 标记 `ok` / `partial` / `failed` 及原因，失败同时记入 `issues`。
+- 每一步的模型输出与工具结果写入报告目录的 `ai_transcript.jsonl`，报告中的每条 AI 结论都可溯源。
+- 文本报告新增 `AI分析.txt`；JSON 报告在 `ai` 字段携带摘要。`--location` 本地分析不接入 AI（与 fast 模式一致）。
 
 ## 配置加载顺序
 
@@ -132,3 +148,17 @@ browser:
 队列满时等待，不丢弃请求记录；退出前排空队列。并发请求按完成事件的入队顺序输出，不保证与发起顺序相同。浏览器加载与之后的 HTTP 采集是不同请求，同一链接可能出现多次。扫描结束后不再重复打印资源清单。
 
 使用 `--silent` 可关闭请求行输出，但报告写入和 stderr 错误输出不受影响。
+
+## 退出状态与部分扫描
+
+- 退出码 `0`：所有目标完整扫描、报告全部写入。
+- 退出码 `1`：存在失败目标、报告写入失败或**部分扫描**。
+
+网络采集预算（`request.target_timeout`）耗尽或用户 Ctrl+C 时，扫描按"部分扫描"结束：stderr 打印错误与完整性提示（如 `采集不完整，已获取 JS 分析完成`），已完成的结果仍写入报告目录，报告 `completeness` 段分别标注网络采集与 JS 本地分析两个阶段的完成状态。部分扫描不会无提示地以退出码 `0` 结束。
+
+浏览器遇到不受信任、自签名或过期的 HTTPS 证书时，可显式使用
+`jsowl -u https://example.test -m browser --ignore-certificate-errors`。
+对应配置为 `browser.ignore_certificate_errors: true`，默认 false。
+此开关影响浏览器采集及 `--login` 浏览器（含重启后的会话）；
+不修改系统证书信任，也不改变 direct HTTP 客户端的 TLS 设置。
+命令行 `--ignore-certificate-errors=false` 可覆盖配置并恢复浏览器校验。

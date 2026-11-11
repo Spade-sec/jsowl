@@ -373,6 +373,10 @@ func runScans(
 					item.Target.URL,
 				)
 			}
+			if notice := completenessNotice(item.Result.Completeness); notice != "" {
+				// A partial scan must never pass silently as a complete one.
+				_, _ = fmt.Fprintf(deps.stderr, "%s: %s\n", item.Target.URL, notice)
+			}
 			if reportErr := writeReports(deps, config, item.Target, item.Result); reportErr != nil {
 				failures++
 				_, _ = fmt.Fprintf(deps.stderr, "%s: %v\n", item.Target.URL, reportErr)
@@ -383,6 +387,12 @@ func runScans(
 			_, _ = fmt.Fprintf(deps.stderr, "%s: %v\n", item.Target.URL, item.Err)
 			continue
 		}
+		if incompleteScan(item.Result) {
+			// Defensive: the pipeline returns an error with every incomplete
+			// scan; a result that somehow reports incompleteness without one
+			// still counts as a failure so the exit status stays honest.
+			failures++
+		}
 	}
 	close(events)
 	<-printerDone
@@ -390,6 +400,34 @@ func runScans(
 		return fmt.Errorf("%d target or report task(s) failed", failures)
 	}
 	return nil
+}
+
+// completenessNotice renders the one-line completeness status a partial scan
+// must show. A nil completeness means the producer did not record one; the
+// report stays silent about it instead of inventing a verdict.
+func completenessNotice(completeness *model.Completeness) string {
+	if completeness == nil {
+		return ""
+	}
+	collection, analysis := completeness.Collection, completeness.Analysis
+	switch {
+	case !collection.Complete && analysis.Complete:
+		return "采集不完整，已获取 JS 分析完成（详见报告 completeness 段与 issues）"
+	case !collection.Complete && !analysis.Complete:
+		return "采集不完整，且部分已获取 JS 未完成分析"
+	case collection.Complete && !analysis.Complete:
+		return "JS 分析不完整，已完成的结果已保留"
+	}
+	return ""
+}
+
+// incompleteScan reports whether a result declares an incomplete phase.
+func incompleteScan(result *jsowl.Result) bool {
+	if result == nil || result.Completeness == nil {
+		return false
+	}
+	return !result.Completeness.Collection.Complete ||
+		!result.Completeness.Analysis.Complete
 }
 
 // validateLocalOptions rejects scan flags that cannot apply to a local
@@ -440,6 +478,9 @@ func runLocalScans(
 			failures++
 			_, _ = fmt.Fprintf(deps.stderr, "%s: %v\n", location, reportErr)
 			continue
+		}
+		if notice := completenessNotice(result.Completeness); notice != "" {
+			_, _ = fmt.Fprintf(deps.stderr, "%s: %s\n", location, notice)
 		}
 		if !silent {
 			_, _ = fmt.Fprintf(

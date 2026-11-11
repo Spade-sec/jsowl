@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/youmulijiang/jsowl/internal/analyze"
 	"github.com/youmulijiang/jsowl/internal/collect"
@@ -43,6 +44,14 @@ type Options struct {
 	// its own GOMAXPROCS-sized limiter; a Scanner injects one shared instance
 	// so a batch scan cannot multiply analysis concurrency by target count.
 	AnalysisLimiter *Limiter
+	// NetworkContext bounds network collection and probing (downloads, GET
+	// probes, POST probes, route probes) for this pipeline's runs. It is the
+	// per-target collection budget (request.target_timeout), separate from the
+	// context passed to Run*/RunLocal: that one stands for the caller's
+	// cancellation and deadline and additionally bounds local analysis of
+	// already-fetched JavaScript. Nil makes the run context bound network work
+	// too, which is the legacy single-budget behavior.
+	NetworkContext context.Context
 }
 
 // Pipeline recursively collects and analyzes one target within configured bounds.
@@ -56,6 +65,13 @@ type Pipeline struct {
 	// afterwards, so every analysis goroutine shares one instance and one
 	// Public Suffix List.
 	hostExtractor *extract.Extractor
+	// coverage tracks every unique JavaScript resource the pipeline's runs
+	// discovered and what happened to it. It deliberately outlives one
+	// RunDetailed call: auto mode runs a second (browser) pass on the same
+	// pipeline, and the same resource observed by both passes must count
+	// once. RunDetailed calls on one pipeline are sequential; Scanner creates
+	// one pipeline per target, so the tracker never mixes targets.
+	coverage *coverageTracker
 }
 
 // Seed describes one browser-observed URL to feed into the shared pipeline.
@@ -93,6 +109,10 @@ type outcome struct {
 	issues []model.Issue
 	// vendor marks the body as a third-party library bundle.
 	vendor bool
+	// vendorSkipped records that the library-bundle policy excluded the
+	// fetched body from analysis. The resource is still reported; the
+	// coverage tracker labels its analysis as skipped by policy.
+	vendorSkipped bool
 }
 
 // runState carries the mutable state shared by the collection drains and the
@@ -143,6 +163,211 @@ type runState struct {
 	// localIssueSeen deduplicates per-reference local diagnostics, such as an
 	// unresolved relative API mentioned by the same bundle more than once.
 	localIssueSeen map[string]struct{}
+	// networkCtx bounds network collection and probing for this run: the
+	// per-target budget (request.target_timeout). Local analysis of fetched
+	// JavaScript is bound by the run context instead.
+	networkCtx context.Context
+	// started is this run's wall-clock origin, used to report how long a
+	// phase ran before it was stopped.
+	started time.Time
+	// userErr is the caller-context error (cancellation or the caller's own
+	// deadline), set the first time the run observes it. It must always win
+	// over the collection budget: the caller decides when a scan stops.
+	userErr error
+	// userErrPhase records where the caller cancellation was observed
+	// ("collect" or "analyze") so the completeness verdict can tell a
+	// collection cut short from an analysis cut short.
+	userErrPhase string
+	// budgetErr is the collection-budget error (networkCtx expired), set the
+	// first time the run observes it. When set, no new network work is
+	// dispatched and discovered-but-unfetched resources are recorded.
+	budgetErr error
+	// targetTimeout mirrors request.target_timeout for error messages.
+	targetTimeout time.Duration
+	// coverage is the pipeline-level per-resource tracker shared by every
+	// phase of this target's scan.
+	coverage *coverageTracker
+	// previouslyHandled lists canonical URLs an earlier scan phase already
+	// fetched and analyzed (the previouslySeen list). A queue rejection for
+	// one of them is a dedup, not a limit.
+	previouslyHandled map[string]struct{}
+	// collectionDone records that the collection queue drained cleanly within
+	// budget at least once, so a later cancellation during analysis does not
+	// retroactively mark collection incomplete.
+	collectionDone bool
+}
+
+// observeCallerContext records the caller-context error the first time it
+// fires. The caller's cancellation and deadline always outrank the collection
+// budget: once it fires, no further network dispatch or analysis is started.
+func (state *runState) observeCallerContext(err error, phase string) {
+	if err == nil || state.userErr != nil {
+		return
+	}
+	state.userErr = err
+	state.userErrPhase = phase
+}
+
+// observeBudgetExhausted records the first collection-budget error. From then
+// on the run stops dispatching network work but keeps merging outcomes and
+// analyzing everything already fetched.
+func (state *runState) observeBudgetExhausted(err error) {
+	if err == nil || state.budgetErr != nil {
+		return
+	}
+	state.budgetErr = err
+	state.result.Issues = append(state.result.Issues, model.Issue{
+		Code: "collect_budget_exhausted", Stage: "collect",
+		URL: state.result.Target,
+		Message: "网络采集预算 request.target_timeout 已耗尽，停止派发新的网络请求；" +
+			"已获取的资源与结果全部保留，已获取 JS 继续本地分析",
+	})
+}
+
+// isContextError reports whether the error is a context cancellation or
+// deadline, keeping errors.Is recognition intact for callers.
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
+
+// wrapScanError annotates a context-caused stop with the phase, elapsed time
+// and configured limit, preserving errors.Is recognition of
+// context.Canceled/context.DeadlineExceeded. Non-context errors pass through.
+func (state *runState) wrapScanError(err error) error {
+	if err == nil || !isContextError(err) {
+		return err
+	}
+	elapsed := time.Since(state.started).Round(time.Millisecond)
+	limit := state.targetTimeoutLimit()
+	if state.budgetErr != nil && errors.Is(err, state.budgetErr) &&
+		state.userErr == nil {
+		return fmt.Errorf(
+			"collection budget (request.target_timeout=%s) exhausted after %s; "+
+				"results fetched so far were kept: %w", limit, elapsed, err,
+		)
+	}
+	phase := state.userErrPhase
+	if phase == "" {
+		phase = "run"
+	}
+	return fmt.Errorf(
+		"scan stopped by caller context during %s after %s: %w", phase, elapsed, err,
+	)
+}
+
+// targetTimeoutLimit reports the configured per-target collection budget for
+// error messages.
+func (state *runState) targetTimeoutLimit() time.Duration {
+	if limit := state.targetTimeout; limit > 0 {
+		return limit
+	}
+	return 0
+}
+
+// markCollectionDone records that a collection drain finished with neither the
+// caller nor the budget stopping it, so a cancellation that happens later,
+// during deferred analysis, does not retroactively mark collection incomplete.
+func (state *runState) markCollectionDone() {
+	if state.userErr == nil && state.budgetErr == nil {
+		state.collectionDone = true
+	}
+}
+
+// dispatchStopReason explains why queued resources were never requested.
+func (state *runState) dispatchStopReason() string {
+	if state.userErr != nil {
+		return "调用方取消，未派发请求"
+	}
+	return "采集预算耗尽，未派发请求"
+}
+
+// noteQueueOutcome records the coverage consequence of one queue decision for
+// a script or chunk. An enqueued URL is tracked as discovered — the drain
+// marks its later states; a rejection is a policy skip; a duplicate is either
+// work an earlier phase already handled (a caller-supplied seen list) or a
+// resource this run already discovered.
+func noteQueueOutcome(
+	tracker *coverageTracker,
+	handled map[string]struct{},
+	canonical string,
+	outcome scheduler.AddOutcome,
+) {
+	switch outcome {
+	case scheduler.Added:
+		tracker.discovered(canonical)
+	case scheduler.Rejected:
+		tracker.fetchSkipped(canonical, "达到资源或深度上限，未加入采集队列")
+	case scheduler.Duplicate:
+		if _, wasHandled := handled[canonical]; wasHandled {
+			tracker.fetched(canonical)
+			tracker.analyzed(canonical)
+			return
+		}
+		tracker.discovered(canonical)
+	}
+}
+
+// noteQueueOutcome records the queue decision for this run's coverage state.
+func (state *runState) noteQueueOutcome(canonical string, outcome scheduler.AddOutcome) {
+	noteQueueOutcome(state.coverage, state.previouslyHandled, canonical, outcome)
+}
+
+// buildCompleteness derives the report's completeness verdict and coverage
+// counts from the run state. It is called once, at the end of a run, after
+// every resource has reached a terminal state.
+func (state *runState) buildCompleteness() *model.Completeness {
+	coverage := state.coverage.snapshot()
+	// A cancellation during deferred analysis does not retract a collection
+	// phase that had already finished cleanly; a cancellation or budget
+	// expiry during collection or probing does.
+	collectionComplete := state.budgetErr == nil &&
+		(state.userErr == nil ||
+			(state.collectionDone && state.userErrPhase == "analyze"))
+	completeness := &model.Completeness{
+		Coverage: coverage,
+		Collection: model.PhaseCompleteness{
+			Complete: collectionComplete,
+		},
+		Analysis: model.PhaseCompleteness{
+			Complete: coverage.AnalysisPending == 0,
+		},
+	}
+	if !completeness.Collection.Complete {
+		reason := fmt.Sprintf(
+			"网络采集预算 request.target_timeout=%s 已耗尽（采集阶段运行 %s）",
+			state.targetTimeout, time.Since(state.started).Round(time.Millisecond),
+		)
+		if state.userErr != nil {
+			reason = fmt.Sprintf(
+				"调用方在%s阶段取消（已运行 %s）",
+				phaseLabel(state.userErrPhase),
+				time.Since(state.started).Round(time.Millisecond),
+			)
+		}
+		if coverage.FetchNotAttempted > 0 {
+			reason += fmt.Sprintf("，%d 个已发现 JS 未抓取", coverage.FetchNotAttempted)
+		}
+		completeness.Collection.Reason = reason
+	}
+	if !completeness.Analysis.Complete {
+		completeness.Analysis.Reason = fmt.Sprintf(
+			"%d 个已获取 JS 因调用方取消未完成分析", coverage.AnalysisPending,
+		)
+	}
+	return completeness
+}
+
+// phaseLabel renders a run phase for completeness reasons.
+func phaseLabel(phase string) string {
+	switch phase {
+	case "analyze":
+		return "分析"
+	case "probe":
+		return "接口探测"
+	default:
+		return "采集"
+	}
 }
 
 // emitProbe publishes one completed API probe without ever blocking the scan:
@@ -162,9 +387,12 @@ func (state *runState) emitProbe(event model.ProbeEvent) {
 // analysis pass that runs after collection completes. Fetch-first mode
 // persists the body to disk first and analyzes from the saved file; when the
 // save is skipped or fails (truncated body, storage error) the in-memory
-// body is carried as a fallback so no resource is ever dropped.
+// body is carried as a fallback so no resource is ever dropped. key is the
+// canonical URL the coverage tracker uses for the resource, which stays the
+// queue's URL even when the response was served after a redirect.
 type deferredJS struct {
 	source *url.URL
+	key    string
 	path   string
 	body   []byte
 	depth  int
@@ -181,6 +409,7 @@ func New(options Options) *Pipeline {
 		options:       options,
 		limiter:       limiter,
 		hostExtractor: extract.NewExtractor(options.Config.Hosts),
+		coverage:      newCoverageTracker(),
 	}
 }
 
@@ -587,12 +816,26 @@ func (p *Pipeline) RunLocal(
 		sourceSeen:      make(map[string]struct{}),
 		sourceMapSeen:   make(map[string]struct{}),
 		localIssueSeen:  make(map[string]struct{}),
+		networkCtx:      p.options.NetworkContext,
+		started:         time.Now(),
+		targetTimeout:   p.options.Config.Request.TargetTimeout,
+		coverage:        p.coverage,
+	}
+	if state.networkCtx == nil {
+		state.networkCtx = ctx
 	}
 
+	// Every file the caller handed over is registered as discovered and
+	// fetched BEFORE analysis starts, so a cancellation mid-run cannot make
+	// the not-yet-processed files vanish from the coverage counts — they
+	// surface as analysis-pending instead. Files the caller could not read
+	// never reach this list and surface as input diagnostics instead.
+	type localEntry struct {
+		file   LocalFile
+		source *url.URL
+	}
+	entries := make([]localEntry, 0, len(input.Files))
 	for _, file := range input.Files {
-		if err := ctx.Err(); err != nil {
-			return result, spa, err
-		}
 		source, parseErr := url.Parse(file.URL)
 		if parseErr != nil {
 			result.Issues = append(result.Issues, model.Issue{
@@ -601,6 +844,18 @@ func (p *Pipeline) RunLocal(
 			})
 			continue
 		}
+		entries = append(entries, localEntry{file: file, source: source})
+		state.coverage.discovered(source.String())
+		state.coverage.fetched(source.String())
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			// The caller cancelled: keep the files already analyzed, record
+			// the stop, and let the tail of the run wrap the error.
+			state.observeCallerContext(err, "analyze")
+			break
+		}
+		file, source := entry.file, entry.source
 		vendor := discover.IsThirdPartyBundle(file.Body)
 		resource := model.Resource{
 			URL:         source.String(),
@@ -612,14 +867,20 @@ func (p *Pipeline) RunLocal(
 		if vendor && p.options.Config.Scope.SkipLibraryBundles {
 			// The license banner identifies a third-party library. The file is
 			// still reported as a resource, exactly like the live pipeline.
+			state.coverage.analysisSkipped(
+				source.String(), "skip_library_bundles 供应商库跳过策略",
+			)
 			continue
 		}
 		analysis := p.analyzeSource(source, file.Body)
-		analysis.item = deferredJS{source: source}
+		analysis.item = deferredJS{source: source, key: source.String()}
 		analysis.vendor = vendor
 		p.absorbLocalSourceMap(&analysis, source, file.Body, input.ReadSourceMap, state)
 		p.mergeDeferred(state, analysis)
 	}
+	// Every file handed to the run was read and dispatched to analysis (or
+	// skipped by policy); only the caller can stop this phase.
+	state.markCollectionDone()
 
 	// A .map the user pointed at is parsed as a source map, never as
 	// JavaScript text. Its recovered originals go through the same candidate
@@ -649,7 +910,7 @@ func (p *Pipeline) RunLocal(
 	// more probes; in an unrooted local run it adds static candidates instead.
 	for {
 		if err := p.drain(ctx, state, headers, nil); err != nil {
-			return result, spa, err
+			return result, spa, state.wrapScanError(err)
 		}
 		if state.localUnrooted {
 			if !p.exploreLocalBasePaths(state) {
@@ -672,6 +933,15 @@ func (p *Pipeline) RunLocal(
 		state.recordHostNotes(state.hosts.Notes())
 	}
 	finalize(result, p.hostExtractor)
+	result.Completeness = state.buildCompleteness()
+	if state.userErr != nil {
+		return result, spa, state.wrapScanError(state.userErr)
+	}
+	if state.budgetErr != nil {
+		// The probe budget ran out mid-run: the error keeps its context
+		// identity and the report records the unprobed endpoints.
+		return result, spa, state.wrapScanError(state.budgetErr)
+	}
 	return result, spa, nil
 }
 
@@ -855,6 +1125,13 @@ func (p *Pipeline) RunDetailed(
 		URL: scope.Canonical(root), Kind: model.ResourceTypeDocument,
 	})
 	queue.MarkSeen(previouslySeen)
+	// Runtime resources an earlier scan phase already fetched are accounted
+	// for by the pipeline-level coverage tracker; the set below only covers
+	// callers that hand the pipeline a seen list without a prior pass.
+	previouslyHandled := make(map[string]struct{}, len(previouslySeen))
+	for _, raw := range previouslySeen {
+		previouslyHandled[raw] = struct{}{}
+	}
 	// A runtime route that carries a fragment proves the app is a hash-mode
 	// router; static routes are then reported in the same "/#/x" form.
 	var spa discover.SPAEvidence
@@ -862,6 +1139,16 @@ func (p *Pipeline) RunDetailed(
 		seedURL, parseErr := url.Parse(seed.URL)
 		if parseErr != nil {
 			continue
+		}
+		if isJavaScriptKind(seed.Kind) {
+			seedCanonical := scope.Canonical(seedURL)
+			switch {
+			case targetScope.IsSuffixBlocked(seedURL):
+				p.coverage.fetchSkipped(seedCanonical, "后缀黑名单 (suffix_blacklist)")
+			case !(seed.Kind == model.ResourceTypeScript &&
+				targetScope.CanFetchScript(seedURL)):
+				p.coverage.fetchSkipped(seedCanonical, "作用域策略不允许抓取该脚本")
+			}
 		}
 		if targetScope.IsSuffixBlocked(seedURL) {
 			continue
@@ -915,12 +1202,19 @@ func (p *Pipeline) RunDetailed(
 		if !allowed {
 			continue
 		}
-		queue.Add(scheduler.Item{
+		addOutcome := queue.AddDetailed(scheduler.Item{
 			URL:       scope.Canonical(seedURL),
 			Kind:      seed.Kind,
 			SourceURL: scope.Canonical(root),
 			Depth:     1,
 		})
+		// Only scripts and chunks belong in the JS coverage counts; an
+		// authorized API seed is a probe, not a JS resource, and would
+		// otherwise be reported as an unfetched script forever.
+		if isJavaScriptKind(seed.Kind) {
+			noteQueueOutcome(p.coverage, previouslyHandled,
+				scope.Canonical(seedURL), addOutcome)
+		}
 		if seed.Kind == model.ResourceTypeAPI {
 			canonical := scope.Canonical(seedURL)
 			if index, exists := endpointIndex[canonical]; exists {
@@ -938,58 +1232,84 @@ func (p *Pipeline) RunDetailed(
 	}
 
 	state := &runState{
-		result:          result,
-		queue:           queue,
-		endpointIndex:   endpointIndex,
-		findingSeen:     make(map[string]struct{}),
-		paramSeen:       make(map[string]struct{}),
-		prefixEligible:  make(map[string]struct{}),
-		reportDirectory: reportDirectory,
-		hosts:           extract.NewAggregator(p.hostExtractor, model.HostOriginContent),
-		spa:             &spa,
-		deferJS:         p.options.Config.Output.DownloadJS,
-		targetScope:     targetScope,
-		root:            root,
-		resolutionBase:  resolutionBase,
-		probeEvents:     p.options.ProbeEvents,
+		result:            result,
+		queue:             queue,
+		endpointIndex:     endpointIndex,
+		findingSeen:       make(map[string]struct{}),
+		paramSeen:         make(map[string]struct{}),
+		prefixEligible:    make(map[string]struct{}),
+		reportDirectory:   reportDirectory,
+		hosts:             extract.NewAggregator(p.hostExtractor, model.HostOriginContent),
+		spa:               &spa,
+		deferJS:           p.options.Config.Output.DownloadJS,
+		targetScope:       targetScope,
+		root:              root,
+		resolutionBase:    resolutionBase,
+		probeEvents:       p.options.ProbeEvents,
+		networkCtx:        p.options.NetworkContext,
+		started:           time.Now(),
+		targetTimeout:     p.options.Config.Request.TargetTimeout,
+		coverage:          p.coverage,
+		previouslyHandled: previouslyHandled,
+	}
+	if state.networkCtx == nil {
+		// Legacy single-budget behavior: the run context bounds network work
+		// as well as analysis.
+		state.networkCtx = ctx
 	}
 	if err := p.drain(ctx, state, headers, entry); err != nil {
-		return result, spa, err
+		return result, spa, state.wrapScanError(err)
 	}
+	state.markCollectionDone()
 	// Fetch-first mode: every script and chunk has been downloaded (and saved)
 	// before the regex engine and AST extractor run over the saved files.
-	// Endpoint candidates discovered here may enqueue fresh API probes, so the
-	// queue is drained again until nothing new is pending. The loop also
-	// re-runs once all declared prefixes are known, so the automatic prefix
-	// joining does not depend on the order files were analyzed in.
+	// Endpoint candidates and fresh scripts discovered here enqueue new queue
+	// work, so the loop keeps draining the queue and analyzing the resulting
+	// pending files until both are exhausted — regardless of whether any
+	// declared prefix applies. The prefix pass is idempotent and only reports
+	// work it newly enqueued, so it can never be the reason the queue drains.
+	//
+	// The analysis context is the caller's context, not the collection
+	// budget: once the network budget expires the run keeps analyzing every
+	// fetched file, while a caller cancellation stops new analysis but keeps
+	// every already-finished result.
 	for {
-		for len(state.pending) > 0 {
-			if err := ctx.Err(); err != nil {
-				return result, spa, err
-			}
+		for len(state.pending) > 0 && state.userErr == nil {
 			batch := state.pending
 			state.pending = nil
-			analyses, err := p.computeBatch(ctx, batch, state.reportDirectory)
-			if err != nil {
-				return result, spa, err
-			}
+			// A batch interrupted by cancellation still merges every analysis
+			// that finished; only the unfinished ones are reported as such.
+			analyses := p.computeBatch(ctx, batch, state)
+			state.observeCallerContext(ctx.Err(), "analyze")
 			for _, analysis := range analyses {
 				p.mergeDeferred(state, analysis)
 			}
-			if err := p.drain(ctx, state, headers, entry); err != nil {
-				return result, spa, err
-			}
+		}
+		if state.userErr != nil {
+			// The caller cancelled: stop starting new analysis here. The tail
+			// of the run records unfinished work and returns the wrapped
+			// context error together with the completed results.
+			break
 		}
 		// Every prefix declared by the target's JavaScript is known once all
 		// deferred files have been analyzed. Apply them to every recorded
 		// reference here: a reference processed before its declaring file was
 		// analyzed, or found only by the regex rules, must still be tried
-		// under the prefixes. The pass is idempotent.
-		if !p.exploreAllBasePaths(state) {
+		// under the prefixes.
+		prefixesAdded := p.exploreAllBasePaths(state)
+		if state.queue.Len() == 0 && !prefixesAdded {
 			break
 		}
 		if err := p.drain(ctx, state, headers, entry); err != nil {
-			return result, spa, err
+			return result, spa, state.wrapScanError(err)
+		}
+		if state.budgetErr != nil && len(state.pending) == 0 {
+			// Successful in-flight downloads may have added deferred JS
+			// while the budget expired. Process that batch before stopping.
+			// The remaining queue holds resources no request can fetch
+			// anymore; drain already recorded them, and further rounds would
+			// spin without making progress.
+			break
 		}
 	}
 
@@ -998,7 +1318,7 @@ func (p *Pipeline) RunDetailed(
 	// after analysis so the method and content type are final.
 	p.probePostEndpoints(ctx, state, headers, previouslySeen)
 	if p.options.Config.Scope.ProbeRoutes {
-		p.probeRoutes(ctx, result, headers, root)
+		p.probeRoutes(ctx, state, headers, root)
 	}
 	p.applyRequestTemplates(result)
 	// Optional AI taint refinement point: deterministic kernel annotations
@@ -1022,6 +1342,17 @@ func (p *Pipeline) RunDetailed(
 		state.recordHostNotes(state.hosts.Notes())
 	}
 	finalize(result, p.hostExtractor)
+	// The completeness verdict and the returned error are derived from the
+	// same run state, so the report and the error never disagree: a
+	// budget-exhausted run that analyzed every fetched file returns both the
+	// wrapped deadline error and the completed results.
+	result.Completeness = state.buildCompleteness()
+	if state.userErr != nil {
+		return result, spa, state.wrapScanError(state.userErr)
+	}
+	if state.budgetErr != nil {
+		return result, spa, state.wrapScanError(state.budgetErr)
+	}
 	return result, spa, nil
 }
 
@@ -1088,6 +1419,16 @@ func applyTechnologies(result *model.Result, spa discover.SPAEvidence) {
 // Results are merged by this single coordinator, so the shared run state is
 // never mutated concurrently.
 //
+// Network requests run under the run state's collection budget
+// (request.target_timeout), while the coordinator itself answers to the
+// caller's context. When the budget expires, no new request is dispatched and
+// queue leftovers are recorded as unattempted, but every in-flight outcome is
+// still received and merged before drain returns, so nothing already
+// downloaded is lost. A caller cancellation stops the wait promptly: the
+// outcomes already buffered are merged, in-flight resources are recorded as
+// aborted fetches, and the error is carried on the run state for the caller
+// of RunDetailed to surface.
+//
 // In fetch-first mode (DownloadJS enabled) scripts and chunks are saved and
 // queued for the deferred analysis phase instead of being analyzed inline.
 func (p *Pipeline) drain(
@@ -1096,6 +1437,7 @@ func (p *Pipeline) drain(
 	headers http.Header,
 	entry *collect.Response,
 ) error {
+	network := state.networkCtx
 	workers := p.options.Config.Concurrency.ResourcesPerTarget
 	if workers <= 0 {
 		workers = 1
@@ -1104,45 +1446,90 @@ func (p *Pipeline) drain(
 	// after the coordinator returned on cancellation, so no goroutine leaks.
 	results := make(chan outcome, workers)
 	inflight := 0
+	// inFlightURLs mirrors the dispatched items so a caller cancellation can
+	// tell merged outcomes from work that never reported back. Queue
+	// deduplication keeps the URLs unique while in flight.
+	var inFlightURLs []string
 	launch := func(item scheduler.Item) {
 		inflight++
+		inFlightURLs = append(inFlightURLs, item.URL)
+		if isJavaScriptKind(item.Kind) {
+			state.coverage.dispatched(item.URL)
+		}
 		go func() {
 			results <- p.collectOne(
-				ctx, item, headers, entry, state.root, state.resolutionBase,
+				network, item, headers, entry, state.root, state.resolutionBase,
 				state.deferJS,
 			)
 		}()
 	}
 
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
+	// The entry response is already in hand: analyzing it costs no network
+	// work, so it happens even when the budget is already exhausted — its
+	// scripts and endpoints must be recorded regardless of the budget state.
+	// The queue head is confirmed to be the entry document BEFORE it is taken:
+	// a later drain round starts at an ordinary task, and taking it here
+	// without processing would silently drop it.
+	if entry != nil {
+		if head := state.queue.Pending(); len(head) > 0 &&
+			head[0].Depth == 0 && head[0].Kind == model.ResourceTypeDocument {
+			state.queue.TakeOne()
+			p.mergeReady(ctx, state, []outcome{
+				p.collectOne(network, head[0], headers, entry, state.root,
+					state.resolutionBase, state.deferJS),
+			})
 		}
-		// Fill every free worker slot. Items discovered by the results just
-		// processed are already in the queue, so the pool keeps working.
-		for inflight < workers {
-			item, ok := state.queue.TakeOne()
-			if !ok {
-				break
+	}
+
+	for {
+		// Observe both contexts. The caller's cancellation always outranks
+		// the collection budget.
+		state.observeCallerContext(ctx.Err(), "collect")
+		state.observeBudgetExhausted(network.Err())
+		// Fill every free worker slot only while both contexts allow. Items
+		// discovered by the results just processed are already in the queue,
+		// so the pool keeps working.
+		if state.userErr == nil && state.budgetErr == nil {
+			for inflight < workers {
+				item, ok := state.queue.TakeOne()
+				if !ok {
+					break
+				}
+				launch(item)
 			}
-			launch(item)
 		}
 		if inflight == 0 {
 			// Nothing queued and nothing running: the dynamic task set is
-			// exhausted.
-			break
+			// exhausted — or was stopped by the budget or the caller. Account
+			// for queue leftovers so the report shows what was never fetched;
+			// the call is a no-op on a normal completion.
+			state.coverage.markNotDispatched(
+				state.queue.Pending(), state.dispatchStopReason(),
+			)
+			return nil
 		}
 
 		var first outcome
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
 		case first = <-results:
+		case <-ctx.Done():
+			// Caller cancelled while waiting: merge what already finished,
+			// record the rest as aborted, and return promptly. In-flight
+			// workers finish into the buffered channel; their outcomes are
+			// never merged after the coordinator returned, so the result is
+			// never mutated concurrently.
+			state.observeCallerContext(ctx.Err(), "collect")
+			ready := sweepReady(results, &inflight)
+			p.mergeReady(ctx, state, ready)
+			state.coverage.markAbortedInFlight(
+				inFlightURLs, "调用方取消，请求中止",
+			)
+			state.coverage.markNotDispatched(
+				state.queue.Pending(), state.dispatchStopReason(),
+			)
+			return nil
 		}
 		inflight--
-		// Take everything else that is already finished, then merge in a
-		// stable order so completion order only decides which results are in
-		// this group, not how they are merged.
 		ready := []outcome{first}
 	collect:
 		for inflight > 0 {
@@ -1154,28 +1541,80 @@ func (p *Pipeline) drain(
 				break collect
 			}
 		}
-		sort.SliceStable(ready, func(i, j int) bool {
-			if ready[i].item.Depth != ready[j].item.Depth {
-				return ready[i].item.Depth < ready[j].item.Depth
-			}
-			return ready[i].item.URL < ready[j].item.URL
-		})
+		if err := p.mergeReady(ctx, state, ready); err != nil {
+			return err
+		}
+		// Drop the merged items from the in-flight mirror so an abort never
+		// overwrites what these outcomes recorded.
 		for _, collected := range ready {
-			if err := p.processOutcome(state, collected); err != nil {
-				if contextErr := ctx.Err(); contextErr != nil {
-					return contextErr
-				}
-				if collected.item.Depth == 0 {
-					return err
-				}
-				state.result.Issues = append(state.result.Issues, model.Issue{
-					Code:      "resource_get_failed",
-					Stage:     "collect",
-					URL:       collected.item.URL,
-					Message:   err.Error(),
-					Retryable: true,
-				})
+			inFlightURLs = removeString(inFlightURLs, collected.item.URL)
+		}
+	}
+}
+
+// sweepReady receives every outcome that already finished, without waiting.
+func sweepReady(results <-chan outcome, inflight *int) []outcome {
+	var ready []outcome
+	for *inflight > 0 {
+		select {
+		case next := <-results:
+			*inflight--
+			ready = append(ready, next)
+		default:
+			return ready
+		}
+	}
+	return ready
+}
+
+func removeString(values []string, target string) []string {
+	for index, value := range values {
+		if value == target {
+			return append(values[:index], values[index+1:]...)
+		}
+	}
+	return values
+}
+
+// mergeReady folds one ready group into the run state in stable order so
+// completion order only decides which results are in this group, not how
+// they are merged.
+func (p *Pipeline) mergeReady(
+	ctx context.Context,
+	state *runState,
+	ready []outcome,
+) error {
+	sort.SliceStable(ready, func(i, j int) bool {
+		if ready[i].item.Depth != ready[j].item.Depth {
+			return ready[i].item.Depth < ready[j].item.Depth
+		}
+		return ready[i].item.URL < ready[j].item.URL
+	})
+	for _, collected := range ready {
+		if isJavaScriptKind(collected.item.Kind) {
+			if collected.err != nil {
+				state.coverage.fetchFailed(
+					collected.item.URL, collected.err.Error(),
+				)
+			} else {
+				state.coverage.fetched(collected.item.URL)
 			}
+		}
+		if err := p.processOutcome(state, collected); err != nil {
+			state.observeCallerContext(ctx.Err(), "collect")
+			if collected.item.Depth == 0 &&
+				state.userErr == nil && state.budgetErr == nil {
+				// The entry document is unusable and nothing else can be
+				// discovered without it; surface the failure.
+				return err
+			}
+			state.result.Issues = append(state.result.Issues, model.Issue{
+				Code:      "resource_get_failed",
+				Stage:     "collect",
+				URL:       collected.item.URL,
+				Message:   err.Error(),
+				Retryable: true,
+			})
 		}
 	}
 	return nil
@@ -1209,7 +1648,10 @@ func (p *Pipeline) processOutcome(state *runState, collected outcome) error {
 		resource.Type == model.ResourceTypeChunk
 	if state.deferJS && isJS {
 		if source, parseErr := url.Parse(collected.response.URL); parseErr == nil {
-			deferred := deferredJS{source: source, depth: collected.item.Depth, vendor: collected.vendor}
+			deferred := deferredJS{
+				source: source, key: collected.item.URL,
+				depth: collected.item.Depth, vendor: collected.vendor,
+			}
 			switch {
 			case collected.response.Truncated:
 				// Truncated bodies are never persisted; analyze from memory.
@@ -1237,8 +1679,23 @@ func (p *Pipeline) processOutcome(state *runState, collected outcome) error {
 					deferred.path = localPath
 				}
 			}
-			state.pending = append(state.pending, deferred)
+			if collected.vendorSkipped {
+				// The bundle is saved for manual inspection but its analysis
+				// is skipped by the library-bundle policy — the same outcome
+				// the inline (non-download) mode has always produced. Without
+				// this gate the deferred pass would re-analyze what the
+				// policy excluded and lose the vendor label.
+				state.coverage.analysisSkipped(
+					collected.item.URL, "skip_library_bundles 供应商库跳过策略",
+				)
+			} else {
+				state.pending = append(state.pending, deferred)
+			}
 		}
+	} else if collected.vendorSkipped {
+		state.coverage.analysisSkipped(
+			collected.item.URL, "skip_library_bundles 供应商库跳过策略",
+		)
 	}
 	result.Resources = append(result.Resources, resource)
 	if collected.item.Kind == model.ResourceTypeAPI {
@@ -1338,20 +1795,26 @@ func (p *Pipeline) processCandidates(
 				continue
 			}
 			if state.targetScope.CanFetchScript(resolved) {
-				state.queue.Add(scheduler.Item{
-					URL: canonical, Kind: model.ResourceTypeScript,
-					SourceURL: candidateSource, Depth: nextDepth,
-				})
+				state.noteQueueOutcome(canonical,
+					state.queue.AddDetailed(scheduler.Item{
+						URL: canonical, Kind: model.ResourceTypeScript,
+						SourceURL: candidateSource, Depth: nextDepth,
+					}))
+			} else {
+				state.coverage.fetchSkipped(canonical, "作用域策略不允许抓取该脚本")
 			}
 		case discover.KindChunk:
 			if state.local {
 				continue
 			}
 			if state.targetScope.CanFetchScript(resolved) {
-				state.queue.Add(scheduler.Item{
-					URL: canonical, Kind: model.ResourceTypeChunk,
-					SourceURL: candidateSource, Depth: nextDepth,
-				})
+				state.noteQueueOutcome(canonical,
+					state.queue.AddDetailed(scheduler.Item{
+						URL: canonical, Kind: model.ResourceTypeChunk,
+						SourceURL: candidateSource, Depth: nextDepth,
+					}))
+			} else {
+				state.coverage.fetchSkipped(canonical, "作用域策略不允许抓取该脚本")
 			}
 		case discover.KindSourceMap:
 			if state.local {
@@ -1733,6 +2196,10 @@ type deferredAnalysis struct {
 	hostNotes       []extract.Note
 	spa             discover.SPAEvidence
 	readErr         error
+	// cancelled marks a readErr caused by the caller's context rather than by
+	// the file itself, so the item is recorded as un-analyzed instead of
+	// failed.
+	cancelled bool
 	// issues records analysis diagnostics such as a corrupt source map.
 	issues []model.Issue
 }
@@ -1743,14 +2210,24 @@ type deferredAnalysis struct {
 // disk (dropping the in-memory copy after the save); items with a fallback
 // body are analyzed from memory. The caller merges results sequentially so
 // endpoint ordering stays stable.
+//
+// The context is the caller's: local analysis of already-fetched files is not
+// bounded by the collection budget, only by caller cancellation. When the
+// context fires mid-batch, the analyses that finished are still returned and
+// the rest carry an explicit cancellation, so the caller can merge what
+// completed and report the rest as un-analyzed. No item is ever left a zero
+// value: every analysis carries its item metadata.
 func (p *Pipeline) computeBatch(
 	ctx context.Context,
 	batch []deferredJS,
-	reportDirectory string,
-) ([]deferredAnalysis, error) {
+	state *runState,
+) []deferredAnalysis {
 	analyses := make([]deferredAnalysis, len(batch))
+	for index := range batch {
+		analyses[index].item = batch[index]
+	}
 	if len(batch) == 0 {
-		return analyses, nil
+		return analyses
 	}
 	workers := min(len(batch), p.limiter.Capacity())
 	if workers < 1 {
@@ -1765,17 +2242,22 @@ func (p *Pipeline) computeBatch(
 			for index := range indexes {
 				if err := p.limiter.Acquire(ctx); err != nil {
 					analyses[index].readErr = err
+					analyses[index].cancelled = true
 					continue
 				}
-				analyses[index] = p.analyzeDeferred(ctx, batch[index], reportDirectory)
+				analyses[index] = p.analyzeDeferred(
+					ctx, batch[index], state.reportDirectory,
+				)
 				p.limiter.Release()
 			}
 		}()
 	}
 	var dispatchErr error
+	dispatched := make([]bool, len(batch))
 	for index := range batch {
 		select {
 		case indexes <- index:
+			dispatched[index] = true
 		case <-ctx.Done():
 			dispatchErr = ctx.Err()
 		}
@@ -1785,7 +2267,15 @@ func (p *Pipeline) computeBatch(
 	}
 	close(indexes)
 	wait.Wait()
-	return analyses, dispatchErr
+	// Items the dispatcher never handed out must not stay zero values: they
+	// are recorded as cancelled so merging reports them as un-analyzed.
+	for index := range batch {
+		if !dispatched[index] {
+			analyses[index].readErr = dispatchErr
+			analyses[index].cancelled = true
+		}
+	}
+	return analyses
 }
 
 // analyzeDeferred loads one deferred body and runs the full extraction pass
@@ -1798,6 +2288,7 @@ func (p *Pipeline) analyzeDeferred(
 	analysis := deferredAnalysis{item: item, vendor: item.vendor}
 	if err := ctx.Err(); err != nil {
 		analysis.readErr = err
+		analysis.cancelled = true
 		return analysis
 	}
 	body := item.body
@@ -1859,15 +2350,31 @@ func (p *Pipeline) mergeSourceAnalysis(
 	return base
 }
 
-// mergeDeferred folds one analysis result into the run state.
+// mergeDeferred folds one analysis result into the run state. A resource the
+// run cancelled before analysis is recorded as un-analyzed, never as failed;
+// a resource whose file could not be read or parsed is recorded as failed
+// with the error, and the other files of the batch are unaffected.
 func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
+	source := analysis.item.key
+	if source == "" && analysis.item.source != nil {
+		source = analysis.item.source.String()
+	}
 	if analysis.readErr != nil {
+		if analysis.cancelled || isContextError(analysis.readErr) {
+			// The caller cancelled before this file's analysis ran. The
+			// result stays honest about it instead of inventing a failure
+			// the file did not have.
+			state.coverage.analysisPending(source, "调用方取消，未分析")
+			return
+		}
 		state.result.Issues = append(state.result.Issues, model.Issue{
-			Code: "js_analysis_failed", Stage: "analyze", URL: analysis.item.source.String(),
+			Code: "js_analysis_failed", Stage: "analyze", URL: source,
 			Message: analysis.readErr.Error(),
 		})
+		state.coverage.analysisFailed(source, analysis.readErr.Error())
 		return
 	}
+	state.coverage.analyzed(source)
 	state.result.Issues = append(state.result.Issues, analysis.issues...)
 	mergeSPAEvidence(state.spa, analysis.spa)
 	if analysis.vendor {
@@ -1894,17 +2401,17 @@ func (p *Pipeline) mergeDeferred(state *runState, analysis deferredAnalysis) {
 	// regex candidates create the endpoints themselves.
 	if state.local {
 		p.processCandidates(
-			state, analysis.item.source.String(), analysis.regexCandidates,
+			state, source, analysis.regexCandidates,
 			analysis.item.depth,
 		)
 	} else {
 		p.enrichRecordedEndpoints(
-			state, analysis.item.source.String(), analysis.regexCandidates,
+			state, source, analysis.regexCandidates,
 		)
 	}
 	p.processCandidates(
 		state,
-		analysis.item.source.String(),
+		source,
 		analysis.candidates,
 		analysis.item.depth,
 	)
@@ -1995,7 +2502,9 @@ func (p *Pipeline) collectOne(
 		if vendor && p.options.Config.Scope.SkipLibraryBundles {
 			// Its license banner identifies a third-party library, so the
 			// regex and AST pass would only add vendor noise. The resource is
-			// still recorded.
+			// still recorded, and the coverage tracker labels its analysis as
+			// skipped by policy.
+			result.vendorSkipped = true
 			break
 		}
 		// With the skip disabled the bundle is still parsed, but everything it
@@ -2076,15 +2585,38 @@ func (p *Pipeline) collectOne(
 
 // probeRoutes GETs framework routes on the target origin and compares each
 // body against the index page, separating server-backed routes from pure
-// SPA fallbacks.
+// SPA fallbacks. Probes run under the collection budget: once it is exhausted
+// (or the caller cancelled), the remaining routes are recorded as unprobed
+// instead of being requested with no time left.
 func (p *Pipeline) probeRoutes(
 	ctx context.Context,
-	result *model.Result,
+	state *runState,
 	headers http.Header,
 	root *url.URL,
 ) {
 	const maxRouteProbes = 100
-	rootHash, rootOK := p.routeBodyHash(ctx, root, headers)
+	result := state.result
+	if state.budgetErr != nil || state.userErr != nil {
+		unprobed := 0
+		for index := range result.Endpoints {
+			if result.Endpoints[index].Type == "route" &&
+				result.Endpoints[index].Probe == "" {
+				unprobed++
+			}
+		}
+		if unprobed > 0 {
+			result.Issues = append(result.Issues, model.Issue{
+				Code: "route_probe_skipped", Stage: "collect",
+				URL: scope.Canonical(root),
+				Message: fmt.Sprintf(
+					"网络采集已停止（预算耗尽或调用方取消），%d 条路由未探测",
+					unprobed,
+				),
+			})
+		}
+		return
+	}
+	rootHash, rootOK := p.routeBodyHash(state.networkCtx, root, headers)
 	probed := 0
 	for index := range result.Endpoints {
 		endpoint := &result.Endpoints[index]
@@ -2100,8 +2632,16 @@ func (p *Pipeline) probeRoutes(
 			// index page again.
 			continue
 		}
+		// A stop that first fires during route probing must reach the final
+		// state: observe both contexts, stop dispatching, and keep every
+		// route already answered.
+		state.observeCallerContext(ctx.Err(), "probe")
+		state.observeBudgetExhausted(state.networkCtx.Err())
+		if state.budgetErr != nil || state.userErr != nil {
+			break
+		}
 		probed++
-		response, err := p.options.Getter.Get(ctx, target,
+		response, err := p.options.Getter.Get(state.networkCtx, target,
 			collect.HeadersForURL(headers, root, target))
 		if err != nil {
 			endpoint.Probe = "error"
@@ -2530,7 +3070,8 @@ func mergeSPAEvidence(target *discover.SPAEvidence, source discover.SPAEvidence)
 
 // deriveParamHits turns endpoints into parameter hits for the request-shaped
 // scenarios the AST pass cannot see: parameters of API request bodies and
-// option objects, URL query strings, and framework route placeholders.
+// option objects, URL query strings, URL path segments, and framework route
+// placeholders.
 func deriveParamHits(result *model.Result) []model.ParamHit {
 	hits := make([]model.ParamHit, 0, 64)
 	add := func(name, scenario, sourceURL string, line int) {
@@ -2542,6 +3083,11 @@ func deriveParamHits(result *model.Result) []model.ParamHit {
 		})
 	}
 	for _, endpoint := range result.Endpoints {
+		// 路径段: every literal URL segment is a fuzzable position, routes
+		// included — /user/:userId/profile still carries user and profile.
+		for _, segment := range model.URLPathSegments(endpoint.URL) {
+			add(segment, model.ParamScenarioURLPath, endpoint.URL, 0)
+		}
 		if endpoint.Type == "route" {
 			for _, name := range routeParamNames(endpoint.URL) {
 				add(name, model.ParamScenarioRouteParam, endpoint.SourceURL, 0)

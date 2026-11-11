@@ -747,6 +747,9 @@ func launch(
 		Headless(config.Headless).
 		UserDataDir(userDataDir).
 		NoSandbox(config.NoSandbox)
+	if config.IgnoreCertificateErrors {
+		browserLauncher.Set("ignore-certificate-errors")
+	}
 	if proxy != "" {
 		browserLauncher = browserLauncher.Proxy(proxy)
 	}

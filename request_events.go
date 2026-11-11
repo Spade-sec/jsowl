@@ -13,14 +13,31 @@ import (
 // page request. Size counts collected/decoded body bytes, not Content-Length.
 type RequestEvent = collect.RequestEvent
 
-// SetRequestSink configures ordered, lossless request delivery. Set it before
-// scanning. The caller must drain the channel until ScanBatch closes, then may
-// close it. A full channel applies backpressure to collection workers.
+// SetRequestSink configures ordered request delivery. Set it before scanning.
+// The caller must drain the channel until ScanBatch closes, then may close it.
+// A full channel applies backpressure to collection workers while a scan is
+// running; once a scan has been cancelled the coordinator may return before
+// its in-flight workers finish, so those workers drop their events instead of
+// blocking on (or panicking against) a channel nobody reads anymore.
 func (s *Scanner) SetRequestSink(sink chan<- RequestEvent) { s.requestSink = sink }
 
 type reportingGetter struct {
 	collect.Getter
 	sink chan<- RequestEvent
+}
+
+// emit applies backpressure until delivery or context cancellation. During normal
+// collection the CLI printer drains continuously so the bounded queue stays
+// lossless, and after a cancellation a dropped event is strictly better than
+// a send on a closed channel.
+func (g reportingGetter) emit(ctx context.Context, event RequestEvent) {
+	if g.sink == nil || ctx.Err() != nil {
+		return
+	}
+	select {
+	case g.sink <- event:
+	case <-ctx.Done():
+	}
 }
 
 func (g reportingGetter) Get(ctx context.Context, target *url.URL, headers http.Header) (collect.Response, error) {
@@ -33,7 +50,7 @@ func (g reportingGetter) Get(ctx context.Context, target *url.URL, headers http.
 		event.StatusCode = response.StatusCode
 		event.Size = int64(len(response.Body))
 	}
-	g.sink <- event
+	g.emit(ctx, event)
 	return response, err
 }
 
@@ -58,6 +75,6 @@ func (g reportingGetter) Post(
 		event.StatusCode = response.StatusCode
 		event.Size = int64(len(response.Body))
 	}
-	g.sink <- event
+	g.emit(ctx, event)
 	return response, err
 }

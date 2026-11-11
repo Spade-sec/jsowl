@@ -3,6 +3,7 @@ package pipeline
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -30,10 +31,13 @@ type postProbe struct {
 // so without this probe the response status, JSON field names and sensitive
 // values of such an interface are never observed.
 //
-// Probes share the collection concurrency bound; responses are merged on the
-// coordinator after every probe finishes, so the run state is never mutated
-// concurrently. skipURLs lists resources an earlier scan phase already probed,
-// which keeps a combined direct+browser scan from writing twice.
+// Probes share the collection concurrency bound and run under the run state's
+// collection budget; responses are merged on the coordinator after every
+// probe finishes, so the run state is never mutated concurrently. When the
+// budget expires or the caller cancels, probes that already answered are kept
+// and the rest are recorded as unprobed instead of being silently dropped.
+// skipURLs lists resources an earlier scan phase already probed, which keeps
+// a combined direct+browser scan from writing twice.
 func (p *Pipeline) probePostEndpoints(
 	ctx context.Context,
 	state *runState,
@@ -81,6 +85,10 @@ func (p *Pipeline) probePostEndpoints(
 	if workers <= 0 {
 		workers = 1
 	}
+	// Probes are network work: they run under the collection budget. The
+	// caller's context is checked afterwards to tell a cancellation from a
+	// budget expiry.
+	network := state.networkCtx
 	next := make(chan int)
 	var group sync.WaitGroup
 	for range workers {
@@ -96,16 +104,21 @@ func (p *Pipeline) probePostEndpoints(
 				}
 				probeHeaders.Set("Content-Type", probes[position].contentType)
 				responses[position], errs[position] = poster.Post(
-					ctx, probes[position].target, probeHeaders, probes[position].body,
+					network, probes[position].target, probeHeaders, probes[position].body,
 				)
 				completed[position] = true
 			}
 		}()
 	}
-dispatch:
+	dispatch:
 	for position := range probes {
 		select {
+		case <-network.Done():
+			break dispatch
 		case <-ctx.Done():
+			// The caller cancelled even though the budget context is still
+			// alive (they are only related when the producer derived one
+			// from the other): stop dispatching either way.
 			break dispatch
 		case next <- position:
 		}
@@ -113,16 +126,48 @@ dispatch:
 	close(next)
 	group.Wait()
 
+	// A stop that first fires during probing must reach the final state too:
+	// without this observation the run would return nil and report the
+	// collection as complete even though probes were cut short. Completed
+	// responses above are kept either way; the caller's cancellation wins
+	// over the budget.
+	state.observeCallerContext(ctx.Err(), "probe")
+	state.observeBudgetExhausted(network.Err())
+
+	unprobed := 0
 	for position, probe := range probes {
 		if !completed[position] {
+			unprobed++
 			continue
 		}
-		if errs[position] != nil && ctx.Err() != nil {
-			// The scan was cancelled while this probe was in flight; the
-			// context error is not a finding about the endpoint.
-			continue
+		if errs[position] != nil {
+			if state.userErr != nil {
+				// Cancelled while this probe was in flight; the context error
+				// is not a finding about the endpoint.
+				unprobed++
+				continue
+			}
+			if isContextError(errs[position]) {
+				// The collection budget expired mid-probe; the endpoint was
+				// not probed, which is not a finding about it either.
+				unprobed++
+				continue
+			}
 		}
 		p.applyPostProbe(state, probe.endpointIndex, responses[position], errs[position])
+	}
+	if unprobed > 0 {
+		reason := "网络采集预算已耗尽"
+		if state.userErr != nil {
+			reason = "调用方取消"
+		}
+		state.result.Issues = append(state.result.Issues, model.Issue{
+			Code: "post_probe_skipped", Stage: "collect",
+			URL: scope.Canonical(state.root),
+			Message: fmt.Sprintf(
+				"%s，%d 个 POST 接口未探测", reason, unprobed,
+			),
+		})
 	}
 }
 

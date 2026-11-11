@@ -51,6 +51,7 @@ browser:
   timeout: 120s
   headless: true
   no_sandbox: false
+  ignore_certificate_errors: false
   collector_script: ""
   disable_injection: false
   # 渲染发现的每个框架路由视图，观测该视图自身发出的请求。
@@ -171,6 +172,13 @@ ai:
   format: "openai-chat"
   model: ""                        # 例如 glm-4-flash
   max_requests: 20                 # 单次扫描 AI 请求上限
+  # 分析策略：
+  #   fast  一次性增强器（默认）：接口包复核、污点推断、发现评级各一次批量调用
+  #   agent 扫描结束后的分析循环：模型通过只读工具复核完整证据（接口、发现、
+  #         已下载的 JS），再产出报告级摘要与优先测试队列；每轮调用计入
+  #         max_requests。对话记录写入报告目录 ai_transcript.jsonl。
+  # mode: "fast"
+  # max_steps: 10                    # agent 模式单轮循环上限（默认 10）
 
 # 敏感信息规则默认从内嵌的 HaE 规则集加载。项目目录下存在 config/rules.yml
 # 时以它为项目级规则（改动即生效）；否则首次运行会播种 ~/.jsowl/rules.yaml

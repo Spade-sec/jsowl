@@ -35,6 +35,7 @@ func WriteSplitReports(directory string, result *model.Result) error {
 		{"路由报告.html", "路由探测报告", renderRouteReport},
 		{"资源报告.html", "资源报告", renderResourceReport},
 		{"主机资产报告.html", "主机资产报告", renderHostReport},
+		{"AI分析报告.html", "AI 分析报告", renderAIReport},
 	}
 	// Build the full navigation first so every page shares the same nav bar.
 	links := []linkItem{
@@ -50,6 +51,7 @@ func WriteSplitReports(directory string, result *model.Result) error {
 		linkItem{File: "路由.txt", Name: "路由", Desc: "纯文本路由列表"},
 		linkItem{File: "参数.txt", Name: "请求参数", Desc: "纯文本参数名列表"},
 		linkItem{File: "敏感信息.txt", Name: "敏感信息", Desc: "纯文本命中列表"},
+		linkItem{File: "AI分析.txt", Name: "AI 分析", Desc: "纯文本 AI agent 摘要"},
 		linkItem{File: "domain.txt", Name: "域名清单", Desc: "纯文本域名列表（标准化、去重）"},
 		linkItem{File: "ip.txt", Name: "IP 清单", Desc: "纯文本 IPv4/IPv6 列表"},
 		linkItem{File: "internal_hosts.txt", Name: "内部主机", Desc: "纯文本内部主机候选列表"},
@@ -141,6 +143,17 @@ code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;b
 .filterbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px}
 .filterbar label{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
 .filterbar select,.filterbar input[type="search"]{background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:13px}
+.filterbar input[type="search"]{min-width:220px}
+.filterbar button{background:var(--panel);border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer}
+.filterbar button:hover{color:var(--accent);border-color:var(--accent)}
+.filterbar [data-count]{margin-left:auto}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
+.tabs button{background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:5px 14px;font-size:13px;color:var(--muted);cursor:pointer}
+.tabs button:hover{color:var(--accent);border-color:var(--accent)}
+.tabs button.active{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+[data-tab-content][hidden]{display:none}
+tr.empty-row td{padding:22px;text-align:center;color:var(--muted)}
+[data-filter-section][hidden]{display:none}
 details.ctx{margin-top:6px}
 details.ctx summary{cursor:pointer;color:var(--accent);font-size:12px;user-select:none}
 details.ctx pre{margin:6px 0 0;padding:10px 12px;background:var(--bg);border:1px solid var(--line);border-radius:8px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow:auto}
@@ -172,76 +185,276 @@ footer{padding:12px 24px;color:var(--muted);font-size:12px;border-top:1px solid 
 <header><h1>{{.Title}}</h1><span class="target">{{.Target}}</span></header>
 <nav>{{range .Links}}<a href="{{.Href}}" title="{{.Desc}}"{{if eq .Name $.Current}} class="active"{{end}}>{{.Name}}</a>{{end}}</nav>
 <main>
-<p class="count">共 {{.Count}} 条</p>
+<p class="count" id="report-count">共 {{.Count}} 条</p>
 {{.Body}}
 </main>
 <footer>JsOwl 安全信息收集报告 · 敏感数据，请妥善保管</footer>
 <script>
 (function(){
   {{interactions}}
-  document.querySelectorAll('table').forEach(function(table){
+
+  var EMPTY_TEXT = '没有符合当前筛选条件的记录';
+  var views = [];
+
+  function normalize(value) { return String(value == null ? '' : value).toLowerCase(); }
+
+  // indexTable caches each row's searchable text once, so repeated keystrokes
+  // never re-read the DOM.
+  function indexTable(table) {
     var tbody = table.tBodies[0];
-    if (!tbody) return;
-    var rows = Array.from(tbody.rows).filter(function(row){ return !row.classList.contains('ctx-row'); });
-    var details = new Map(rows.map(function(row){
+    if (!tbody) return null;
+    var rows = Array.prototype.slice.call(tbody.rows).filter(function (row) {
+      return !row.classList.contains('ctx-row') && !row.classList.contains('empty-row');
+    });
+    var details = new Map();
+    rows.forEach(function (row) {
       var next = row.nextElementSibling;
-      return [row, next && next.classList.contains('ctx-row') ? next : null];
-    }));
-    var paginated = table.classList.contains('paginated');
-    var pageSize = Number(table.dataset.pageSize || 50), page = 1, totalPages = 1;
-    var pager = document.createElement('div');
-    pager.className = 'pager';
-    if (paginated) table.after(pager);
-    var filters = table.id === 'sensitive-table' ? document.getElementById('sensitive-filters') : null;
-    if (filters) {
-      ['severity', 'rule', 'source'].forEach(function(key){
-        var select = filters.querySelector('[data-filter="' + key + '"]');
-        Array.from(new Set(rows.map(function(row){ return row.dataset[key]; }))).sort(reportCollator.compare).forEach(function(value){
-          var option = document.createElement('option'); option.value = value; option.textContent = value; select.appendChild(option);
-        });
-      });
-      filters.addEventListener('change', function(){ page = 1; apply(); });
-      filters.addEventListener('input', function(){ page = 1; apply(); });
-      filters.querySelector('button').addEventListener('click', function(){
-        filters.querySelectorAll('select,input').forEach(function(control){ control.value = ''; }); page = 1; apply();
+      details.set(row, next && next.classList.contains('ctx-row') ? next : null);
+      if (row.dataset.searchText == null) row.dataset.searchText = normalize(row.textContent);
+    });
+    var view = {
+      table: table,
+      rows: rows,
+      details: details,
+      page: 1,
+      pageSize: table.classList.contains('paginated') ? (Number(table.dataset.pageSize) || 50) : 0,
+      pager: null,
+      bar: null,
+      matched: rows.length,
+      totalPages: 1,
+      columns: table.tHead && table.tHead.rows[0] ? table.tHead.rows[0].cells.length : 1
+    };
+    if (view.pageSize > 0) {
+      view.pager = document.createElement('div');
+      view.pager.className = 'pager';
+      table.parentNode.insertBefore(view.pager, table.nextSibling);
+      view.pager.addEventListener('click', function (event) {
+        var button = event.target.closest('[data-go]');
+        if (!button || button.disabled) return;
+        view.page += button.getAttribute('data-go') === 'next' ? 1 : -1;
+        if (view.bar) view.bar.apply(); else applyView(view, [], '');
       });
     }
-    function apply(){
-      var filtered = rows.filter(function(row){
-        if (!filters) return true;
-        var matches = Array.from(filters.querySelectorAll('[data-filter]')).every(function(control){
-          return !control.value || row.dataset[control.dataset.filter] === control.value;
-        });
-        var query = filters.querySelector('input').value.trim().toLowerCase();
-        return matches && (!query || row.textContent.toLowerCase().includes(query));
-      });
-      totalPages = Math.max(1, Math.ceil(filtered.length / pageSize)); page = Math.min(page, totalPages);
-      var first = (page - 1) * pageSize;
-      var visible = new Set(paginated ? filtered.slice(first, first + pageSize) : filtered);
-      rows.forEach(function(row){
-        row.style.display = visible.has(row) ? '' : 'none';
-        var detail = details.get(row);
-        if (detail) detail.style.display = visible.has(row) && detail.classList.contains('open') ? '' : 'none';
-      });
-      if (filters) document.getElementById('sensitive-count').textContent = '显示 ' + filtered.length + ' / ' + rows.length + ' 条';
-      pager.innerHTML = !paginated || totalPages <= 1 ? '' :
-        '<button data-go="prev"' + (page <= 1 ? ' disabled' : '') + '>上一页</button>' +
-        '<span class="page-info">' + (filtered.length ? first + 1 : 0) + '-' + Math.min(first + pageSize, filtered.length) + ' / ' + filtered.length + '</span>' +
-        '<button data-go="next"' + (page >= totalPages ? ' disabled' : '') + '>下一页</button>';
+    views.push(view);
+    return view;
+  }
+
+  function rowVisible(table) {
+    var tbody = table.tBodies[0];
+    if (!tbody) return 0;
+    var count = 0;
+    Array.prototype.forEach.call(tbody.rows, function (row) {
+      if (row.classList.contains('ctx-row') || row.classList.contains('empty-row')) return;
+      if (row.style.display !== 'none') count++;
+    });
+    return count;
+  }
+
+  function matchesFilter(row, filter) {
+    if (!filter.value) return true;
+    var actual = row.dataset[filter.field] || '';
+    if (filter.mode === 'contains') return normalize(actual).indexOf(normalize(filter.value)) !== -1;
+    return actual === filter.value;
+  }
+
+  function syncEmptyRow(view, show) {
+    var tbody = view.table.tBodies[0];
+    var row = tbody.querySelector('tr.empty-row');
+    if (!show) {
+      if (row) row.parentNode.removeChild(row);
+      return;
     }
-    bindReportSort(table, function(column, direction){
-      rows.sort(function(a,b){ return direction * compareReportValues(reportCellValue(a,column), reportCellValue(b,column)); });
-      rows.forEach(function(row){ tbody.appendChild(row); if (details.get(row)) tbody.appendChild(details.get(row)); });
-      page = 1; if (table.id !== 'param-table') apply();
+    if (!row) {
+      row = document.createElement('tr');
+      row.className = 'empty-row';
+      var cell = document.createElement('td');
+      cell.colSpan = view.columns;
+      cell.textContent = view.table.dataset.empty || EMPTY_TEXT;
+      row.appendChild(cell);
+      tbody.appendChild(row);
+    }
+  }
+
+  function renderPager(view) {
+    if (!view.pager) return;
+    if (view.totalPages <= 1) {
+      view.pager.innerHTML = '';
+      return;
+    }
+    var start = (view.page - 1) * view.pageSize;
+    view.pager.innerHTML =
+      '<button type="button" data-go="prev"' + (view.page <= 1 ? ' disabled' : '') + '>上一页</button>' +
+      '<span class="page-info">' + (view.matched ? start + 1 : 0) + '-' +
+      Math.min(start + view.pageSize, view.matched) + ' / ' + view.matched + '</span>' +
+      '<button type="button" data-go="next"' + (view.page >= view.totalPages ? ' disabled' : '') + '>下一页</button>';
+  }
+
+  // applyView filters, paginates and renders one table. A detail row always
+  // follows its parent, so an expanded panel never outlives its row.
+  function applyView(view, filters, query) {
+    var matched = view.rows.filter(function (row) {
+      for (var index = 0; index < filters.length; index++) {
+        if (!matchesFilter(row, filters[index])) return false;
+      }
+      return !query || normalize(row.dataset.searchText).indexOf(query) !== -1;
     });
-    pager.addEventListener('click', function(event){
-      var go = event.target.dataset.go;
-      if (go === 'prev' && page > 1) { page--; apply(); }
-      if (go === 'next' && page < totalPages) { page++; apply(); }
+    view.matched = matched.length;
+    view.totalPages = view.pageSize > 0 ? Math.max(1, Math.ceil(matched.length / view.pageSize)) : 1;
+    view.page = Math.min(Math.max(1, view.page), view.totalPages);
+    var start = (view.page - 1) * view.pageSize;
+    var shown = new Set(view.pageSize > 0 ? matched.slice(start, start + view.pageSize) : matched);
+    view.rows.forEach(function (row) {
+      var visible = shown.has(row);
+      row.style.display = visible ? '' : 'none';
+      var detail = view.details.get(row);
+      if (detail) detail.style.display = visible && detail.classList.contains('open') ? '' : 'none';
     });
-    // Existing parameter controls own their visibility; sorting must preserve it.
-    if (table.id === 'param-table') return;
+    syncEmptyRow(view, matched.length === 0);
+    renderPager(view);
+    var section = view.table.closest('[data-filter-section]');
+    if (section) {
+      var anyVisible = false;
+      Array.prototype.forEach.call(section.querySelectorAll('table'), function (table) {
+        if (rowVisible(table) > 0) anyVisible = true;
+      });
+      section.hidden = !anyVisible;
+    }
+    return matched.length;
+  }
+
+  // bindBar wires one filterbar to its tables. data-for accepts a table id or
+  // "*" for every filterable table, so one bar can drive the API tab's
+  // relative and absolute tables at once.
+  function bindBar(bar) {
+    var scope = bar.getAttribute('data-for') || '*';
+    var barViews = scope === '*'
+      ? views.filter(function (view) { return view.table.hasAttribute('data-filterable'); })
+      : views.filter(function (view) { return view.table.id === scope; });
+    var selects = Array.prototype.slice.call(bar.querySelectorAll('select[data-filter]'));
+    selects.forEach(function (select) {
+      // data-static marks a select whose options the report rendered itself
+      // (multi-value fields such as the parameter report's host list).
+      if (select.hasAttribute('data-static')) return;
+      var field = select.getAttribute('data-filter');
+      var seen = Object.create(null);
+      var values = [];
+      barViews.forEach(function (view) {
+        view.rows.forEach(function (row) {
+          var value = row.dataset[field];
+          if (!value || seen[value]) return;
+          seen[value] = true;
+          values.push(value);
+        });
+      });
+      values.sort(reportCollator.compare).forEach(function (value) {
+        var option = document.createElement('option');
+        option.value = value;
+        option.textContent = value;
+        select.appendChild(option);
+      });
+    });
+    var search = bar.querySelector('input[type="search"]');
+    var counter = bar.querySelector('[data-count]');
+    var api = { apply: apply };
+    barViews.forEach(function (view) { view.bar = api; });
+
+    function apply() {
+      var query = search ? normalize(search.value.trim()) : '';
+      var filters = selects.map(function (select) {
+        return {
+          field: select.getAttribute('data-filter'),
+          mode: select.getAttribute('data-match') || 'exact',
+          value: select.value
+        };
+      });
+      var matched = 0;
+      var total = 0;
+      barViews.forEach(function (view) {
+        matched += applyView(view, filters, query);
+        total += view.rows.length;
+      });
+      if (counter) {
+        counter.textContent = total === 0 ? '暂无数据' : '显示 ' + matched + ' / ' + total + ' 条';
+      }
+    }
+
+    var resetButton = bar.querySelector('[data-reset]');
+    if (resetButton) {
+      resetButton.addEventListener('click', function () {
+        selects.forEach(function (select) { select.value = ''; });
+        if (search) search.value = '';
+        barViews.forEach(function (view) { view.page = 1; });
+        apply();
+      });
+    }
+    selects.forEach(function (select) {
+      select.addEventListener('change', function () {
+        barViews.forEach(function (view) { view.page = 1; });
+        apply();
+      });
+    });
+    if (search) {
+      var timer = null;
+      search.addEventListener('input', function () {
+        clearTimeout(timer);
+        timer = setTimeout(function () {
+          barViews.forEach(function (view) { view.page = 1; });
+          apply();
+        }, 150);
+      });
+    }
     apply();
+    return api;
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('main table'), indexTable);
+  Array.prototype.forEach.call(document.querySelectorAll('.filterbar[data-for]'), bindBar);
+  // Tables without their own filterbar still paginate.
+  views.forEach(function (view) {
+    if (!view.bar) applyView(view, [], '');
+  });
+
+  // Sorting re-orders the cached rows (detail rows travel with their parent)
+  // and re-applies the active filter, so pagination stays correct.
+  views.forEach(function (view) {
+    bindReportSort(view.table, function (column, direction) {
+      view.rows.sort(function (left, right) {
+        return direction * compareReportValues(reportCellValue(left, column), reportCellValue(right, column));
+      });
+      var tbody = view.table.tBodies[0];
+      view.rows.forEach(function (row) {
+        tbody.appendChild(row);
+        var detail = view.details.get(row);
+        if (detail) tbody.appendChild(detail);
+      });
+      view.page = 1;
+      if (view.bar) view.bar.apply(); else applyView(view, [], '');
+    });
+  });
+
+  // Tabs only flip visibility: every panel is server-rendered, so switching
+  // never rebuilds a table.
+  Array.prototype.forEach.call(document.querySelectorAll('[data-tabs]'), function (group) {
+    var buttons = Array.prototype.slice.call(group.querySelectorAll('[data-tab-panel]'));
+    var panels = document.querySelectorAll('[data-tab-content]');
+    function activate(name) {
+      buttons.forEach(function (button) {
+        var active = button.getAttribute('data-tab-panel') === name;
+        button.className = active ? 'active' : '';
+        button.setAttribute('aria-selected', active ? 'true' : 'false');
+      });
+      Array.prototype.forEach.call(panels, function (panel) {
+        panel.hidden = panel.id !== name;
+      });
+    }
+    buttons.forEach(function (button) {
+      button.addEventListener('click', function () {
+        activate(button.getAttribute('data-tab-panel'));
+      });
+    });
+    // The server marks the default tab; fall back to the first one.
+    var initial = group.querySelector('[data-tab-panel][aria-selected="true"]') || buttons[0];
+    if (initial) activate(initial.getAttribute('data-tab-panel'));
   });
 
   // Row detail panel: clicking an endpoint row (tr.api-row) toggles the
@@ -326,13 +539,39 @@ func renderAPIReport(result *model.Result) (int, string, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString(`<div class="filterbar"><span class="muted">点击路径旁的“复制”按钮复制纯路径；点击任意单元行展开详情面板：来源定位、RequestSpec（参数值、类型、置信度）、BaseURL 及 JS 上下文。完整 http(s) URL 见“完整 URL 报告”。</span></div>`)
-	writeAPISection := func(title string, rows *strings.Builder, count int) {
-		fmt.Fprintf(&b, `<h2 class="section-title">%s（%d）</h2><table class="paginated" data-page-size="50"><thead><tr><th>路径</th><th style="width:70px">方法</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:60px">状态</th></tr></thead><tbody>%s</tbody></table>`,
-			htmlEscape(title), count, rows.String())
+	b.WriteString(`<div class="filterbar" data-for="*">`)
+	b.WriteString(`<label>方法 <select data-filter="method"><option value="">全部</option></select></label>`)
+	b.WriteString(`<label>证据 <select data-filter="evidence"><option value="">全部</option></select></label>`)
+	b.WriteString(`<label>探测 <select data-filter="status"><option value="">全部</option></select></label>`)
+	b.WriteString(`<label>搜索 <input type="search" placeholder="路径、方法、来源..."></label>`)
+	b.WriteString(`<button type="button" data-reset>重置筛选</button>`)
+	b.WriteString(`<span class="muted" data-count aria-live="polite"></span></div>`)
+	b.WriteString(`<p class="muted">点击路径旁的“复制”按钮复制纯路径；点击任意单元行展开详情面板：来源定位、RequestSpec（参数值、类型、置信度）、BaseURL 及 JS 上下文。完整 http(s) URL 见“完整 URL 报告”。</p>`)
+
+	// Relative and absolute paths share one filterbar but keep separate
+	// tables, so the tab switch never rebuilds or re-filters a table. The
+	// leading-slash form is the primary deliverable, so it opens first unless
+	// the scan produced none.
+	defaultPanel := "api-absolute"
+	if absolute == 0 {
+		defaultPanel = "api-relative"
 	}
-	writeAPISection("相对路径", relativeRows, relative)
-	writeAPISection("绝对路径", absoluteRows, absolute)
+	b.WriteString(`<div class="tabs" data-tabs role="tablist" aria-label="路径类型">`)
+	fmt.Fprintf(&b, `<button type="button" role="tab" data-tab-panel="api-relative" aria-selected="%t">相对路径（%d）</button>`,
+		defaultPanel == "api-relative", relative)
+	fmt.Fprintf(&b, `<button type="button" role="tab" data-tab-panel="api-absolute" aria-selected="%t">绝对路径（%d）</button>`,
+		defaultPanel == "api-absolute", absolute)
+	b.WriteString(`</div>`)
+
+	writeAPIPanel := func(id, empty string, rows *strings.Builder) {
+		fmt.Fprintf(&b, `<div class="tab-panel" id="%s" data-tab-content>`+
+			`<table id="%s-table" class="paginated" data-page-size="50" data-filterable data-empty="%s">`+
+			`<thead><tr><th>路径</th><th style="width:70px">方法</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:60px">状态</th></tr></thead>`+
+			`<tbody>%s</tbody></table></div>`,
+			id, id, empty, rows.String())
+	}
+	writeAPIPanel("api-relative", "本次未采集到相对路径 API", relativeRows)
+	writeAPIPanel("api-absolute", "本次未采集到绝对路径 API", absoluteRows)
 	if full > 0 {
 		fmt.Fprintf(&b, `<h2 class="section-title">完整 URL（%d）</h2><p class="muted">已移至 <a href="URL报告.html">完整 URL 报告</a>。</p>`, full)
 	}
@@ -402,11 +641,19 @@ func renderAPIRow(b *strings.Builder, endpoint model.Endpoint) {
 	if endpoint.Vendor {
 		vendorMark = `<span class="sev vendor">vendor</span>`
 	}
+	// Filter dimensions live on the row so the shared filter engine can read
+	// them from datasets without re-parsing cell text.
+	probeState := "未探测"
+	if endpoint.StatusCode > 0 {
+		probeState = "已探测"
+	}
+	attrs := fmt.Sprintf(` data-method="%s" data-evidence="%s" data-status="%s"`,
+		htmlEscape(method), htmlEscape(evidenceLabel(endpoint.Evidence)), probeState)
 	fmt.Fprintf(b,
-		"<tr%s><td><code>%s</code><button class=\"copy-btn\" data-copy=\"%s\">复制</button>%s%s</td>"+
+		"<tr%s%s><td><code>%s</code><button class=\"copy-btn\" data-copy=\"%s\">复制</button>%s%s</td>"+
 			"<td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td>"+
 			"<td><code>%s</code></td><td>%d</td></tr>",
-		rowClass,
+		rowClass, attrs,
 		htmlEscape(path), htmlEscape(path), bodyNote, vendorMark,
 		htmlEscape(method), evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
 		htmlEscape(location), endpoint.StatusCode)
@@ -536,6 +783,19 @@ func renderTemplateAI(t *model.RequestTemplate) string {
 	if len(t.AI.SuggestedParams) > 0 {
 		b.WriteString(`<div class="muted">AI 建议关注的参数: ` +
 			htmlEscape(strings.Join(t.AI.SuggestedParams, ", ")) + `</div>`)
+	}
+	for _, plan := range t.AI.FuzzPlans {
+		line := `<div class="muted">fuzz 计划: ` + htmlEscape(plan.Field)
+		if plan.Strategy != "" {
+			line += ` <span class="sev ai">` + htmlEscape(plan.Strategy) + `</span>`
+		}
+		if len(plan.Values) > 0 {
+			line += ` 候选值: ` + htmlEscape(strings.Join(plan.Values, ", "))
+		}
+		if plan.Note != "" {
+			line += ` — ` + htmlEscape(plan.Note)
+		}
+		b.WriteString(line + `</div>`)
 	}
 	if b.Len() == 0 {
 		return ""
@@ -834,8 +1094,16 @@ func renderURLReport(result *model.Result) (int, string, error) {
 	sort.SliceStable(urls, func(i, j int) bool { return urls[i].Raw < urls[j].Raw })
 
 	var b strings.Builder
-	b.WriteString(`<div class="filterbar"><span class="muted">API 端点与资源中出现的完整 http(s) URL，去重后的全集；纯路径见 API 报告。纯文本版本见 url.txt。</span></div>`)
-	fmt.Fprintf(&b, `<table class="paginated" data-page-size="50"><thead><tr><th>URL</th><th style="width:140px">方法</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:60px">状态</th></tr></thead><tbody>`)
+	b.WriteString(`<p class="muted">API 端点与资源中出现的完整 http(s) URL，去重后的全集；纯路径见 API 报告。纯文本版本见 url.txt。</p>`)
+	b.WriteString(`<div class="filterbar" data-for="url-table">` +
+		`<label>方法 <select data-filter="method"><option value="">全部</option></select></label>` +
+		`<label>证据 <select data-filter="evidence"><option value="">全部</option></select></label>` +
+		`<label>探测 <select data-filter="status"><option value="">全部</option></select></label>` +
+		`<label>搜索 <input type="search" placeholder="URL、方法或来源..."></label>` +
+		`<button type="button" data-reset>重置筛选</button>` +
+		`<span class="muted" data-count aria-live="polite"></span></div>`)
+	b.WriteString(`<table id="url-table" class="paginated" data-page-size="50" data-filterable data-empty="本次未采集到完整 URL">` +
+		`<thead><tr><th>URL</th><th style="width:140px">方法</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:60px">状态</th></tr></thead><tbody>`)
 	for _, endpoint := range urls {
 		method := endpoint.Method
 		if method == "" {
@@ -845,10 +1113,16 @@ func renderURLReport(result *model.Result) (int, string, error) {
 		if source == "" {
 			source = "—"
 		}
+		probeState := "未探测"
+		if endpoint.StatusCode > 0 {
+			probeState = "已探测"
+		}
 		fmt.Fprintf(&b,
-			"<tr><td><code>%s</code><button class=\"copy-btn\" data-copy=\"%s\">复制</button></td>"+
+			"<tr data-method=\"%s\" data-evidence=\"%s\" data-status=\"%s\">"+
+				"<td><code>%s</code><button class=\"copy-btn\" data-copy=\"%s\">复制</button></td>"+
 				"<td><b>%s</b></td><td><span class=\"sev %s\">%s</span></td>"+
 				"<td><code>%s</code></td><td>%d</td></tr>",
+			htmlEscape(method), htmlEscape(evidenceLabel(endpoint.Evidence)), probeState,
 			htmlEscape(endpoint.Raw), htmlEscape(endpoint.Raw),
 			htmlEscape(method),
 			evidenceClass(endpoint.Evidence), htmlEscape(evidenceLabel(endpoint.Evidence)),
@@ -866,13 +1140,13 @@ func renderSensitiveReport(result *model.Result) (int, string, error) {
 		}
 	}
 	var b strings.Builder
-	b.WriteString(`<div class="filterbar" id="sensitive-filters">
+	b.WriteString(`<div class="filterbar" id="sensitive-filters" data-for="sensitive-table">
 <label>严重性 <select data-filter="severity"><option value="">全部</option></select></label>
 <label>规则 <select data-filter="rule"><option value="">全部</option></select></label>
 <label>来源 <select data-filter="source"><option value="">全部</option></select></label>
 <label>关键词 <input type="search" placeholder="搜索规则、值、来源或 AI 评估"></label>
-<button type="button">重置筛选</button><span class="muted" id="sensitive-count" aria-live="polite"></span>
-</div><table id="sensitive-table" class="paginated" data-page-size="50"><thead><tr><th style="width:90px">严重性</th><th style="width:200px">规则</th><th>完整值</th><th style="width:280px">来源</th><th style="width:220px">AI 评估</th></tr></thead><tbody>`)
+<button type="button" data-reset>重置筛选</button><span class="muted" id="sensitive-count" data-count aria-live="polite"></span>
+</div><table id="sensitive-table" class="paginated" data-page-size="50" data-filterable data-empty="本次没有命中敏感信息规则"><thead><tr><th style="width:90px">严重性</th><th style="width:200px">规则</th><th>完整值</th><th style="width:280px">来源</th><th style="width:220px">AI 评估</th></tr></thead><tbody>`)
 	for _, finding := range findings {
 		vendorMark := ""
 		if finding.Vendor {
@@ -1026,8 +1300,12 @@ func collectParameterStats(result *model.Result) []parameterStat {
 	// come from result.Params further down.
 	urlScenario := map[string]bool{}
 	bodyScenario := map[string]bool{}
+	pathScenario := map[string]bool{}
 	routeScenario := map[string]map[string]bool{}
 	for _, endpoint := range result.Endpoints {
+		for _, segment := range model.URLPathSegments(endpoint.URL) {
+			pathScenario[segment] = true
+		}
 		if endpoint.Type == "route" {
 			set := map[string]bool{}
 			for _, name := range model.RouteParamNames(endpoint.URL) {
@@ -1060,6 +1338,11 @@ func collectParameterStats(result *model.Result) []parameterStat {
 	}
 	for _, endpoint := range result.Endpoints {
 		extractor := endpointExtractor(endpoint)
+		// 路径段 count per endpoint with its extractor; URLPathSegments
+		// dedupes so one URL never double-counts a repeated segment.
+		for _, segment := range model.URLPathSegments(endpoint.URL) {
+			add(segment, endpoint.URL, extractor, false, false)
+		}
 		if endpoint.Type == "route" {
 			for name := range routeScenario[endpoint.URL] {
 				add(name, endpoint.URL, extractor, false, false)
@@ -1108,6 +1391,12 @@ func collectParameterStats(result *model.Result) []parameterStat {
 			scenarios[name][model.ParamScenarioRouteParam] = true
 		}
 	}
+	for name := range pathScenario {
+		if scenarios[name] == nil {
+			scenarios[name] = map[string]bool{}
+		}
+		scenarios[name][model.ParamScenarioURLPath] = true
+	}
 	locations := map[string][]string{}
 	located := map[string]map[string]bool{}
 	for _, hit := range result.Params {
@@ -1120,10 +1409,11 @@ func collectParameterStats(result *model.Result) []parameterStat {
 			scenarios[hit.Name] = set
 		}
 		set[hit.Scenario] = true
-		// Request-shaped hits (url_query / api_request / route_param) were
-		// already counted from the endpoints above, so re-adding them here
-		// would double the count. Code-shape hits have no endpoint row, so
-		// this is the only place that fills their count, hosts and extractor.
+		// Request-shaped hits (url_query / api_request / route_param /
+		// url_path) were already counted from the endpoints above, so
+		// re-adding them here would double the count. Code-shape hits have
+		// no endpoint row, so this is the only place that fills their count,
+		// hosts and extractor.
 		if codeShapeScenarios[hit.Scenario] {
 			add(hit.Name, hit.SourceURL, "ast", false, false)
 		}
@@ -1201,17 +1491,37 @@ func renderParameterReport(result *model.Result) (int, string, error) {
 	}
 	sort.Strings(hostList)
 
+	// Scenario labels are rendered here rather than auto-collected in the
+	// browser, because a row carries several of them at once.
+	scenarioSet := map[string]bool{}
+	for _, row := range rows {
+		for _, scenario := range row.Scenarios {
+			scenarioSet[model.ParamScenarioLabel(scenario)] = true
+		}
+	}
+	scenarioList := make([]string, 0, len(scenarioSet))
+	for label := range scenarioSet {
+		scenarioList = append(scenarioList, label)
+	}
+	sort.Strings(scenarioList)
+
 	var b strings.Builder
-	b.WriteString(`<div class="filterbar">
-<label>域名 <select id="host-filter"><option value="">全部</option>`)
+	b.WriteString(`<div class="filterbar" data-for="param-table">
+<label>域名 <select id="host-filter" data-filter="hosts" data-match="contains" data-static><option value="">全部</option>`)
 	for _, host := range hostList {
 		b.WriteString(`<option value="` + htmlEscape(host) + `">` + htmlEscape(host) + `</option>`)
 	}
 	b.WriteString(`</select></label>
+<label>场景 <select data-filter="scenario" data-match="contains" data-static><option value="">全部</option>`)
+	for _, label := range scenarioList {
+		b.WriteString(`<option value="` + htmlEscape(label) + `">` + htmlEscape(label) + `</option>`)
+	}
+	b.WriteString(`</select></label>
 <label>搜索 <input type="search" id="param-search" placeholder="参数名、域名或来源..."></label>
-<span class="muted" id="param-count"></span>
+<button type="button" data-reset>重置筛选</button>
+<span class="muted" id="param-count" data-count aria-live="polite"></span>
 </div>
-<table id="param-table"><thead><tr><th style="width:160px">参数名</th><th style="width:200px">场景</th><th style="width:60px">次数</th><th style="width:200px">域名</th><th style="width:110px">提取方式</th><th>来源</th></tr></thead><tbody>`)
+<table id="param-table" class="paginated" data-page-size="50" data-filterable data-empty="本次没有提取到请求参数"><thead><tr><th style="width:160px">参数名</th><th style="width:200px">场景</th><th style="width:60px">次数</th><th style="width:200px">域名</th><th style="width:110px">提取方式</th><th>来源</th></tr></thead><tbody>`)
 	for _, row := range rows {
 		markers := ""
 		if row.Body {
@@ -1221,9 +1531,12 @@ func renderParameterReport(result *model.Result) (int, string, error) {
 			markers += ` <span class="sev runtime">response</span>`
 		}
 		var scenarioBadges strings.Builder
+		scenarioLabels := make([]string, 0, len(row.Scenarios))
 		for _, scenario := range row.Scenarios {
+			label := model.ParamScenarioLabel(scenario)
+			scenarioLabels = append(scenarioLabels, label)
 			scenarioBadges.WriteString(
-				`<span class="sev scen">` + htmlEscape(model.ParamScenarioLabel(scenario)) + `</span> `)
+				`<span class="sev scen">` + htmlEscape(label) + `</span> `)
 		}
 		// The JS source location lives in its own column, not under the name:
 		// every code-shape hit contributes one source:line entry (capped
@@ -1233,42 +1546,15 @@ func renderParameterReport(result *model.Result) (int, string, error) {
 			sourceLocs.WriteString(`<div><code>` + htmlEscape(loc) + `</code></div>`)
 		}
 		fmt.Fprintf(&b,
-			"<tr data-hosts=%q><td><code>%s</code>%s</td><td>%s</td><td>%d</td><td class=\"muted\">%s</td><td>%s</td><td>%s</td></tr>",
-			strings.Join(row.Hosts, " "), htmlEscape(row.Name), markers,
+			"<tr data-hosts=\"%s\" data-scenario=\"%s\"><td><code>%s</code>%s</td><td>%s</td><td>%d</td><td class=\"muted\">%s</td><td>%s</td><td>%s</td></tr>",
+			htmlEscape(strings.Join(row.Hosts, " ")), htmlEscape(strings.Join(scenarioLabels, " ")),
+			htmlEscape(row.Name), markers,
 			scenarioBadges.String(),
 			row.Count, htmlEscape(strings.Join(row.Hosts, ", ")),
 			htmlEscape(strings.Join(row.Sources, ", ")),
 			sourceLocs.String())
 	}
-	b.WriteString(`</tbody></table>
-<script>
-(function(){
-  var rows = Array.prototype.slice.call(document.querySelectorAll('#param-table tbody tr'));
-  var host = document.getElementById('host-filter');
-  var search = document.getElementById('search-fallback') || null;
-  var query = document.getElementById('param-search');
-  var counter = document.getElementById('param-count');
-  function apply(){
-    var hostValue = host.value.toLowerCase();
-    var text = query.value.toLowerCase();
-    var visible = 0;
-    rows.forEach(function(row){
-      var ok = (!hostValue || (row.dataset.hosts || '').toLowerCase().indexOf(hostValue) !== -1) &&
-               (!text || row.textContent.toLowerCase().indexOf(text) !== -1);
-      row.style.display = ok ? '' : 'none';
-      if (ok) visible++;
-    });
-    counter.textContent = '显示 ' + visible + ' / ' + rows.length + ' 个参数';
-  }
-  host.addEventListener('change', apply);
-  var timer = null;
-  query.addEventListener('input', function(){
-    clearTimeout(timer);
-    timer = setTimeout(apply, 150);
-  });
-  apply();
-})();
-</script>`)
+	b.WriteString(`</tbody></table>`)
 	return len(rows), b.String(), nil
 }
 
@@ -1282,7 +1568,15 @@ func renderRouteReport(result *model.Result) (int, string, error) {
 	}
 	sort.SliceStable(routes, func(i, j int) bool { return routes[i].URL < routes[j].URL })
 	var b strings.Builder
-	b.WriteString(`<table><thead><tr><th>路由路径</th><th style="width:140px">提取方式</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:110px">探测结果</th></tr></thead><tbody>`)
+	b.WriteString(`<div class="filterbar" data-for="route-table">` +
+		`<label>提取方式 <select data-filter="extractor"><option value="">全部</option></select></label>` +
+		`<label>证据 <select data-filter="evidence"><option value="">全部</option></select></label>` +
+		`<label>探测结果 <select data-filter="probe"><option value="">全部</option></select></label>` +
+		`<label>搜索 <input type="search" placeholder="路由、来源或提取方式..."></label>` +
+		`<button type="button" data-reset>重置筛选</button>` +
+		`<span class="muted" data-count aria-live="polite"></span></div>`)
+	b.WriteString(`<table id="route-table" class="paginated" data-page-size="50" data-filterable data-empty="本次未发现前端或服务端路由">` +
+		`<thead><tr><th>路由路径</th><th style="width:140px">提取方式</th><th style="width:90px">证据</th><th style="width:280px">来源</th><th style="width:110px">探测结果</th></tr></thead><tbody>`)
 	for _, route := range routes {
 		probe := route.Probe
 		probeLabel, probeClass := "未探测", "info"
@@ -1297,7 +1591,8 @@ func renderRouteReport(result *model.Result) (int, string, error) {
 			probeLabel, probeClass = "无基准", "info"
 		}
 		fmt.Fprintf(&b,
-			"<tr><td><code>%s</code>%s</td><td>%s</td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code></td><td><span class=\"sev %s\">%s</span></td></tr>",
+			"<tr data-extractor=\"%s\" data-evidence=\"%s\" data-probe=\"%s\"><td><code>%s</code>%s</td><td>%s</td><td><span class=\"sev %s\">%s</span></td><td><code>%s</code></td><td><span class=\"sev %s\">%s</span></td></tr>",
+			htmlEscape(extractorLabel(route.Source)), htmlEscape(evidenceLabel(route.Evidence)), htmlEscape(probeLabel),
 			htmlEscape(route.URL), rawPathNote(route), htmlEscape(extractorLabel(route.Source)),
 			evidenceClass(route.Evidence), htmlEscape(evidenceLabel(route.Evidence)),
 			htmlEscape(route.SourceURL),
@@ -1340,11 +1635,23 @@ func renderResourceReport(result *model.Result) (int, string, error) {
 	resources := append([]model.Resource(nil), result.Resources...)
 	sort.SliceStable(resources, func(i, j int) bool { return resources[i].URL < resources[j].URL })
 	var b strings.Builder
-	b.WriteString(`<table><thead><tr><th style="width:90px">类型</th><th>URL</th><th style="width:60px">状态</th><th style="width:90px">大小</th><th style="width:220px">本地路径</th></tr></thead><tbody>`)
+	b.WriteString(`<div class="filterbar" data-for="resource-table">` +
+		`<label>类型 <select data-filter="type"><option value="">全部</option></select></label>` +
+		`<label>状态 <select data-filter="status"><option value="">全部</option></select></label>` +
+		`<label>搜索 <input type="search" placeholder="URL、类型或本地路径..."></label>` +
+		`<button type="button" data-reset>重置筛选</button>` +
+		`<span class="muted" data-count aria-live="polite"></span></div>`)
+	b.WriteString(`<table id="resource-table" class="paginated" data-page-size="50" data-filterable data-empty="本次未采集到静态资源">` +
+		`<thead><tr><th style="width:90px">类型</th><th>URL</th><th style="width:60px">状态</th><th style="width:90px">大小</th><th style="width:220px">本地路径</th></tr></thead><tbody>`)
 	for _, resource := range resources {
-		fmt.Fprintf(&b, "<tr><td>%s</td><td><code>%s</code></td><td>%d</td><td>%d</td><td><code>%s</code></td></tr>",
+		status := strconv.Itoa(resource.StatusCode)
+		if resource.StatusCode == 0 {
+			status = "未获取"
+		}
+		fmt.Fprintf(&b, "<tr data-type=\"%s\" data-status=\"%s\"><td>%s</td><td><code>%s</code></td><td>%s</td><td>%d</td><td><code>%s</code></td></tr>",
+			htmlEscape(string(resource.Type)), htmlEscape(status),
 			htmlEscape(string(resource.Type)), htmlEscape(resource.URL),
-			resource.StatusCode, resource.Size, htmlEscape(resource.LocalPath))
+			htmlEscape(status), resource.Size, htmlEscape(resource.LocalPath))
 	}
 	b.WriteString("</tbody></table>")
 	return len(resources), b.String(), nil
@@ -1431,7 +1738,7 @@ func renderHostReport(result *model.Result) (int, string, error) {
 	summary := buildHostSummary(result, newHostIndex(nil))
 
 	var b strings.Builder
-	b.WriteString(`<div class="filterbar"><span class="muted">`)
+	b.WriteString(`<p class="muted">`)
 	b.WriteString(htmlEscape(
 		"本页列出本次扫描发现的主机资产：域名、IPv4、IPv6 与内部主机候选。" +
 			"“内容发现”指出现在被分析内容（JavaScript、内联脚本、文档、source map）中的主机值；" +
@@ -1440,7 +1747,15 @@ func renderHostReport(result *model.Result) (int, string, error) {
 			"提取不执行目标代码、不做 DNS 查询、不做连通性探测：出现在本页不代表主机可访问或存在漏洞；" +
 			"内部主机候选不计入域名统计。",
 	))
-	b.WriteString(`</span></div>`)
+	b.WriteString(`</p>`)
+	b.WriteString(`<div class="filterbar" data-for="*">` +
+		`<label>类型 <select data-filter="kind"><option value="">全部</option></select></label>` +
+		`<label>后缀状态 <select data-filter="status"><option value="">全部</option></select></label>` +
+		`<label>数据来源 <select data-filter="origin" data-match="contains" data-static><option value="">全部</option>` +
+		`<option value="内容发现">内容发现</option><option value="扫描关联">扫描关联</option></select></label>` +
+		`<label>搜索 <input type="search" placeholder="主机、可注册域、后缀或来源..."></label>` +
+		`<button type="button" data-reset>重置筛选</button>` +
+		`<span class="muted" data-count aria-live="polite"></span></div>`)
 
 	b.WriteString(`<h2 class="section-title">主机类型统计</h2><table><thead><tr>` +
 		`<th style="width:220px">类型</th><th style="width:160px">内容发现</th>` +
@@ -1462,11 +1777,11 @@ func renderHostReport(result *model.Result) (int, string, error) {
 		asset := entry.asset
 		if asset.Kind != currentKind {
 			if currentKind != "" {
-				b.WriteString(`</tbody></table>`)
+				b.WriteString(`</tbody></table></section>`)
 			}
 			currentKind = asset.Kind
-			fmt.Fprintf(&b, `<h2 class="section-title">%s（%d）</h2>`+
-				`<table class="paginated" data-page-size="50"><thead><tr>`+
+			fmt.Fprintf(&b, `<section data-filter-section><h2 class="section-title">%s（%d）</h2>`+
+				`<table class="paginated" data-page-size="50" data-filterable><thead><tr>`+
 				`<th>主机</th><th style="width:170px">可注册域</th>`+
 				`<th style="width:120px">公共后缀</th><th style="width:100px">子域</th>`+
 				`<th style="width:130px">后缀状态</th><th style="width:150px">地址属性</th>`+
@@ -1475,7 +1790,10 @@ func renderHostReport(result *model.Result) (int, string, error) {
 				`</tr></thead><tbody>`,
 				htmlEscape(hostKindLabel(string(asset.Kind))), rowsForKind(rows, asset.Kind))
 		}
-		b.WriteString("<tr>")
+		fmt.Fprintf(&b, "<tr data-kind=\"%s\" data-status=\"%s\" data-origin=\"%s\">",
+			htmlEscape(hostKindLabel(string(asset.Kind))),
+			htmlEscape(hostSuffixStatusLabel(asset.SuffixStatus)),
+			htmlEscape(strings.Join(entry.origins, " / ")))
 		fmt.Fprintf(&b, `<td><code>%s</code><button class="copy-btn" data-copy="%s">复制</button>`,
 			htmlEscape(asset.Value), htmlEscape(asset.Value))
 		if asset.Zone != "" {
@@ -1537,7 +1855,7 @@ func renderHostReport(result *model.Result) (int, string, error) {
 		b.WriteString("</td></tr>")
 	}
 	if currentKind != "" {
-		b.WriteString(`</tbody></table>`)
+		b.WriteString(`</tbody></table></section>`)
 	}
 	if len(rows) == 0 {
 		b.WriteString(`<p class="muted">本次未发现主机。</p>`)

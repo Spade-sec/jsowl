@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/youmulijiang/jsowl/internal/aiagent"
 	"github.com/youmulijiang/jsowl/internal/aiclient"
 	"github.com/youmulijiang/jsowl/internal/analyze"
 	"github.com/youmulijiang/jsowl/internal/collect"
@@ -214,10 +215,15 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 	}
 	defer client.Close()
 
-	targetContext, cancel := context.WithTimeout(ctx, s.config.Request.TargetTimeout)
+	// networkContext is this target's collection budget: it bounds every
+	// network request (downloads, probes, the browser stage) while leaving
+	// local analysis of already-fetched JavaScript bounded only by the
+	// caller's ctx. The caller's cancellation and deadline propagate into it
+	// through context.WithTimeout, so Ctrl+C and caller deadlines always win.
+	networkContext, cancel := context.WithTimeout(ctx, s.config.Request.TargetTimeout)
 	defer cancel()
 	started := time.Now()
-	reportDirectory, err := storage.ScanDirectory(targetContext, s.config.Output.Directory, target.URL, started)
+	reportDirectory, err := storage.ScanDirectory(networkContext, s.config.Output.Directory, target.URL, started)
 	if err != nil {
 		return nil, err
 	}
@@ -230,10 +236,13 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 		Getter:          getter, Analyzer: s.analyzer, Config: s.config,
 		ProbeEvents:     s.probeSink,
 		AnalysisLimiter: s.analysisLimiter,
+		NetworkContext:  networkContext,
 	})
-	// AI assist layer (-ai): the three enrichers share one client and one
-	// request budget. Without -ai they stay nil and the pipeline no-ops.
-	if s.config.AI.Enabled {
+	// AI assist layer (-ai): fast mode runs the three one-shot enrichers
+	// inside the pipeline, sharing one client and one request budget. Agent
+	// mode leaves the pipeline untouched and runs the post-scan agent loop
+	// in runAIAgent instead.
+	if s.config.AI.Enabled && !s.config.AI.AgentMode() {
 		aiClient := aiclient.New(
 			s.config.AI.BaseURL, s.config.AI.APIKey, s.config.AI.Model, s.config.AI.Format,
 		)
@@ -244,37 +253,75 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 	switch s.config.Mode {
 	case ModeDirect:
 		result, _, err = resourcePipeline.RunDetailed(
-			targetContext, target, headers, nil, nil, nil,
+			ctx, target, headers, nil, nil, nil,
 		)
 	case ModeBrowser:
 		result, err = s.scanWithBrowser(
-			targetContext, root, target, headers, jar, resourcePipeline, nil,
+			ctx, networkContext, root, target, headers, jar, resourcePipeline, nil,
 		)
 	case ModeAuto:
 		var evidence discover.SPAEvidence
 		result, evidence, err = resourcePipeline.RunDetailed(
-			targetContext, target, headers, nil, nil, nil,
+			ctx, target, headers, nil, nil, nil,
 		)
 		if err == nil && needsBrowser(evidence, result) {
-			var browserResult *model.Result
-			browserResult, err = s.scanWithBrowser(
-				targetContext, root, target, headers, jar, resourcePipeline,
-				collectedURLs(result),
-			)
-			if err != nil {
-				if contextErr := targetContext.Err(); contextErr != nil {
-					err = contextErr
-				} else {
-					result.BrowserStatus = model.BrowserStatus{
-						Attempted: true,
-						Degraded:  true,
-						Reason:    err.Error(),
-					}
-					err = nil
+			if networkContext.Err() != nil {
+				// The static pass already used up the collection budget. Do
+				// not open the browser for a request that cannot succeed:
+				// keep the direct results and say why runtime coverage is
+				// missing.
+				err = fmt.Errorf(
+					"browser stage skipped, collection budget exhausted: %w",
+					networkContext.Err(),
+				)
+				result.BrowserStatus = model.BrowserStatus{
+					Attempted: true,
+					Degraded:  true,
+					Reason:    "collection budget (request.target_timeout) exhausted before the browser stage",
 				}
+				markCollectionIncomplete(result, result.BrowserStatus.Reason)
 			} else {
-				result = mergeResults(result, browserResult)
-				result.BrowserStatus = browserResult.BrowserStatus
+				var browserResult *model.Result
+				browserResult, err = s.scanWithBrowser(
+					ctx, networkContext, root, target, headers, jar,
+					resourcePipeline, collectedURLs(result),
+				)
+				if err != nil {
+					if contextErr := networkContext.Err(); contextErr != nil {
+						// The budget or the caller ran out during the browser
+						// stage. The direct results stand; whatever the
+						// browser stage already processed is merged too.
+						err = fmt.Errorf(
+							"browser stage stopped, results fetched so far kept: %w",
+							contextErr,
+						)
+					} else {
+						result.BrowserStatus = model.BrowserStatus{
+							Attempted: true,
+							Degraded:  true,
+							Reason:    err.Error(),
+						}
+						err = nil
+					}
+				}
+				if browserResult != nil {
+					result = mergeResults(result, browserResult)
+					result.BrowserStatus = browserResult.BrowserStatus
+				}
+				if err != nil {
+					// A context stop during the browser stage: keep every
+					// result and make sure the report is never mistaken for
+					// a complete scan.
+					result.BrowserStatus.Attempted = true
+					result.BrowserStatus.Degraded = true
+					if result.BrowserStatus.Reason == "" {
+						result.BrowserStatus.Reason = err.Error()
+					}
+					markCollectionIncomplete(
+						result,
+						"浏览器阶段被停止（采集预算耗尽或调用方取消），运行时覆盖不完整",
+					)
+				}
 			}
 		}
 	}
@@ -287,8 +334,54 @@ func (s *Scanner) Scan(ctx context.Context, target Target) (*Result, error) {
 		result.StartedAt = started
 		result.FinishedAt = time.Now()
 		result.UserAgent = userAgent
+		if s.config.AI.Enabled && s.config.AI.AgentMode() {
+			s.runAIAgent(ctx, result)
+		}
 	}
 	return result, err
+}
+
+// runAIAgent executes the post-scan agent phase (ai.mode: agent) and merges
+// its advisory output into the result. It receives the caller's context,
+// not the per-target timeout: collection has finished by now, and a scan
+// that spent most of its target budget still deserves a fair AI phase. The
+// agent's tools are read-only over local evidence, so this call never
+// touches the target — the AI upstream is the only endpoint it talks to.
+func (s *Scanner) runAIAgent(ctx context.Context, result *model.Result) {
+	if len(result.Endpoints) == 0 && len(result.Findings) == 0 {
+		return
+	}
+	agentClient := aiclient.New(
+		s.config.AI.BaseURL, s.config.AI.APIKey, s.config.AI.Model, s.config.AI.Format,
+	)
+	agent := aiagent.New(agentClient, aiagent.NewEvidence(result), aiagent.Options{
+		MaxSteps:    s.config.AI.MaxSteps,
+		MaxRequests: s.config.AI.MaxRequests,
+	})
+	outcome := agent.Run(ctx, result)
+	if outcome.Final != nil {
+		stats := aiagent.Apply(result, outcome.Final)
+		stats.Steps = outcome.Steps
+		stats.Requests = outcome.Requests
+		result.AI.Stats = &stats
+	} else {
+		result.AI = &model.AISummary{Stats: &model.AIAgentStats{
+			Status:   outcome.Status,
+			Steps:    outcome.Steps,
+			Requests: outcome.Requests,
+			Reason:   outcome.Reason,
+		}}
+	}
+	if outcome.Status == aiagent.StatusFailed {
+		result.Issues = append(result.Issues, model.Issue{
+			Code: "ai_agent_failed", Stage: "ai", Message: outcome.Reason,
+		})
+	}
+	if outcome.TranscriptPath != "" {
+		result.Issues = append(result.Issues, model.Issue{
+			Code: "ai_transcript", Stage: "ai", Message: "AI 分析对话记录: " + outcome.TranscriptPath,
+		})
+	}
 }
 
 // scanLocal analyzes local JavaScript through the same request setup and
@@ -335,7 +428,10 @@ func (s *Scanner) scanLocal(
 	}
 	defer client.Close()
 
-	targetContext, cancel := context.WithTimeout(ctx, s.config.Request.TargetTimeout)
+	// networkContext bounds only the API probes a local analysis may issue;
+	// reading and analyzing the local files themselves is bounded by the
+	// caller's ctx alone.
+	networkContext, cancel := context.WithTimeout(ctx, s.config.Request.TargetTimeout)
 	defer cancel()
 	var getter collect.Getter = client
 	if s.requestSink != nil {
@@ -346,9 +442,10 @@ func (s *Scanner) scanLocal(
 		Getter:          getter, Analyzer: s.analyzer, Config: s.config,
 		ProbeEvents:     s.probeSink,
 		AnalysisLimiter: s.analysisLimiter,
+		NetworkContext:  networkContext,
 	})
 	// AI refinement is deliberately not wired into local analysis.
-	result, _, err := resourcePipeline.RunLocal(targetContext, input, headers)
+	result, _, err := resourcePipeline.RunLocal(ctx, input, headers)
 	if result != nil {
 		normalizeHashRoutes(result)
 		pipeline.Finalize(result)
@@ -455,8 +552,27 @@ func (s *Scanner) ScanBatch(
 	return output
 }
 
+// markCollectionIncomplete downgrades a result's collection verdict when a
+// stage failed after the pipeline had already reported its own completeness
+// (e.g. the auto mode's browser stage). The analysis verdict is untouched:
+// local analysis of fetched files is unaffected by a later stage failing.
+func markCollectionIncomplete(result *model.Result, reason string) {
+	if result.Completeness == nil {
+		result.Completeness = &model.Completeness{
+			Collection: model.PhaseCompleteness{Complete: false, Reason: reason},
+			Analysis:   model.PhaseCompleteness{Complete: true},
+		}
+		return
+	}
+	result.Completeness.Collection.Complete = false
+	if result.Completeness.Collection.Reason == "" {
+		result.Completeness.Collection.Reason = reason
+	}
+}
+
 func (s *Scanner) scanWithBrowser(
 	ctx context.Context,
+	networkContext context.Context,
 	root *url.URL,
 	target model.Target,
 	headers http.Header,
@@ -477,7 +593,7 @@ func (s *Scanner) scanWithBrowser(
 	if cookieHeader := serializeCookies(jar.Cookies(root)); cookieHeader != "" {
 		browserHeaders.Set("Cookie", cookieHeader)
 	}
-	rendered, err := collector.Collect(ctx, root, browserHeaders)
+	rendered, err := collector.Collect(networkContext, root, browserHeaders)
 	if err != nil {
 		return nil, fmt.Errorf("collect browser page: %w", err)
 	}
@@ -488,6 +604,9 @@ func (s *Scanner) scanWithBrowser(
 		Body:   rendered.HTML,
 	}
 	seeds := browserSeeds(root, rendered)
+	// Analysis of everything the browser fetched runs under the caller's
+	// context, not the collection budget, so a scan that spent most of its
+	// budget rendering still analyzes every fetched file.
 	result, _, err := resourcePipeline.RunDetailed(
 		ctx, target, headers, &entry, seeds, previouslySeen,
 	)
@@ -700,6 +819,12 @@ func mergeResults(primary, secondary *model.Result) *model.Result {
 	}
 	sort.Strings(primary.Technologies)
 	primary.Issues = append(primary.Issues, secondary.Issues...)
+	// The later pass's completeness verdict wins: it is derived from the
+	// pipeline-level coverage tracker, which already includes the earlier
+	// pass, and it carries the newest budget/cancellation observations.
+	if secondary.Completeness != nil {
+		primary.Completeness = secondary.Completeness
+	}
 	sort.Slice(primary.Resources, func(i, j int) bool {
 		return primary.Resources[i].URL < primary.Resources[j].URL
 	})

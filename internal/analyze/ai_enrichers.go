@@ -328,14 +328,16 @@ func (a *AITaintEnricher) EnrichTaint(result *model.Result) *model.Result {
 	return result
 }
 
-// knownEndpoint reports whether url suffix-matches any discovered endpoint.
+// knownEndpoint reports whether url suffix-matches any discovered endpoint
+// at a path-segment boundary, so a guessed "/user" cannot ride on
+// "/admin/user".
 func knownEndpoint(result *model.Result, url string) bool {
 	if url == "" {
 		return false
 	}
 	for i := range result.Endpoints {
-		if strings.HasSuffix(result.Endpoints[i].Raw, strings.TrimLeft(url, "/")) ||
-			strings.HasSuffix(result.Endpoints[i].URL, strings.TrimLeft(url, "/")) {
+		if model.SegmentSuffixMatch(result.Endpoints[i].Raw, url) ||
+			model.SegmentSuffixMatch(result.Endpoints[i].URL, url) {
 			return true
 		}
 	}
@@ -355,7 +357,10 @@ func (a *AIFindingEnricher) EnrichFindings(result *model.Result) *model.Result {
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
-		return candidates[i].Severity > candidates[j].Severity
+		// Rank by weight, not by string: "critical" sorts below "medium"
+		// alphabetically, which would drop the most valuable findings from
+		// the top-30 cut first.
+		return model.SeverityRank(candidates[i].Severity) > model.SeverityRank(candidates[j].Severity)
 	})
 	if len(candidates) > 30 {
 		candidates = candidates[:30]

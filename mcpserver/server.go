@@ -151,11 +151,16 @@ type scanOutput struct {
 	// Browser collection outcome. Degraded means the browser phase failed
 	// and the result carries direct-mode evidence only, so the caller knows
 	// runtime extraction was lost.
-	BrowserAttempted bool     `json:"browser_attempted"`
-	BrowserUsed      bool     `json:"browser_used"`
-	BrowserDegraded  bool     `json:"browser_degraded,omitempty"`
-	BrowserReason    string   `json:"browser_reason,omitempty"`
-	TopEndpoints     []string `json:"top_endpoints,omitempty"`
+	BrowserAttempted bool   `json:"browser_attempted"`
+	BrowserUsed      bool   `json:"browser_used"`
+	BrowserDegraded  bool   `json:"browser_degraded,omitempty"`
+	BrowserReason    string `json:"browser_reason,omitempty"`
+	// Complete states whether both scan phases finished. A partial scan
+	// still returns its results and report; ScanError explains what stopped
+	// it, so a budget-exhausted scan is never mistaken for a complete one.
+	Complete     bool     `json:"complete"`
+	ScanError    string   `json:"scan_error,omitempty"`
+	TopEndpoints []string `json:"top_endpoints,omitempty"`
 }
 
 func (s *Store) scanTool(ctx context.Context, req *mcp.CallToolRequest, input scanInput) (*mcp.CallToolResult, scanOutput, error) {
@@ -195,9 +200,12 @@ func (s *Store) scanTool(ctx context.Context, req *mcp.CallToolRequest, input sc
 		return nil, scanOutput{}, fmt.Errorf("create scanner: %w", err)
 	}
 	result, err := scanner.Scan(ctx, target)
-	if err != nil {
+	if err != nil && result == nil {
 		return nil, scanOutput{}, fmt.Errorf("scan %s: %w", raw, err)
 	}
+	// A scan that stopped early (collection budget exhausted, caller
+	// cancelled) still returns every result it produced; the error travels
+	// in the output instead of discarding the partial report.
 
 	id := s.put(result)
 	reportDir, reportErr := s.writeReports(raw, result)
@@ -214,6 +222,15 @@ func (s *Store) scanTool(ctx context.Context, req *mcp.CallToolRequest, input sc
 		BrowserUsed:      result.BrowserStatus.Used,
 		BrowserDegraded:  result.BrowserStatus.Degraded,
 		BrowserReason:    result.BrowserStatus.Reason,
+		Complete: result.Completeness == nil ||
+			(result.Completeness.Collection.Complete &&
+				result.Completeness.Analysis.Complete),
+		ScanError: func() string {
+			if err != nil {
+				return err.Error()
+			}
+			return ""
+		}(),
 	}
 	for _, endpoint := range result.Endpoints {
 		if endpoint.Evidence == jsowl.EvidenceRuntime || endpoint.Evidence == jsowl.EvidenceFullURL {

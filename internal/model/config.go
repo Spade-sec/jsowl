@@ -317,6 +317,16 @@ func (c Config) Validate() error {
 		if c.AI.MaxRequests < 0 {
 			return errors.New("ai.max_requests must not be negative")
 		}
+		// Empty mode keeps the historical fast enrichers; anything but the
+		// two canonical names is a typo worth rejecting loudly.
+		switch strings.ToLower(strings.TrimSpace(c.AI.Mode)) {
+		case "", AIModeFast, AIModeAgent:
+		default:
+			return fmt.Errorf("ai.mode 不支持 %q（可选 fast / agent）", c.AI.Mode)
+		}
+		if c.AI.MaxSteps < 0 {
+			return errors.New("ai.max_steps must not be negative")
+		}
 	}
 	// MaxResources accepts 0 for "no cap"; MaxBodySize accepts 0 for
 	// "download in full"; negative values are rejected.

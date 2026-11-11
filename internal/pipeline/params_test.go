@@ -7,7 +7,8 @@ import (
 )
 
 // TestDeriveParamHitsScenarios checks the endpoint-side scenarios: API request
-// bodies, URL query strings, and framework route placeholders.
+// bodies, URL query strings, URL path segments, and framework route
+// placeholders.
 func TestDeriveParamHitsScenarios(t *testing.T) {
 	result := &model.Result{
 		Endpoints: []model.Endpoint{
@@ -50,6 +51,25 @@ func TestDeriveParamHitsScenarios(t *testing.T) {
 	if hit := find("ver", model.ParamScenarioURLQuery); hit == nil {
 		t.Fatalf("url_query ver missing from %+v", hits)
 	}
+	// 路径段: /users/list 的字面段,资源 URL 的文件名不算
+	if hit := find("users", model.ParamScenarioURLPath); hit == nil {
+		t.Fatalf("url_path users missing from %+v", hits)
+	}
+	if hit := find("list", model.ParamScenarioURLPath); hit == nil {
+		t.Fatalf("url_path list missing from %+v", hits)
+	}
+	if hit := find("app.js", model.ParamScenarioURLPath); hit != nil {
+		t.Fatalf("resource file names must not become url_path hits: %+v", hits)
+	}
+	// 路径段: 哈希路由的字面段;占位符 :userId 只归 route_param
+	for _, segment := range []string{"user", "profile"} {
+		if hit := find(segment, model.ParamScenarioURLPath); hit == nil {
+			t.Fatalf("url_path %s missing from %+v", segment, hits)
+		}
+	}
+	if hit := find(":userId", model.ParamScenarioURLPath); hit != nil {
+		t.Fatalf("route placeholders must not become url_path hits: %+v", hits)
+	}
 	// 路由参数: /user/:userId/profile
 	if hit := find("userId", model.ParamScenarioRouteParam); hit == nil {
 		t.Fatalf("route_param userId missing from %+v", hits)
@@ -72,6 +92,41 @@ func TestRouteParamNames(t *testing.T) {
 		for i := range want {
 			if got[i] != want[i] {
 				t.Fatalf("routeParamNames(%q) = %v, want %v", raw, got, want)
+			}
+		}
+	}
+}
+
+// TestURLPathSegments covers the literal path-segment extraction: plain and
+// hash-routed paths yield segments, placeholders and file-like segments stay
+// out, and repeats dedupe in URL order.
+func TestURLPathSegments(t *testing.T) {
+	cases := map[string][]string{
+		"https://api.example.test/api/ra":      {"api", "ra"}, // 用户示例: /api/ra → api, ra
+		"/api/ra":                              {"api", "ra"},
+		"https://host/static/js/app.js":        {"static", "js"}, // 文件名不算参数
+		"https://host/#/user/list":             {"user", "list"},
+		"https://host/#!/user/list":            {"user", "list"},
+		"https://host/#/user/list?tab=1":       {"user", "list"},
+		"https://host/user/:userId/profile":    {"user", "profile"},
+		"https://host/user/{userId}/profile":   {"user", "profile"},
+		"https://host/order/12345":             {"order", "12345"}, // 数字段是可 fuzz 的路径位
+		"https://host/a/b/a":                   {"a", "b"},         // 去重,保持顺序
+		"https://host/?page=1":                 {},
+		"https://host":                         {},
+		"https://host/static/config.json":      {"static"},
+		"https://host/api/v%202/name%20x":      {"api", "v 2", "name x"}, // 已解码
+		"https://host/api/export.csv?format=1": {"api"},                  // 文件名不算,查询串不是路径段
+		"https://host/api/ra/":                 {"api", "ra"},            // 尾斜杠不产生空段
+	}
+	for raw, want := range cases {
+		got := model.URLPathSegments(raw)
+		if len(got) != len(want) {
+			t.Fatalf("URLPathSegments(%q) = %v, want %v", raw, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("URLPathSegments(%q) = %v, want %v", raw, got, want)
 			}
 		}
 	}

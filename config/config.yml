@@ -1,7 +1,11 @@
 mode: auto
 
 request:
+  # 单次 HTTP 请求的上限。
   timeout: 15s
+  # 单个目标的网络采集总预算（下载、GET/POST 探测与浏览器阶段共用）。
+  # 预算耗尽后停止派发新的网络请求并保留已获取结果；已获取 JS 的本地分析
+  # 不受此预算限制，只受 Ctrl+C 或调用方取消约束。
   target_timeout: 5m
   retry: 1
   proxy: ""
@@ -41,6 +45,7 @@ browser:
   aggressive: false
   # 仅在受限容器/靶场中 Chrome 沙箱无法启动时开启；默认保持 false。
   no_sandbox: false
+  ignore_certificate_errors: false
   # 可覆盖为 collect_resource_urls.js 的绝对路径。
   collector_script: ""
   disable_injection: false
@@ -172,3 +177,6 @@ ai:
   format: "openai-chat"
   model: "glm-4-flash"
   max_requests: 20                 # 单次扫描 AI 请求上限
+  # mode: "agent"                   # fast（默认）/ agent（扫描后分析循环）
+  # max_steps: 10                   # agent 模式循环轮数上限（默认 10）
+

@@ -495,6 +495,8 @@ func TestParameterReportMarksScenarios(t *testing.T) {
 	for _, want := range []string{
 		"userId", "apiKey", "q",
 		"对象属性", "变量赋值", "URL参数",
+		// 端点路径段: /api/users 与 /search 各自的字面段带 路径段 徽标。
+		`<code>api</code>`, `<code>users</code>`, `<code>search</code>`, "路径段",
 		"app.js",
 	} {
 		if !strings.Contains(html, want) {
@@ -512,7 +514,7 @@ func TestParameterReportMarksScenarios(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"userId", "apiKey", "q"} {
+	for _, want := range []string{"userId", "apiKey", "q", "api\n", "search\n"} {
 		if !strings.Contains(string(text), want) {
 			t.Fatalf("参数.txt missing %q", want)
 		}
