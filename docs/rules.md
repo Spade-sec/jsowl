@@ -14,27 +14,6 @@
 
 规则文件支持两种格式，加载时自动识别。
 
-## HaE 原生格式
-
-config/rules.yml 即此格式——直接复用 HaE 规则库文件，无需转换（`scope` 字段接受但忽略；`color` 映射为严重级别；`sensitive: false` 即默认忽略大小写）：
-
-```yaml
-rules:
-- group: 疑似漏洞
-  rule:
-  - name: GET 明文id
-    loaded: true
-    f_regex: (\b(?<!_)(id|\w+id)=(\d{2,15})\b(?![-_\/]))
-    s_regex: ''
-    format: '{0}'       # {0}=整个匹配，{N}=第 N 个捕获组
-    color: green
-    scope: request line # 接受但忽略
-    engine: nfa
-    sensitive: false
-```
-
-每条 HaE 规则生成形如 `hae.<组名>.<规则名>` 的 ID，可在 `disabled` 中引用。
-
 ## JsOwl 原生格式
 
 适合手工维护的精简规则（字段含义等价：`pattern` 对应 `f_regex`、`s_regex`/`s_group`/`format`/`ignore_case` 同名、`enabled` 对应 `loaded`，缺省即 true）：
@@ -64,6 +43,8 @@ config/rules.yml 已收录并适配适合 Web/JavaScript 信息收集的规则�
 “扩展敏感配置字段”保留用户提供的 112 个关键词，支持原表达式的多种赋值符号及 JSON 键名引号；仅输出 8–64 位、由字母数字和 `_=-` 组成的引号内值。该规则使用自己的匹配条件，不继承上面各字段规则的占位符过滤。
 
 数据库规则支持 MySQL/MariaDB、PostgreSQL、MongoDB（含 SRV 和多节点）、Redis/Rediss、SQL Server、Oracle URI，并补充 JDBC、分号参数连接串及 Go MySQL DSN。显式包含账密的 URI、参数连接串和 Go DSN 按 high 标记；普通连接地址和 JDBC 按 medium 标记，实际影响需要结合连接参数判断。匹配结果保留完整连接串，包含的账密不会脱敏；`${…}` 动态配置引用会被排除。带账密 URI 不再由普通地址规则重复提取。
+
+HTTP/HTTPS/FTP/FTPS/WS/WSS 的 `user:pass@host` 内嵌账密由“网络信息”组的 URL内嵌账密 提取，支持端口、IPv6 主机与后续路径；数据库 URI 不在此规则重复匹配，避免同一地址被两组规则各报一条。
 
 ## 用户级规则文件
 

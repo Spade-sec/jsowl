@@ -22,12 +22,30 @@
 # 说明：本文件的捕获组取值统一通过 format 指定（如 {1} 取第 1 组），因为
 # HaE 解析固定以整段匹配（组 0）为提取值。规则 ID 由 组名/规则名 自动生成
 # （hae.<组名>.<规则名>），disabled 列表按此 ID 寻址。
+#
+# 维护约定：
+# - f_regex / s_regex 使用 YAML 字面块（|-）书写，正则里的反斜杠不必再转义。
+#   每条正则保持单行；拆成多行会改变匹配文本。
+# - 规则默认忽略大小写（sensitive: false 等价于引擎级 IgnoreCase）。pattern
+#   里保留的 (?i) 与引擎选项等价，便于把单条规则复制到 HaE 时语义不变。
+# - 每条规则显式声明 severity；缺省时按 color 映射：red→critical、
+#   orange/pink→high、yellow/magenta→medium、green→low。
+# - 以下规则存在重叠，当前保持原样以维持既有输出；如需减少重复 finding，
+#   可用 disabled 关闭其一：凭据字段值 覆盖了 用户名字段值 的 username；
+#   通用敏感 Key-Value、密钥提取 与 凭据字段值 在 access_key/secret_key 等
+#   字段上重叠；OpenID 或 AppSecret 的 app_secret 被前两者覆盖；
+#   RememberMe 参数值 与 Shiro指纹 会对 rememberMe=deleteMe 各报一条。
+# - 指纹暴露 组目前以 finding 形式输出；若迁移到 Technologies 字段，需同步
+#   调整报告与测试，并会改变输出结构。
+# - URL内嵌账密 只覆盖 http/https/ftp/ftps/ws/wss 的 user:pass@host 形态；
+#   数据库连接串由 数据库账密URI 负责，避免同一 URL 被两组规则重复报出。
 rules:
 - group: 密钥凭证
   rule:
   - name: 云账号配置值
     loaded: true
-    f_regex: "(?i)(?<![\\w$])[\"'`]?(?:account(?:[_-]?(?:name|key|sid))?)[\"'`]?\\s*[:=]\\s*([\"'`])((?![^\"'`\\r\\n]{0,512}\\$\\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\\w-]+|<[^\\r\\n]{0,128}>|\\*{3,}|x{3,}|\\.{3,}|%s|\\{\\{[^\\r\\n]{0,128}\\}\\}|(?:process\\.env|import\\.meta\\.env)(?:\\.[\\w$]+)?)\\1)[^\"'`\\r\\n]{1,512})\\1"
+    f_regex: |-
+      (?i)(?<![\w$])["'`]?(?:account(?:[_-]?(?:name|key|sid))?)["'`]?\s*[:=]\s*(["'`])((?![^"'`\r\n]{0,512}\$\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\w-]+|<[^\r\n]{0,128}>|\*{3,}|x{3,}|\.{3,}|%s|\{\{[^\r\n]{0,128}\}\}|(?:process\.env|import\.meta\.env)(?:\.[\w$]+)?)\1)[^"'`\r\n]{1,512})\1
     s_regex: ''
     format: '{2}'
     color: yellow
@@ -37,7 +55,8 @@ rules:
     severity: medium
   - name: 私钥标识
     loaded: true
-    f_regex: "(?i)(?<![\\w$])[\"'`]?(?:private[_-]?key(?:[_-]?id)?)[\"'`]?\\s*[:=]\\s*([\"'`])((?![^\"'`\\r\\n]{0,512}\\$\\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\\w-]+|<[^\\r\\n]{0,128}>|\\*{3,}|x{3,}|\\.{3,}|%s|\\{\\{[^\\r\\n]{0,128}\\}\\}|(?:process\\.env|import\\.meta\\.env)(?:\\.[\\w$]+)?)\\1)[^\"'`\\r\\n]{1,512})\\1"
+    f_regex: |-
+      (?i)(?<![\w$])["'`]?(?:private[_-]?key(?:[_-]?id)?)["'`]?\s*[:=]\s*(["'`])((?![^"'`\r\n]{0,512}\$\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\w-]+|<[^\r\n]{0,128}>|\*{3,}|x{3,}|\.{3,}|%s|\{\{[^\r\n]{0,128}\}\}|(?:process\.env|import\.meta\.env)(?:\.[\w$]+)?)\1)[^"'`\r\n]{1,512})\1
     s_regex: ''
     format: '{2}'
     color: orange
@@ -47,7 +66,8 @@ rules:
     severity: high
   - name: JWT token
     loaded: true
-    f_regex: "[\"'](ey[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9._-]{10,}\\.[A-Za-z0-9._-]{10,})[\"']"
+    f_regex: |-
+      ["'](ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9._-]{10,}\.[A-Za-z0-9._-]{10,})["']
     s_regex: ''
     format: '{1}'
     color: orange
@@ -57,7 +77,8 @@ rules:
     severity: high
   - name: 凭据字段值
     loaded: true
-    f_regex: "(?i)(?<![\\w$])[\"'`]?(?:(?:[A-Za-z_$][\\w$]*[_-])?(?:password|passwd|pass|pwd|mima|username|(?:access|refresh|auth|id|session)[_-]?token|token|access[_-]?key(?:[_-]?(?:id|secret))?|access[_-]?secret|secret[_-]?(?:key|id)|secret))[\"'`]?\\s*[:=]\\s*([\"'`])((?![^\"'`\\r\\n]{0,512}\\$\\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\\w-]+|<[^\\r\\n]{0,128}>|\\*{3,}|x{3,}|\\.{3,}|%s|\\{\\{[^\\r\\n]{0,128}\\}\\}|(?:process\\.env|import\\.meta\\.env)(?:\\.[\\w$]+)?)\\1)[^\"'`\\r\\n]{1,512})\\1"
+    f_regex: |-
+      (?i)(?<![\w$])["'`]?(?:(?:[A-Za-z_$][\w$]*[_-])?(?:password|passwd|pass|pwd|mima|username|(?:access|refresh|auth|id|session)[_-]?token|token|access[_-]?key(?:[_-]?(?:id|secret))?|access[_-]?secret|secret[_-]?(?:key|id)|secret))["'`]?\s*[:=]\s*(["'`])((?![^"'`\r\n]{0,512}\$\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\w-]+|<[^\r\n]{0,128}>|\*{3,}|x{3,}|\.{3,}|%s|\{\{[^\r\n]{0,128}\}\}|(?:process\.env|import\.meta\.env)(?:\.[\w$]+)?)\1)[^"'`\r\n]{1,512})\1
     s_regex: ''
     format: '{2}'
     color: orange
@@ -67,7 +88,8 @@ rules:
     severity: high
   - name: 华为OSS凭据
     loaded: true
-    f_regex: "(?i)(?<![\\w$])[\"'`]?(?:huawei\\.oss\\.(?:ak|sk|bucket\\.name|endpoint|local\\.path))[\"'`]?\\s*[:=]\\s*([\"'`])((?![^\"'`\\r\\n]{0,512}\\$\\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\\w-]+|<[^\\r\\n]{0,128}>|\\*{3,}|x{3,}|\\.{3,}|%s|\\{\\{[^\\r\\n]{0,128}\\}\\}|(?:process\\.env|import\\.meta\\.env)(?:\\.[\\w$]+)?)\\1)[^\"'`\\r\\n]{1,512})\\1"
+    f_regex: |-
+      (?i)(?<![\w$])["'`]?(?:huawei\.oss\.(?:ak|sk|bucket\.name|endpoint|local\.path))["'`]?\s*[:=]\s*(["'`])((?![^"'`\r\n]{0,512}\$\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\w-]+|<[^\r\n]{0,128}>|\*{3,}|x{3,}|\.{3,}|%s|\{\{[^\r\n]{0,128}\}\}|(?:process\.env|import\.meta\.env)(?:\.[\w$]+)?)\1)[^"'`\r\n]{1,512})\1
     s_regex: ''
     format: '{2}'
     color: orange
@@ -77,7 +99,8 @@ rules:
     severity: high
   - name: AWS Access Key
     loaded: true
-    f_regex: "\\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Za-z0-9]{16}\\b"
+    f_regex: |-
+      \b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Za-z0-9]{16}\b
     s_regex: ''
     format: '{0}'
     color: red
@@ -87,7 +110,8 @@ rules:
     severity: critical
   - name: 阿里云 Access Key
     loaded: true
-    f_regex: "\\bLTAI[A-Za-z0-9]{12,20}\\b"
+    f_regex: |-
+      \bLTAI[A-Za-z0-9]{12,20}\b
     s_regex: ''
     format: '{0}'
     color: red
@@ -97,7 +121,8 @@ rules:
     severity: critical
   - name: GitHub Token
     loaded: true
-    f_regex: "\\b(?:ghp|ghu)_[A-Za-z0-9]{36}\\b"
+    f_regex: |-
+      \b(?:ghp|ghu)_[A-Za-z0-9]{36}\b
     s_regex: ''
     format: '{0}'
     color: red
@@ -107,7 +132,8 @@ rules:
     severity: critical
   - name: Google OAuth Token
     loaded: true
-    f_regex: "\\bya29\\.[0-9A-Za-z_-]+\\b"
+    f_regex: |-
+      \bya29\.[0-9A-Za-z_-]+\b
     s_regex: ''
     format: '{0}'
     color: red
@@ -117,7 +143,8 @@ rules:
     severity: critical
   - name: PEM 私钥内容
     loaded: true
-    f_regex: "(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+    f_regex: |-
+      (?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----
     s_regex: ''
     format: '{0}'
     color: red
@@ -127,7 +154,8 @@ rules:
     severity: critical
   - name: JDBC 连接串
     loaded: true
-    f_regex: "(?i)\\bjdbc:(?:mysql|mariadb|postgresql|sqlserver|jtds:sqlserver|db2|oracle:(?:thin|oci)|h2|sqlite):(?![^\\s\"'`<>\\\\]{0,2048}\\$\\{)[^\\s\"'`<>\\\\]+"
+    f_regex: |-
+      (?i)\bjdbc:(?:mysql|mariadb|postgresql|sqlserver|jtds:sqlserver|db2|oracle:(?:thin|oci)|h2|sqlite):(?![^\s"'`<>\\]{0,2048}\$\{)[^\s"'`<>\\]+
     s_regex: ''
     format: '{0}'
     color: yellow
@@ -137,7 +165,8 @@ rules:
     severity: medium
   - name: 数据库账密URI
     loaded: true
-    f_regex: "(?i)(?<![\\w+.:\\-])(?:mysql2?|mariadb|postgres(?:ql)?|mongodb(?:\\+srv)?|rediss?|mssql|sqlserver|oracle)(?:\\+[a-z0-9_]+)?://(?![^\\s\"'`<>\\\\]{0,2048}\\$\\{)[^/\\s\"'`<>:@\\\\]*:[^/\\s\"'`<>@\\\\]+@[a-z0-9_\\[][^\\s\"'`<>\\\\]*"
+    f_regex: |-
+      (?i)(?<![\w+.:\-])(?:mysql2?|mariadb|postgres(?:ql)?|mongodb(?:\+srv)?|rediss?|mssql|sqlserver|oracle)(?:\+[a-z0-9_]+)?://(?![^\s"'`<>\\]{0,2048}\$\{)[^/\s"'`<>:@\\]*:[^/\s"'`<>@\\]+@[a-z0-9_\[][^\s"'`<>\\]*
     s_regex: ''
     format: '{0}'
     color: orange
@@ -147,7 +176,8 @@ rules:
     severity: high
   - name: 数据库连接地址
     loaded: true
-    f_regex: "(?i)(?<![\\w+.:\\-])(?:mysql2?|mariadb|postgres(?:ql)?|mongodb(?:\\+srv)?|rediss?|mssql|sqlserver|oracle)(?:\\+[a-z0-9_]+)?://(?![^\\s\"'`<>\\\\]{0,2048}\\$\\{)(?![^/\\s\"'`<>\\\\]*@)[a-z0-9_\\[][^\\s\"'`<>\\\\]*"
+    f_regex: |-
+      (?i)(?<![\w+.:\-])(?:mysql2?|mariadb|postgres(?:ql)?|mongodb(?:\+srv)?|rediss?|mssql|sqlserver|oracle)(?:\+[a-z0-9_]+)?://(?![^\s"'`<>\\]{0,2048}\$\{)(?![^/\s"'`<>\\]*@)[a-z0-9_\[][^\s"'`<>\\]*
     s_regex: ''
     format: '{0}'
     color: yellow
@@ -157,7 +187,8 @@ rules:
     severity: medium
   - name: 数据库参数连接串
     loaded: true
-    f_regex: "(?i)(?<![\\w$])(?![^\\r\\n\"'`]{0,2048}\\$\\{)(?:Server|Data\\s+Source|Host|Address|Addr|Network\\s+Address)\\s*=\\s*[^;\\r\\n\"'`]{1,256};(?=[^\\r\\n\"'`]{0,1024}\\b(?:Password|Pwd)\\s*=\\s*[^;\\s\"'`])(?=[^\\r\\n\"'`]{0,1024}\\b(?:Database|Initial\\s+Catalog|User\\s*ID|UID|Username)\\s*=)[^\\r\\n\"'`]{1,1024}"
+    f_regex: |-
+      (?i)(?<![\w$])(?![^\r\n"'`]{0,2048}\$\{)(?:Server|Data\s+Source|Host|Address|Addr|Network\s+Address)\s*=\s*[^;\r\n"'`]{1,256};(?=[^\r\n"'`]{0,1024}\b(?:Password|Pwd)\s*=\s*[^;\s"'`])(?=[^\r\n"'`]{0,1024}\b(?:Database|Initial\s+Catalog|User\s*ID|UID|Username)\s*=)[^\r\n"'`]{1,1024}
     s_regex: ''
     format: '{0}'
     color: orange
@@ -167,7 +198,8 @@ rules:
     severity: high
   - name: MySQL Go DSN
     loaded: true
-    f_regex: "(?<![\\w$])(?![^\\r\\n\"'`]{0,2048}\\$\\{)[^:\\s\"'`/@]+:[^@\\s\"'`]+@(?:tcp\\([^)\\r\\n]+\\)|unix\\([^)\\r\\n]+\\))/[^\\s\"'`<>]*"
+    f_regex: |-
+      (?<![\w$])(?![^\r\n"'`]{0,2048}\$\{)[^:\s"'`/@]+:[^@\s"'`]+@(?:tcp\([^)\r\n]+\)|unix\([^)\r\n]+\))/[^\s"'`<>]*
     s_regex: ''
     format: '{0}'
     color: orange
@@ -177,7 +209,8 @@ rules:
     severity: high
   - name: 通用敏感 Key-Value
     loaded: true
-    f_regex: "(?i)(?<![\\w$])[\"'`]?(?:(?:access(?:[_-]?key)?[_-]?(?:id|secret)|secret[_-]?(?:key|id)|(?:access|admin|api|debug|auth|authorization|gpg|ops|ray|deploy|s3|certificate|aws|app|application|docker|es|elastic|elasticsearch|secret)[_-]{0,5}(?:key|token|secret|secretkey|pass|password|sid|debug)))[\"'`]?\\s*[:=]\\s*([\"'`])((?![^\"'`\\r\\n]{0,512}\\$\\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\\w-]+|<[^\\r\\n]{0,128}>|\\*{3,}|x{3,}|\\.{3,}|%s|\\{\\{[^\\r\\n]{0,128}\\}\\}|(?:process\\.env|import\\.meta\\.env)(?:\\.[\\w$]+)?)\\1)[^\"'`\\r\\n]{1,512})\\1"
+    f_regex: |-
+      (?i)(?<![\w$])["'`]?(?:(?:access(?:[_-]?key)?[_-]?(?:id|secret)|secret[_-]?(?:key|id)|(?:access|admin|api|debug|auth|authorization|gpg|ops|ray|deploy|s3|certificate|aws|app|application|docker|es|elastic|elasticsearch|secret)[_-]{0,5}(?:key|token|secret|secretkey|pass|password|sid|debug)))["'`]?\s*[:=]\s*(["'`])((?![^"'`\r\n]{0,512}\$\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\w-]+|<[^\r\n]{0,128}>|\*{3,}|x{3,}|\.{3,}|%s|\{\{[^\r\n]{0,128}\}\}|(?:process\.env|import\.meta\.env)(?:\.[\w$]+)?)\1)[^"'`\r\n]{1,512})\1
     s_regex: ''
     format: '{2}'
     color: orange
@@ -187,7 +220,8 @@ rules:
     severity: high
   - name: SonarQube Token
     loaded: true
-    f_regex: "(?i)sonar.{0,50}[\"'`]?([0-9a-f]{40})[\"'`]?"
+    f_regex: |-
+      (?i)sonar.{0,50}["'`]?([0-9a-f]{40})["'`]?
     s_regex: ''
     format: '{1}'
     color: red
@@ -197,7 +231,8 @@ rules:
     severity: critical
   - name: OpenID 或 AppSecret
     loaded: true
-    f_regex: "(?i)(?<![\\w$])[\"'`]?(?:openid|app[_-]?secret)[\"'`]?\\s*[:=]\\s*([\"'`])((?![^\"'`\\r\\n]{0,512}\\$\\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\\w-]+|<[^\\r\\n]{0,128}>|\\*{3,}|x{3,}|\\.{3,}|%s|\\{\\{[^\\r\\n]{0,128}\\}\\}|(?:process\\.env|import\\.meta\\.env)(?:\\.[\\w$]+)?)\\1)[^\"'`\\r\\n]{1,512})\\1"
+    f_regex: |-
+      (?i)(?<![\w$])["'`]?(?:openid|app[_-]?secret)["'`]?\s*[:=]\s*(["'`])((?![^"'`\r\n]{0,512}\$\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\w-]+|<[^\r\n]{0,128}>|\*{3,}|x{3,}|\.{3,}|%s|\{\{[^\r\n]{0,128}\}\}|(?:process\.env|import\.meta\.env)(?:\.[\w$]+)?)\1)[^"'`\r\n]{1,512})\1
     s_regex: ''
     format: '{2}'
     color: red
@@ -207,7 +242,8 @@ rules:
     severity: critical
   - name: Outlook Webhook
     loaded: true
-    f_regex: "https://outlook\\.office\\.com/webhook/[A-Za-z0-9@-]+[^\\s\"']*IncomingWebhook/[A-Za-z0-9-]+/[A-Za-z0-9-]+"
+    f_regex: |-
+      https://outlook\.office\.com/webhook/[A-Za-z0-9@-]+[^\s"']*IncomingWebhook/[A-Za-z0-9-]+/[A-Za-z0-9-]+
     s_regex: ''
     format: '{0}'
     color: red
@@ -217,7 +253,8 @@ rules:
     severity: critical
   - name: S3 云资源地址
     loaded: true
-    f_regex: "(?i)(?:s3://[A-Za-z0-9._-]+|[A-Za-z0-9._-]+\\.s3[.-][A-Za-z0-9._-]+|s3\\.amazonaws\\.com/[A-Za-z0-9._/-]+|s3\\.console\\.aws\\.amazon\\.com/s3/buckets/[A-Za-z0-9._-]+)"
+    f_regex: |-
+      (?i)(?:s3://[A-Za-z0-9._-]+|[A-Za-z0-9._-]+\.s3[.-][A-Za-z0-9._-]+|s3\.amazonaws\.com/[A-Za-z0-9._/-]+|s3\.console\.aws\.amazon\.com/s3/buckets/[A-Za-z0-9._-]+)
     s_regex: ''
     format: '{0}'
     color: yellow
@@ -227,7 +264,8 @@ rules:
     severity: medium
   - name: RememberMe 参数值
     loaded: true
-    f_regex: "(?i)(?:rememberMe)\\s*=\\s*([^&\"\\s]+)"
+    f_regex: |-
+      (?i)(?:rememberMe)\s*=\s*([^&"\s]+)
     s_regex: ''
     format: '{1}'
     color: yellow
@@ -237,7 +275,8 @@ rules:
     severity: medium
   - name: 用户名字段值
     loaded: true
-    f_regex: "(?i)(?<![\\w$])[\"'`]?(?:user|username|uname)[\"'`]?\\s*[:=]\\s*([\"'`])((?![^\"'`\\r\\n]{0,512}\\$\\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\\w-]+|<[^\\r\\n]{0,128}>|\\*{3,}|x{3,}|\\.{3,}|%s|\\{\\{[^\\r\\n]{0,128}\\}\\}|(?:process\\.env|import\\.meta\\.env)(?:\\.[\\w$]+)?)\\1)[^\"'`\\r\\n]{1,512})\\1"
+    f_regex: |-
+      (?i)(?<![\w$])["'`]?(?:user|username|uname)["'`]?\s*[:=]\s*(["'`])((?![^"'`\r\n]{0,512}\$\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\w-]+|<[^\r\n]{0,128}>|\*{3,}|x{3,}|\.{3,}|%s|\{\{[^\r\n]{0,128}\}\}|(?:process\.env|import\.meta\.env)(?:\.[\w$]+)?)\1)[^"'`\r\n]{1,512})\1
     s_regex: ''
     format: '{2}'
     color: yellow
@@ -247,7 +286,8 @@ rules:
     severity: medium
   - name: 硬编码Authorization头
     loaded: true
-    f_regex: "((?:basic|bearer|token)\\s+[A-Za-z0-9=+/_:.-]{16,})"
+    f_regex: |-
+      ((?:basic|bearer|token)\s+[A-Za-z0-9=+/_:.-]{16,})
     s_regex: ''
     format: '{0}'
     color: orange
@@ -257,7 +297,8 @@ rules:
     severity: high
   - name: 存储连接串
     loaded: true
-    f_regex: "((?:AccountName|AccountKey|SharedAccessSignature)\\s*[=:]\\s*[\"']?(?:[\\w+/=-]{10,}))"
+    f_regex: |-
+      ((?:AccountName|AccountKey|SharedAccessSignature)\s*[=:]\s*["']?(?:[\w+/=-]{10,}))
     s_regex: ''
     format: '{1}'
     color: orange
@@ -267,16 +308,19 @@ rules:
     severity: high
   - name: 腾讯云SecretId
     loaded: true
-    f_regex: "(\\bAKID[A-Za-z0-9]{32,40}\\b)"
+    f_regex: |-
+      (\bAKID[A-Za-z0-9]{32,40}\b)
     s_regex: ''
     format: '{0}'
     color: red
     scope: response body
     engine: nfa
     sensitive: false
+    severity: critical
   - name: 腾讯云AppId与AppKey
     loaded: true
-    f_regex: "(\\bappid\\b[\"']?\\s*[:=]\\s*[\"']?(?:\\d{6,12})[\"']?[^\\n]{0,80}\\bappkey\\b[\"']?\\s*[:=]\\s*[\"']?(?:\\w{16,}))"
+    f_regex: |-
+      (\bappid\b["']?\s*[:=]\s*["']?(?:\d{6,12})["']?[^\n]{0,80}\bappkey\b["']?\s*[:=]\s*["']?(?:\w{16,}))
     s_regex: ''
     format: '{0}'
     color: red
@@ -286,35 +330,42 @@ rules:
     severity: high
   - name: 钉钉机器人Webhook
     loaded: true
-    f_regex: "(https://oapi\\.dingtalk\\.com/robot/send\\?access_token=[A-Za-z0-9]{20,})"
+    f_regex: |-
+      (https://oapi\.dingtalk\.com/robot/send\?access_token=[A-Za-z0-9]{20,})
     s_regex: ''
     format: '{0}'
     color: red
     scope: response body
     engine: nfa
     sensitive: false
+    severity: critical
   - name: 企业微信机器人Webhook
     loaded: true
-    f_regex: "(https://qyapi\\.weixin\\.qq\\.com/cgi-bin/webhook/send\\?key=[A-Za-z0-9-]{20,})"
+    f_regex: |-
+      (https://qyapi\.weixin\.qq\.com/cgi-bin/webhook/send\?key=[A-Za-z0-9-]{20,})
     s_regex: ''
     format: '{0}'
     color: red
     scope: response body
     engine: nfa
     sensitive: false
+    severity: critical
   - name: 飞书机器人Webhook
     loaded: true
-    f_regex: "(https://open\\.feishu\\.cn/open-apis/bot/[A-Za-z0-9]{8,}/[A-Za-z0-9]{8,})"
+    f_regex: |-
+      (https://open\.feishu\.cn/open-apis/bot/[A-Za-z0-9]{8,}/[A-Za-z0-9]{8,})
     s_regex: ''
     format: '{0}'
     color: red
     scope: response body
     engine: nfa
     sensitive: false
+    severity: critical
 
   - name: 加密密钥配置值
     loaded: true
-    f_regex: "(?i)(?<![\\w$])[\"'`]?(?:encrypt[_-]?key|(?:aes|des)[_-]?key)[\"'`]?\\s*[:=]\\s*([\"'`])((?![^\"'`\\r\\n]{0,512}\\$\\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\\w-]+|<[^\\r\\n]{0,128}>|\\*{3,}|x{3,}|\\.{3,}|%s|\\{\\{[^\\r\\n]{0,128}\\}\\}|(?:process\\.env|import\\.meta\\.env)(?:\\.[\\w$]+)?)\\1)[^\"'`\\r\\n]{1,512})\\1"
+    f_regex: |-
+      (?i)(?<![\w$])["'`]?(?:encrypt[_-]?key|(?:aes|des)[_-]?key)["'`]?\s*[:=]\s*(["'`])((?![^"'`\r\n]{0,512}\$\{)(?!(?:null|undefined|true|false|none|changeme|change[_-]?me|placeholder|redacted|masked|example|sample|dummy|your[_-][\w-]+|<[^\r\n]{0,128}>|\*{3,}|x{3,}|\.{3,}|%s|\{\{[^\r\n]{0,128}\}\}|(?:process\.env|import\.meta\.env)(?:\.[\w$]+)?)\1)[^"'`\r\n]{1,512})\1
     s_regex: ''
     format: '{2}'
     color: orange
@@ -325,7 +376,8 @@ rules:
 
   - name: 密钥提取
     loaded: true
-    f_regex: "(?i)(?<![\\w$])(?:access_key|access_token|admin_pass|admin_user|algolia_admin_key|algolia_api_key|alias_pass|alicloud_access_key|amazon_secret_access_key|amazonaws|ansible_vault_password|aos_key|api_key|api_key_secret|api_key_sid|api_secret|api\\.googlemaps AIza|apidocs|apikey|apiSecret|app_debug|app_id|app_key|app_log_level|app_secret|appkey|appkeysecret|application_key|appsecret|appspot|auth_token|authorizationToken|authsecret|aws_access|aws_access_key_id|aws_bucket|aws_key|aws_secret|aws_secret_key|aws_token|AWSSecretKey|b2_app_key|bashrc password|bintray_apikey|bintray_gpg_password|bintray_key|bintraykey|bluemix_api_key|bluemix_pass|browserstack_access_key|bucket_password|bucketeer_aws_access_key_id|bucketeer_aws_secret_access_key|built_branch_deploy_key|bx_password|cache_driver|cache_s3_secret_key|cattle_access_key|cattle_secret_key|certificate_password|ci_deploy_password|client_secret|client_zpk_secret_key|clojars_password|cloud_api_key|cloud_watch_aws_access_key|cloudant_password|cloudflare_api_key|cloudflare_auth_key|cloudinary_api_secret|cloudinary_name|codecov_token|config|conn\\.login|connectionstring|consumer_key|consumer_secret|credentials|cypress_record_key|database_password|database_schema_test|datadog_api_key|datadog_app_key|db_password|db_server|db_username|dbpasswd|dbpassword|dbuser|deploy_password|digitalocean_ssh_key_body|digitalocean_ssh_key_ids|docker_hub_password|docker_key|docker_pass|docker_passwd|docker_password|dockerhub_password|dockerhubpassword|dot\\-files|dotfiles|droplet_travis_password|dynamoaccesskeyid|dynamosecretaccesskey|elastica_host|elastica_port|elasticsearch_password|encryption_key|encryption_password|env\\.heroku_api_key|env\\.sonatype_password|eureka\\.awssecretkey)[a-z0-9_ .\\\\,\\-]{0,25}[\"']?(?:\\|\\|:|:=|<=|=>|=|>|:).{0,5}?([\"'])([0-9A-Za-z_=-]{8,64})\\1"
+    f_regex: |-
+      (?i)(?<![\w$])(?:access_key|access_token|admin_pass|admin_user|algolia_admin_key|algolia_api_key|alias_pass|alicloud_access_key|amazon_secret_access_key|amazonaws|ansible_vault_password|aos_key|api_key|api_key_secret|api_key_sid|api_secret|api\.googlemaps AIza|apidocs|apikey|apiSecret|app_debug|app_id|app_key|app_log_level|app_secret|appkey|appkeysecret|application_key|appsecret|appspot|auth_token|authorizationToken|authsecret|aws_access|aws_access_key_id|aws_bucket|aws_key|aws_secret|aws_secret_key|aws_token|AWSSecretKey|b2_app_key|bashrc password|bintray_apikey|bintray_gpg_password|bintray_key|bintraykey|bluemix_api_key|bluemix_pass|browserstack_access_key|bucket_password|bucketeer_aws_access_key_id|bucketeer_aws_secret_access_key|built_branch_deploy_key|bx_password|cache_driver|cache_s3_secret_key|cattle_access_key|cattle_secret_key|certificate_password|ci_deploy_password|client_secret|client_zpk_secret_key|clojars_password|cloud_api_key|cloud_watch_aws_access_key|cloudant_password|cloudflare_api_key|cloudflare_auth_key|cloudinary_api_secret|cloudinary_name|codecov_token|config|conn\.login|connectionstring|consumer_key|consumer_secret|credentials|cypress_record_key|database_password|database_schema_test|datadog_api_key|datadog_app_key|db_password|db_server|db_username|dbpasswd|dbpassword|dbuser|deploy_password|digitalocean_ssh_key_body|digitalocean_ssh_key_ids|docker_hub_password|docker_key|docker_pass|docker_passwd|docker_password|dockerhub_password|dockerhubpassword|dot\-files|dotfiles|droplet_travis_password|dynamoaccesskeyid|dynamosecretaccesskey|elastica_host|elastica_port|elasticsearch_password|encryption_key|encryption_password|env\.heroku_api_key|env\.sonatype_password|eureka\.awssecretkey)[a-z0-9_ .\\,\-]{0,25}["']?(?:\|\|:|:=|<=|=>|=|>|:).{0,5}?(["'])([0-9A-Za-z_=-]{8,64})\1
     s_regex: ''
     format: '{2}'
     color: orange
@@ -338,7 +390,8 @@ rules:
   rule:
   - name: 中国大陆手机号
     loaded: true
-    f_regex: "\\b1(?:3[0-9]|4[5-9]|5[0-35-9]|6[6]|7[0-8]|8[0-9]|9[0-9])[0-9]{8}\\b"
+    f_regex: |-
+      \b1(?:3[0-9]|4[5-9]|5[0-35-9]|6[6]|7[0-8]|8[0-9]|9[0-9])[0-9]{8}\b
     s_regex: ''
     format: '{0}'
     color: yellow
@@ -348,7 +401,8 @@ rules:
     severity: medium
   - name: 身份证号
     loaded: true
-    f_regex: "((?<![0-9Xx])[1-9]\\d{5}(?:18|19|20)\\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\\d|3[01])\\d{3}[0-9Xx](?![0-9Xx]))"
+    f_regex: |-
+      ((?<![0-9Xx])[1-9]\d{5}(?:18|19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[0-9Xx](?![0-9Xx]))
     s_regex: ''
     format: '{0}'
     color: red
@@ -358,8 +412,10 @@ rules:
     severity: high
   - name: 邮箱地址
     loaded: true
-    f_regex: "(\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,6}\\b)"
-    s_regex: (?i)^(?![A-Za-z0-9.-]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|css|avif|tiff?))(?![^@]*@[0-9.]+x$).+
+    f_regex: |-
+      (\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,6}\b)
+    s_regex: |-
+      (?i)^(?![A-Za-z0-9.-]+\.(?:png|jpe?g|gif|webp|svg|bmp|ico|css|avif|tiff?))(?![^@]*@[0-9.]+x$).+
     format: '{0}'
     color: green
     scope: response body
@@ -368,28 +424,33 @@ rules:
     severity: medium
   - name: MAC地址
     loaded: true
-    f_regex: "((?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[:.-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f]))"
+    f_regex: |-
+      ((?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{2}[:.-]){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f]))
     s_regex: ''
     format: '{0}'
     color: green
     scope: response body
     engine: nfa
     sensitive: false
+    severity: low
 
 - group: 网络信息
   rule:
   - name: 内网IP
     loaded: true
-    f_regex: "((?<![0-9.])(?:(?:10|127\\.[01])\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3})(?![0-9.]))"
+    f_regex: |-
+      ((?<![0-9.])(?:(?:10|127\.[01])\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})(?![0-9.]))
     s_regex: ''
     format: '{0}'
     color: green
     scope: response body
     engine: nfa
     sensitive: false
+    severity: low
   - name: URL内嵌账密
     loaded: true
-    f_regex: "((?:[A-Za-z0-9._%-]{2,}@[A-Za-z0-9.-]+):(?:[^@\\s'\"]{2,})@)"
+    f_regex: |-
+      (?i)(?<![A-Za-z0-9+.\-])(?:https?|ftps?|wss?)://[^\s:/?#@"'`<>\\]+:[^\s/?#@"'`<>\\]+@(?:\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)(?::\d{1,5})?(?:[/?#][^\s"'`<>\\]*)?
     s_regex: ''
     format: '{0}'
     color: orange
@@ -402,7 +463,8 @@ rules:
   rule:
   - name: 系统路径
     loaded: true
-    f_regex: "(?:[A-Za-z]:(?:\\\\{1,2}[\\w .-]+)+|/(?:bin|dev|home|media|opt|root|sbin|sys|usr|boot|data|etc|lib|mnt|proc|run|srv|tmp|var)(?:/[\\w .-]+)*)"
+    f_regex: |-
+      (?:[A-Za-z]:(?:\\{1,2}[\w .-]+)+|/(?:bin|dev|home|media|opt|root|sbin|sys|usr|boot|data|etc|lib|mnt|proc|run|srv|tmp|var)(?:/[\w .-]+)*)
     s_regex: ''
     format: '{0}'
     color: green
@@ -412,7 +474,8 @@ rules:
     severity: low
   - name: Swagger 暴露标记
     loaded: true
-    f_regex: "(?i)(?:swagger-ui\\.html|[\"']swagger[\"']\\s*:|Swagger UI|swaggerUi|swaggerVersion)"
+    f_regex: |-
+      (?i)(?:swagger-ui\.html|["']swagger["']\s*:|Swagger UI|swaggerUi|swaggerVersion)
     s_regex: ''
     format: '{0}'
     color: green
@@ -422,7 +485,8 @@ rules:
     severity: low
   - name: 登录表单
     loaded: true
-    f_regex: "(?is)<form[^>]*>.*?type=[\"'](?:text|email)[\"'][^>]*>.*?type=[\"']password[\"'][^>]*>.*?</form>"
+    f_regex: |-
+      (?is)<form[^>]*>.*?type=["'](?:text|email)["'][^>]*>.*?type=["']password["'][^>]*>.*?</form>
     s_regex: ''
     format: '{0}'
     color: green
@@ -432,7 +496,8 @@ rules:
     severity: low
   - name: Shiro指纹
     loaded: true
-    f_regex: "(rememberMe=deleteMe)"
+    f_regex: |-
+      (rememberMe=deleteMe)
     s_regex: ''
     format: '{0}'
     color: orange
@@ -442,7 +507,8 @@ rules:
     severity: medium
   - name: Druid控制台
     loaded: true
-    f_regex: "((?i)(?:Druid Stat Index|druid/index\\.html|/druid/login\\.html))"
+    f_regex: |-
+      ((?i)(?:Druid Stat Index|druid/index\.html|/druid/login\.html))
     s_regex: ''
     format: '{0}'
     color: orange
@@ -452,10 +518,12 @@ rules:
     severity: medium
   - name: Vite开发模式残留
     loaded: true
-    f_regex: "((?:/@vite/client|/@react-refresh|vite/dist/client))"
+    f_regex: |-
+      ((?:/@vite/client|/@react-refresh|vite/dist/client))
     s_regex: ''
     format: '{0}'
     color: green
     scope: response body
     engine: nfa
     sensitive: false
+    severity: low
