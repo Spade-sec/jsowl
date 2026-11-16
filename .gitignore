@@ -28,3 +28,11 @@ bin/
 
 # Runtime logs
 *.log
+
+# Local tooling and reproducible verification output
+/.claude/
+/.zcodeignore
+/testdata/api-restore-counterexamples-output/
+/testdata/api-restore-counterexamples/ast-results.txt
+/testdata/api-restore-counterexamples/ast-results-after-fix.txt
+/testdata/api-restore-counterexamples/runtime-results.txt

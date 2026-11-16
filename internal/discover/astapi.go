@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/url"
 	"sort"
 	"strconv"
@@ -248,9 +249,8 @@ func jsParseFallback(source *url.URL, body []byte) JSAnalysis {
 }
 
 // AnalyzeJS parses JavaScript with Tree-sitter once and returns both the API
-// candidates and the host candidates found in the same tree. The host pass
-// reuses the walker's resolved constant table, so a host assembled from
-// literals resolves the same way a URL does and no file is parsed twice.
+// candidates and the host candidates found in the same tree, so no file is
+// parsed twice.
 func AnalyzeJS(source *url.URL, body []byte) JSAnalysis {
 	parsed, err := ParseScript(body)
 	if err != nil {
@@ -269,26 +269,25 @@ func APIFromAST(source *url.URL, body []byte) []Candidate {
 // newASTWalkerWithLines builds the request-oriented walker with its scope
 // tables over an already-built line index.
 func newASTWalkerWithLines(body []byte, lines *lineIndex) *astWalker {
+	root := newEvalScope(nil, 0, true)
 	return &astWalker{
-		constants:        map[string]string{},
-		objectConstants:  map[string]map[string]string{},
-		instanceBSE:      map[string]string{},
-		instanceBaseKind: map[string]string{},
-		builders:         map[string]string{},
-		appends:          map[string][]appendPair{},
-		objectNodes:      map[string][]objectBinding{},
-		funcNodes:        map[uint32]*sitter.Node{},
-		memberWrites:     map[uint32]map[string][]appendPair{},
-		moduleIDs:        map[uint32]string{},
-		moduleParams:     map[uint32]moduleParams{},
-		moduleImports:    map[uint32]map[string]string{},
-		moduleExports:    map[string]map[string]string{},
-		callTargets:      []map[string]int{{}},
-		memberRoots:      []map[string]int{{}},
-		delegates:        map[string]string{},
-		wrappers:         map[string]wrappedCall{},
-		source:           body,
-		lines:            lines,
+		scopes:      []*evalScope{root},
+		rootScope:   root,
+		evalBudget:  maxEvalOps,
+		appends:     map[string][]appendPair{},
+		objectNodes: map[string][]objectBinding{},
+		funcNodes:   map[uint32]*sitter.Node{},
+		memberWrites: map[uint32]map[string][]appendPair{},
+		moduleIDs:     map[uint32]string{},
+		moduleParams:  map[uint32]moduleParams{},
+		moduleImports: map[uint32]map[string]string{},
+		moduleExports: map[string]map[string]string{},
+		callTargets:   []map[string]int{{}},
+		memberRoots:   []map[string]int{{}},
+		delegates:     map[string]string{},
+		wrappers:      map[string]wrappedCall{},
+		source:        body,
+		lines:         lines,
 	}
 }
 
@@ -323,19 +322,22 @@ func apiCandidates(w *astWalker) []Candidate {
 }
 
 type astWalker struct {
-	calls            []apiCall
-	constants        map[string]string
-	objectConstants  map[string]map[string]string
-	instanceBSE      map[string]string
-	instanceBaseKind map[string]string
-	source           []byte
+	calls []apiCall
+	// scopes is the lexical-scope stack (innermost last): root file scope,
+	// one scope per function and one per block. Scalar constants, object
+	// constant tables and axios instance bases are all scope-bound, so a
+	// same-named binding in an inner function can neither leak outward nor
+	// shadow-pollute the enclosing scope's reads.
+	scopes    []*evalScope
+	rootScope *evalScope
+	source    []byte
 	// lines is the shared line index of source, so every recorded call site
 	// reuses one layout instead of rebuilding it.
 	lines *lineIndex
-	// builders maps a variable to the payload builder it was bound to
-	// ("URLSearchParams" or "FormData"), so a request body written as a bare
-	// identifier can still yield its field keys from the append chain.
-	builders map[string]string
+	// evalBudget bounds the total number of expression evaluations per file:
+	// a hostile or enormous bundle degrades to placeholders instead of
+	// stalling the scan.
+	evalBudget int
 	// appends collects the literal append("key", value) calls recorded per
 	// builder variable during the walk. Order matters: the request call is
 	// visited after the appends in source order, which holds for the usual
@@ -396,6 +398,254 @@ type astWalker struct {
 	wrappers map[string]wrappedCall
 }
 
+// Analysis budgets. The evaluator is recursive and its candidate sets expand
+// multiplicatively across branches, so every dimension is capped; exhausting
+// a budget degrades conservatively (unknown value / dropped candidate) and
+// never aborts the walk.
+const (
+	// maxEvalDepth bounds expression nesting per evaluation.
+	maxEvalDepth = 24
+	// maxEvalOptions caps how many branch candidates one value may carry;
+	// a merge that would exceed it collapses to an unknown value.
+	maxEvalOptions = 8
+	// maxEvalOps bounds total evaluations per parsed file.
+	maxEvalOps = 200000
+	// maxObjectPairs caps one object constant's entry count.
+	maxObjectPairs = 64
+)
+
+// jsOpt is one statically possible value of an expression.
+type jsOpt struct {
+	// text is the recovered string form. Unresolved fragments appear as "{}"
+	// placeholders, or as "{name}" when the fragment is a named function
+	// parameter (so a later pass can substitute a caller argument).
+	text string
+	// isNum marks a JavaScript number value; text is its ToString form used
+	// only when the value is concatenated into a string.
+	isNum bool
+	// num is the numeric value when isNum.
+	num float64
+	// unknown marks a value that contains unresolved fragments and must not
+	// be reported as an exact constant.
+	unknown bool
+}
+
+// jsValue is the unified static-evaluation result: one expression may yield
+// several options (branch merges). Zero options means "nothing known at all"
+// — no structure, not even a placeholder.
+type jsValue struct {
+	opts []jsOpt
+}
+
+// jsUnknown reports a value with no recoverable structure.
+func jsUnknown() jsValue { return jsValue{} }
+
+// jsStr reports an exact string value.
+func jsStr(text string) jsValue {
+	return jsValue{opts: []jsOpt{{text: text}}}
+}
+
+// jsPlaceholder reports a value whose text carries unresolved fragments.
+func jsPlaceholder(text string) jsValue {
+	return jsValue{opts: []jsOpt{{text: text, unknown: true}}}
+}
+
+// jsNumber reports an exact numeric value.
+func jsNumber(num float64) jsValue {
+	return jsValue{opts: []jsOpt{{text: formatJSNumber(num), isNum: true, num: num}}}
+}
+
+// single returns the value's only option, or false when it has none or
+// several (branch-merged) options.
+func (v jsValue) single() (jsOpt, bool) {
+	if len(v.opts) != 1 {
+		return jsOpt{}, false
+	}
+	return v.opts[0], true
+}
+
+// exact reports whether the value resolves to exactly one known (non-numeric)
+// string.
+func (v jsValue) exactString() (string, bool) {
+	opt, ok := v.single()
+	if !ok || opt.unknown || opt.isNum {
+		return "", false
+	}
+	return opt.text, true
+}
+
+// formatJSNumber renders a float64 the way JavaScript ToString would for the
+// shapes static analysis actually sees: integers stay integral, everything
+// else uses the shortest round-trip form.
+func formatJSNumber(f float64) string {
+	if f == math.Trunc(f) && !math.IsInf(f, 0) && math.Abs(f) < 1e15 {
+		return strconv.FormatInt(int64(f), 10)
+	}
+	if math.IsNaN(f) {
+		return "NaN"
+	}
+	if math.IsInf(f, 0) {
+		return "Infinity"
+	}
+	return strconv.FormatFloat(f, 'g', -1, 64)
+}
+
+// evalScope is one lexical scope: the file root, a function, or a block.
+// Bindings shadow strictly along the parent chain.
+type evalScope struct {
+	parent   *evalScope
+	funcStart uint32 // 0 for the root scope
+	isFunc   bool
+	bindings map[string]*scopeBinding
+}
+
+// scopeBinding is one name's statically recovered facts. Every field is
+// optional: a binding may be scalar-only, object-only, an axios instance
+// base, a payload builder, or a declared parameter placeholder.
+type scopeBinding struct {
+	// opts holds the scalar's possible values. An EMPTY (non-nil) opts slice
+	// marks a binding whose value was reassigned to something that cannot be
+	// evaluated: the old constant is dead and reads degrade to "{}".
+	opts []jsOpt
+	// isParam marks a function parameter: reads yield "{name}" so a wrapper's
+	// caller arguments can later be substituted for it.
+	isParam bool
+	// object is a constant object table (const routes = {users: "/u"}).
+	object map[string]string
+	// baseURL/baseKind recover an axios-style instance base.
+	baseURL  string
+	baseKind string
+	// builder names the payload constructor bound to this name.
+	builder string
+}
+
+func newEvalScope(parent *evalScope, funcStart uint32, isFunc bool) *evalScope {
+	return &evalScope{parent: parent, funcStart: funcStart, isFunc: isFunc, bindings: map[string]*scopeBinding{}}
+}
+
+func (w *astWalker) pushScope(s *evalScope) { w.scopes = append(w.scopes, s) }
+
+func (w *astWalker) popScope() { w.scopes = w.scopes[:len(w.scopes)-1] }
+
+// currentScope returns the innermost scope; outside the walk (second passes)
+// it degrades to the root scope so file-level bindings still resolve.
+func (w *astWalker) currentScope() *evalScope {
+	if len(w.scopes) == 0 {
+		return w.rootScope
+	}
+	return w.scopes[len(w.scopes)-1]
+}
+
+// lookup resolves a name along the scope chain.
+func (w *astWalker) lookup(name string) (*scopeBinding, *evalScope) {
+	for s := w.currentScope(); s != nil; s = s.parent {
+		if b, ok := s.bindings[name]; ok {
+			return b, s
+		}
+	}
+	return nil, nil
+}
+
+// functionScope returns the nearest function (or root) scope — the target for
+// `var` declarations, which hoist out of blocks.
+func (w *astWalker) functionScope() *evalScope {
+	for s := w.currentScope(); s != nil; s = s.parent {
+		if s.isFunc {
+			return s
+		}
+	}
+	return w.rootScope
+}
+
+// bindIn declares a fresh binding in the given scope.
+func (w *astWalker) bindIn(scope *evalScope, name string) *scopeBinding {
+	b := scope.bindings[name]
+	if b == nil {
+		b = &scopeBinding{}
+		scope.bindings[name] = b
+	}
+	return b
+}
+
+// setScalar writes a scalar binding in the given scope. opts == nil keeps
+// the binding (object/instance facts intact) but marks the scalar unknown.
+func (w *astWalker) setScalarIn(scope *evalScope, name string, value jsValue) {
+	b := w.bindIn(scope, name)
+	b.opts = value.opts
+}
+
+// readScalar resolves a name to its scalar candidates. Known bindings return
+// their options; parameters yield "{name}" placeholders; dead (invalidated)
+// or undeclared names yield a single "{}" fragment so concatenations keep
+// their known prefix/suffix structure.
+func (w *astWalker) readScalar(name string) jsValue {
+	b, _ := w.lookup(name)
+	if b == nil {
+		return jsPlaceholder("{}")
+	}
+	if b.isParam {
+		return jsPlaceholder("{" + name + "}")
+	}
+	if len(b.opts) == 0 {
+		return jsPlaceholder("{}")
+	}
+	return jsValue{opts: b.opts}
+}
+
+// assignmentIsConditional reports whether an assignment node sits inside a
+// branch (if/else, loop, switch case, try/catch, ternary, short-circuit
+// logical operator). Such writes are possible values, not certain ones: the
+// binding merges candidates instead of overwriting. The climb stops at the
+// top-level statement list of the file or of a function body — a bare block
+// between here and there does not make the write conditional, but a branch
+// body does.
+func (w *astWalker) assignmentIsConditional(n *sitter.Node) bool {
+	conditional := map[string]bool{
+		"if_statement": true, "else_clause": true,
+		"for_statement": true, "for_in_statement": true,
+		"while_statement": true, "do_statement": true,
+		"switch_case": true, "switch_default": true,
+		"try_statement": true, "catch_clause": true, "finally_clause": true,
+		"conditional_expression": true, "ternary_expression": true,
+		"binary_expression": true,
+	}
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		if conditional[p.Kind()] {
+			return true
+		}
+		parent := p.Parent()
+		if parent == nil {
+			return false
+		}
+		switch parent.Kind() {
+		case "program", "function_declaration", "function", "function_expression",
+			"generator_function_declaration", "generator_function", "arrow_function",
+			"method_definition":
+			return false
+		}
+	}
+	return false
+}
+
+// writeTargetScope resolves the scope a scalar assignment should land in.
+// A write from inside a function body to a binding outside that function
+// returns nil: the body is analyzed at declaration time while its execution
+// happens at call time in unknown order, so it must not mutate the outer
+// binding's state. Writes inside the same function (including its blocks)
+// land on the binding's own scope.
+func (w *astWalker) writeTargetScope(name string) *evalScope {
+	b, scope := w.lookup(name)
+	if b == nil {
+		return w.currentScope()
+	}
+	for s := w.currentScope(); s != nil && s != scope; s = s.parent {
+		if s.isFunc {
+			return nil
+		}
+	}
+	return scope
+}
+
 // thenChain links a response callback's function start offset to the call
 // whose response feeds it.
 type thenChain struct {
@@ -448,6 +698,12 @@ type wrappedCall struct {
 	// load(){...GET without data...}) register too, but solely so promise
 	// chains can resolve their URL.
 	HasPayload bool
+	// ParamNames lists the wrapper's declared parameters in order, and
+	// URLParams the subset whose "{name}" placeholder appears in Raw — the
+	// URL depends on the caller's argument, so a reliably-recognized direct
+	// call substitutes the argument for the placeholder.
+	ParamNames []string
+	URLParams  []string
 }
 
 func (w *astWalker) text(n *sitter.Node) string {
@@ -475,21 +731,33 @@ func (w *astWalker) walk(n *sitter.Node) {
 		w.visitNewExpression(n)
 	case "function_declaration", "function", "function_expression",
 		"generator_function_declaration", "generator_function", "arrow_function":
-		// Per-function scopes: member writes and bindings collected inside
-		// this subtree belong to this function only.
+		// Per-function scopes: member writes, bindings and the eval scope
+		// collected inside this subtree belong to this function only.
 		start := uint32(n.StartByte())
 		w.funcStack = append(w.funcStack, start)
 		w.funcNodes[start] = n
 		w.callTargets = append(w.callTargets, map[string]int{})
 		w.memberRoots = append(w.memberRoots, map[string]int{})
+		w.pushScope(newEvalScope(w.currentScope(), start, true))
+		w.bindFunctionParams(n)
 		w.detectWebpackModule(n, start)
 		for i := uint(0); i < n.NamedChildCount(); i++ {
 			w.walk(n.NamedChild(i))
 		}
 		w.recordDelegation(n, start)
+		w.popScope()
 		w.funcStack = w.funcStack[:len(w.funcStack)-1]
 		w.callTargets = w.callTargets[:len(w.callTargets)-1]
 		w.memberRoots = w.memberRoots[:len(w.memberRoots)-1]
+		return
+	case "statement_block":
+		// Every block is a scope, so a `let`/`const` declared inside it can
+		// shadow the enclosing binding without ever leaking back out.
+		w.pushScope(newEvalScope(w.currentScope(), w.currentFunc(), false))
+		for i := uint(0); i < n.NamedChildCount(); i++ {
+			w.walk(n.NamedChild(i))
+		}
+		w.popScope()
 		return
 	}
 	// ERROR nodes are named nodes too. Walking through them is intentional:
@@ -923,6 +1191,33 @@ func (w *astWalker) currentFunc() uint32 {
 	return w.funcStack[len(w.funcStack)-1]
 }
 
+// bindFunctionParams pre-binds a function's declared parameters in its fresh
+// scope, so any use inside the body resolves to the parameter placeholder
+// "{name}" instead of an outer same-named constant (parameter shadowing).
+// Destructuring, default-value and rest parameters stay unknown fragments.
+func (w *astWalker) bindFunctionParams(fn *sitter.Node) {
+	parameters := unwrap(fn.ChildByFieldName("parameters"))
+	if parameters == nil {
+		return
+	}
+	scope := w.currentScope()
+	bindOne := func(n *sitter.Node) {
+		n = unwrap(n)
+		if n != nil && n.Kind() == "identifier" {
+			b := w.bindIn(scope, w.text(n))
+			b.isParam = true
+		}
+	}
+	if parameters.Kind() == "identifier" {
+		// Arrow function with a single unparenthesized parameter.
+		bindOne(parameters)
+		return
+	}
+	for i := uint(0); i < parameters.NamedChildCount(); i++ {
+		bindOne(parameters.NamedChild(i))
+	}
+}
+
 func (w *astWalker) bind(nameNode, value *sitter.Node) {
 	nameNode, value = unwrap(nameNode), unwrap(value)
 	if nameNode == nil || nameNode.Kind() != "identifier" || value == nil {
@@ -930,63 +1225,76 @@ func (w *astWalker) bind(nameNode, value *sitter.Node) {
 	}
 	name := w.text(nameNode)
 	if base, baseKind, ok := w.axiosCreateBase(value); ok {
-		w.instanceBSE[name] = base
-		w.instanceBaseKind[name] = baseKind
+		b := w.bindIn(w.currentScope(), name)
+		b.baseURL, b.baseKind = base, baseKind
 		return
 	}
 	if value.Kind() == "object" {
 		w.objectNodes[name] = append(w.objectNodes[name],
 			objectBinding{funcStart: w.currentFunc(), node: value})
 	}
-	w.bindValue(name, value)
+	// `var` hoists to the nearest function scope; `let`/`const` stay in the
+	// current block scope.
+	scope := w.currentScope()
+	if declarator := nameNode.Parent(); declarator != nil && kind(unwrap(declarator.Parent())) == "variable_declaration" {
+		scope = w.functionScope()
+	}
+	w.bindValueIn(scope, name, value)
 }
 
-// bindValue records a declaration value for later constant propagation:
-// plain strings and templates go into constants, object literals of string
-// pairs into objectConstants (so `routes.users` resolves), and URL
-// constructor calls fold to their static value.
+// bindValue records a declaration value for later constant propagation. All
+// shapes share the one evaluator: plain strings, alias identifiers,
+// concatenations, templates with known substitutions, ternary branches and
+// folded URL constructor calls. An object literal of resolvable pairs also
+// becomes a constant table, and URLSearchParams/FormData bindings register
+// their append chains.
 func (w *astWalker) bindValue(name string, value *sitter.Node) {
-	switch value.Kind() {
-	case "string":
-		w.constants[name] = decodeJSString(w.text(value))
-	case "template_string":
-		w.constants[name] = w.templatePlaceholder(value)
-	case "new_expression":
-		if folded, ok := w.foldURLConstructor(value); ok && folded != "" {
-			w.constants[name] = folded
-		}
+	w.bindValueIn(w.currentScope(), name, value)
+}
+
+func (w *astWalker) bindValueIn(scope *evalScope, name string, value *sitter.Node) {
+	b := w.bindIn(scope, name)
+	if value.Kind() == "new_expression" {
 		// Payload builders: a variable bound to URLSearchParams or FormData
 		// carries its field keys in later .append("key", value) calls.
 		if constructor := unwrap(value.ChildByFieldName("constructor")); constructor != nil {
 			switch w.text(constructor) {
 			case "URLSearchParams", "FormData":
-				w.builders[name] = w.text(constructor)
+				b.builder = w.text(constructor)
 			}
 		}
-	case "object":
-		table := make(map[string]string)
-		for i := uint(0); i < value.NamedChildCount(); i++ {
-			pair := value.NamedChild(i)
-			if pair.Kind() != "pair" {
-				continue
-			}
-			key := pair.ChildByFieldName("key")
-			pairValue := unwrap(pair.ChildByFieldName("value"))
-			if pairValue == nil || pairValue.Kind() != "string" {
-				continue
-			}
-			switch key.Kind() {
-			case "property_identifier":
-				table[w.text(key)] = decodeJSString(w.text(pairValue))
-			case "string":
-				if decoded := decodeJSString(w.text(key)); decoded != "" {
-					table[decoded] = decodeJSString(w.text(pairValue))
-				}
-			}
+	}
+	v := w.evalExpr(value, w.currentScope(), 0)
+	b.opts = v.opts
+	if value.Kind() == "object" {
+		w.bindObjectTable(b, value)
+	}
+}
+
+// bindObjectTable records an object literal's resolvable key/value pairs as a
+// constant table, so `routes.users` and `routes["orders"]` resolve like any
+// other expression. Values must reduce to exactly one known string; anything
+// dynamic stays out of the table rather than being guessed.
+func (w *astWalker) bindObjectTable(b *scopeBinding, value *sitter.Node) {
+	table := make(map[string]string)
+	for i := uint(0); i < value.NamedChildCount() && len(table) < maxObjectPairs; i++ {
+		pair := value.NamedChild(i)
+		if pair.Kind() != "pair" {
+			continue
 		}
-		if len(table) > 0 {
-			w.objectConstants[name] = table
+		keyNode := pair.ChildByFieldName("key")
+		if kind(unwrap(keyNode)) == "computed_property_name" {
+			continue
 		}
+		key := w.propertyName(keyNode)
+		text, ok := w.evalExpr(pair.ChildByFieldName("value"), w.currentScope(), 0).exactString()
+		if key == "" || !ok {
+			continue
+		}
+		table[key] = text
+	}
+	if len(table) > 0 {
+		b.object = table
 	}
 }
 
@@ -998,19 +1306,66 @@ func (w *astWalker) bindAssignment(left, right *sitter.Node) {
 	if left.Kind() == "identifier" {
 		name := w.text(left)
 		if base, baseKind, ok := w.axiosCreateBase(right); ok {
-			w.instanceBSE[name] = base
-			w.instanceBaseKind[name] = baseKind
-		} else {
-			w.bindValue(name, right)
+			if target := w.writeTargetScope(name); target != nil {
+				b := w.bindIn(target, name)
+				b.baseURL, b.baseKind = base, baseKind
+			}
+		} else if target := w.writeTargetScope(name); target != nil {
+			v := w.evalExpr(right, w.currentScope(), 0)
+			if w.assignmentIsConditional(left) {
+				// A branch write is a possible value, not a certain one:
+				// merge it with what the binding already holds. When the
+				// merge cannot be represented within the candidate budget,
+				// the value degrades to unknown instead of picking a winner.
+				w.mergeBranchWrite(target, name, v)
+			} else {
+				// Straight-line write: the new value replaces the old one,
+				// and an unevaluable right side invalidates the old constant
+				// so stale history is never reused.
+				w.setScalarIn(target, name, v)
+			}
 		}
 	}
 	if name, ok := w.baseURLTarget(left); ok {
 		base, baseKind := w.baseURLFromExpression(right)
 		if base != "" {
-			w.instanceBSE[name] = base
-			w.instanceBaseKind[name] = baseKind
+			b, _ := w.lookup(name)
+			if b == nil {
+				b = w.bindIn(w.currentScope(), name)
+			}
+			b.baseURL, b.baseKind = base, baseKind
 		}
 	}
+}
+
+// mergeBranchWrite unions a conditional assignment's candidates into the
+// binding's existing value set. A side with no evaluable value (an unknown
+// prior value, or an unknown branch assignment) contributes a "{}" option so
+// the uncertainty survives the merge.
+func (w *astWalker) mergeBranchWrite(scope *evalScope, name string, v jsValue) {
+	b := w.bindIn(scope, name)
+	merged := make([]jsOpt, 0, len(b.opts)+len(v.opts)+1)
+	if len(b.opts) > 0 {
+		merged = append(merged, b.opts...)
+	} else {
+		merged = append(merged, jsOpt{text: "{}", unknown: true})
+	}
+	if len(v.opts) > 0 {
+		merged = append(merged, v.opts...)
+	} else {
+		merged = append(merged, jsOpt{text: "{}", unknown: true})
+	}
+	b.opts = capped(jsValue{opts: merged}).opts
+}
+
+// capped bounds a value's candidate set: a merge that exceeds the budget
+// degrades to a fully unknown value rather than reporting an arbitrary
+// subset as the truth.
+func capped(v jsValue) jsValue {
+	if len(v.opts) <= maxEvalOptions {
+		return v
+	}
+	return jsUnknown()
 }
 
 func (w *astWalker) visitCall(call *sitter.Node) {
@@ -1039,7 +1394,7 @@ func (w *astWalker) visitCall(call *sitter.Node) {
 		// Builder append chains: e.append("key", value) on a variable bound
 		// to URLSearchParams/FormData records one request field. Only literal
 		// keys count — a computed key is a runtime decision, not a field name.
-		if property == "append" && kind(unwrap(object)) == "identifier" && w.builders[w.text(unwrap(object))] != "" {
+		if property == "append" && kind(unwrap(object)) == "identifier" && w.builderFor(w.text(unwrap(object))) != "" {
 			if len(args) >= 1 && kind(unwrap(args[0])) == "string" {
 				key := decodeJSString(w.text(unwrap(args[0])))
 				var value *sitter.Node
@@ -1193,6 +1548,27 @@ func (w *astWalker) visitCall(call *sitter.Node) {
 	}
 }
 
+// instanceBase returns the axios-style base URL recovered for a receiver
+// name, resolved through the scope chain (root scope outside the walk).
+func (w *astWalker) instanceBase(receiver string) (string, string) {
+	if receiver == "" {
+		return "", ""
+	}
+	if b, _ := w.lookup(receiver); b != nil {
+		return b.baseURL, b.baseKind
+	}
+	return "", ""
+}
+
+// builderFor returns the payload constructor ("URLSearchParams"/"FormData")
+// a name was bound to, resolved through the scope chain.
+func (w *astWalker) builderFor(name string) string {
+	if b, _ := w.lookup(name); b != nil {
+		return b.builder
+	}
+	return ""
+}
+
 // recordCall turns one resolved URL value into a recorded API call with
 // evidence, context and the request spec derived from the call arguments.
 func (w *astWalker) recordCall(
@@ -1216,7 +1592,7 @@ func (w *astWalker) recordCall(
 	// the raw path and the joined full URL should carry it for the report.
 	if object, _, ok := w.memberParts(callee); ok && evidence == model.EvidenceStatic {
 		receiver := w.outermostIdentifier(object)
-		if base := w.instanceBSE[receiver]; base != "" {
+		if base, baseKind := w.instanceBase(receiver); base != "" {
 			if spec == nil {
 				// Even a bare call deserves a spec: the recovered base URL
 				// with its confidence is information on its own.
@@ -1224,7 +1600,7 @@ func (w *astWalker) recordCall(
 			}
 			if spec.BaseURL == "" {
 				spec.BaseURL = base
-				spec.BaseURLKind = w.instanceBaseKind[receiver]
+				spec.BaseURLKind = baseKind
 			}
 		}
 	}
@@ -1236,7 +1612,7 @@ func (w *astWalker) recordCall(
 	w.recordWrapper(callee, raw, method, args, bodyArg, line, column)
 	if object, _, ok := w.memberParts(callee); ok && evidence == model.EvidenceStatic {
 		receiver := w.outermostIdentifier(object)
-		if base := w.instanceBSE[receiver]; base != "" {
+		if base, _ := w.instanceBase(receiver); base != "" {
 			if joined := joinBaseURL(base, raw); joined != "" {
 				w.calls = append(w.calls, apiCall{joined, method, model.EvidenceFullURL, line, column, ctx, params, spec, w.currentFunc()})
 			}
@@ -1260,11 +1636,14 @@ func (w *astWalker) recordWrapper(callee *sitter.Node, raw, method string, args 
 	if _, exists := w.wrappers[key]; exists {
 		return
 	}
+	wrapped := wrappedCall{Raw: raw, Method: method, Line: line, Column: column, ModuleID: moduleID}
+	wrapped.ParamNames = w.declaredParamNames(fn)
+	wrapped.URLParams = w.urlParamsIn(raw, wrapped.ParamNames)
 	payloads := w.payloadNodesFor(args, bodyArg)
 	if len(payloads) == 0 {
 		// No payload slot: still a nameable request wrapper, but callers
 		// cannot contribute parameters to it.
-		w.wrappers[key] = wrappedCall{Raw: raw, Method: method, Line: line, Column: column, ModuleID: moduleID}
+		w.wrappers[key] = wrapped
 		return
 	}
 	for _, payload := range payloads {
@@ -1289,12 +1668,48 @@ func (w *astWalker) recordWrapper(callee *sitter.Node, raw, method string, args 
 		if !w.declaredParam(fn, sym) {
 			continue
 		}
-		w.wrappers[key] = wrappedCall{
-			Raw: raw, Method: method, Line: line, Column: column,
-			ModuleID: moduleID, HasPayload: true, MemberPath: memberPath,
-		}
+		wrapped.HasPayload = true
+		wrapped.MemberPath = memberPath
+		w.wrappers[key] = wrapped
 		return
 	}
+	// No payload forwarding confirmed — still register the wrapper so
+	// promise chains and URL-parameter substitution can resolve through it.
+	w.wrappers[key] = wrapped
+}
+
+// declaredParamNames lists a function's plain identifier parameters in
+// declaration order.
+func (w *astWalker) declaredParamNames(fn *sitter.Node) []string {
+	parameters := unwrap(fn.ChildByFieldName("parameters"))
+	if parameters == nil {
+		return nil
+	}
+	if parameters.Kind() == "identifier" {
+		return []string{w.text(parameters)}
+	}
+	var names []string
+	for i := uint(0); i < parameters.NamedChildCount(); i++ {
+		if param := unwrap(parameters.NamedChild(i)); param != nil && param.Kind() == "identifier" {
+			names = append(names, w.text(param))
+		}
+	}
+	return names
+}
+
+// urlParamsIn returns the placeholder names of the form "{name}" that appear
+// in raw and match one of the given parameter names.
+func (w *astWalker) urlParamsIn(raw string, paramNames []string) []string {
+	if raw == "" || len(paramNames) == 0 {
+		return nil
+	}
+	var out []string
+	for _, name := range paramNames {
+		if name != "" && strings.Contains(raw, "{"+name+"}") {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // moduleScopeOfNode climbs from a node to the nearest enclosing webpack
@@ -1446,9 +1861,11 @@ func (w *astWalker) payloadNodesFor(args []*sitter.Node, bodyArg int) []payloadN
 }
 
 // resolveWrapperCallers runs a second pass over the tree: every call to a
-// recorded wrapper whose first argument is an object literal contributes the
-// literal's field keys to the wrapped request. This recovers parameters for
-// the service-layer shape where the request body is a forwarded parameter.
+// recorded wrapper contributes what its caller can pin down — an object
+// literal argument resolves the wrapped request's body fields, and an exact
+// argument substitutes a URL parameter placeholder ({base}) left by the
+// wrapper's own call site. Both recoveries stay limited to direct calls with
+// statically resolvable arguments; nothing is executed.
 func (w *astWalker) resolveWrapperCallers(n *sitter.Node) {
 	if n == nil {
 		return
@@ -1457,9 +1874,9 @@ func (w *astWalker) resolveWrapperCallers(n *sitter.Node) {
 		callee := unwrap(n.ChildByFieldName("function"))
 		if callee != nil && callee.Kind() == "identifier" {
 			wrapped, ok := w.wrappers[w.moduleScopeOfNode(callee)+"/"+w.text(callee)]
-			if ok && wrapped.HasPayload {
+			if ok {
 				args := w.arguments(n)
-				if len(args) > 0 {
+				if wrapped.HasPayload && len(args) > 0 {
 					first := unwrap(args[0])
 					// A variable argument resolves through its binding site:
 					// var form = {...}; dt(form) still recovers the fields.
@@ -1473,12 +1890,50 @@ func (w *astWalker) resolveWrapperCallers(n *sitter.Node) {
 						w.recordCall(callee, wrapped.Raw, wrapped.Method, resolved, 0)
 					}
 				}
+				if len(wrapped.URLParams) > 0 && len(args) > 0 {
+					w.recordWrapperURLPropagation(callee, wrapped, args)
+				}
 			}
 		}
 	}
 	for i := uint(0); i < n.NamedChildCount(); i++ {
 		w.resolveWrapperCallers(n.NamedChild(i))
 	}
+}
+
+// recordWrapperURLPropagation substitutes a wrapper caller's exact argument
+// values for the URL placeholders left by the wrapper's own request call:
+// function load(base){fetch(base+"/users")} + load("/tenant") recovers
+// /tenant/users. Arguments that do not reduce to exactly one known value are
+// left unsubstituted — the dynamic template stays the only candidate.
+func (w *astWalker) recordWrapperURLPropagation(callee *sitter.Node, wrapped wrappedCall, args []*sitter.Node) {
+	raw := wrapped.Raw
+	substituted := false
+	for i, name := range wrapped.ParamNames {
+		if i >= len(args) || !containsString(wrapped.URLParams, name) {
+			continue
+		}
+		value := w.evalExpr(args[i], w.rootScope, 0)
+		text, ok := value.exactString()
+		if !ok {
+			continue
+		}
+		raw = strings.ReplaceAll(raw, "{"+name+"}", text)
+		substituted = true
+	}
+	if !substituted || raw == wrapped.Raw {
+		return
+	}
+	w.recordCall(callee, raw, wrapped.Method, nil, -1)
+}
+
+func containsString(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveHeuristics is the recall layer for payloads assembled incrementally:
@@ -1766,111 +2221,521 @@ func (w *astWalker) objectCallArgs(args []*sitter.Node) (string, int, int) {
 	return "", -1, -2
 }
 
-func (w *astWalker) resolveURLExpression(n *sitter.Node) (string, string) {
+// evalExpr is the single static-evaluation entry every shape funnels
+// through: variable initializers, assignments, request URLs, template
+// interpolation, object property reads, axios baseURL and the URL
+// constructor. It returns every statically possible value (branch merges),
+// degrades unknown fragments to "{}" placeholders while keeping known
+// prefix/suffix structure, and never guesses past what the source pins down.
+func (w *astWalker) evalExpr(n *sitter.Node, scope *evalScope, depth int) jsValue {
+	if depth > maxEvalDepth {
+		return jsUnknown()
+	}
+	w.evalBudget--
+	if w.evalBudget < 0 {
+		return jsUnknown()
+	}
 	n = unwrap(n)
+	if n == nil {
+		return jsUnknown()
+	}
 	switch kind(n) {
 	case "string":
-		value := decodeJSString(w.text(n))
-		return value, evidenceFor(value)
-	case "identifier":
-		if value, ok := w.constants[w.text(n)]; ok {
-			return value, evidenceFor(value)
-		}
+		return jsStr(decodeJSString(w.text(n)))
+	case "number":
+		return jsNumberOpt(w.text(n))
+	case "true", "false", "null", "undefined":
+		return jsStr(w.text(n))
+	case "identifier", "shorthand_property_identifier",
+		"shorthand_property_identifier_pattern":
+		return w.readScalar(w.text(n))
 	case "template_string":
-		return w.templatePlaceholder(n), model.EvidenceStatic
+		return w.evalTemplate(n, scope, depth)
 	case "binary_expression":
-		if w.text(n.ChildByFieldName("operator")) == "+" {
-			if value, ok := w.foldConcat(n, 0); ok {
-				return value, evidenceFor(value)
-			}
-		}
-	case "call_expression":
-		// concat/join chains fold exactly like a + chain; everything else
-		// fails inside foldConcat and returns empty.
-		if value, ok := w.foldConcat(n, 0); ok {
-			return value, evidenceFor(value)
-		}
+		return w.evalBinary(n, scope, depth)
+	case "conditional_expression", "ternary_expression":
+		// Both branches are statically plausible; the merged candidate set is
+		// capped and degrades to unknown when it would overflow.
+		merged := unionValues(
+			w.evalExpr(n.ChildByFieldName("consequence"), scope, depth+1),
+			w.evalExpr(n.ChildByFieldName("alternative"), scope, depth+1),
+		)
+		return capped(merged)
 	case "member_expression":
-		// A constant with a trailing property access, as in
-		// `const u = new URL(...); fetch(u.href)`: the suffix cannot change
-		// the static string value, so it is ignored.
-		object := unwrap(n.ChildByFieldName("object"))
-		if kind(object) == "identifier" {
-			name := w.text(object)
-			if value, ok := w.constants[name]; ok {
-				return value, evidenceFor(value)
-			}
-			if table, ok := w.objectConstants[name]; ok {
-				property := w.text(n.ChildByFieldName("property"))
-				if value, ok := table[property]; ok {
-					return value, evidenceFor(value)
-				}
-			}
-		}
+		return w.evalMember(n, scope, depth)
 	case "subscript_expression":
-		// `routes["users"]` over a known object constant.
-		object := unwrap(n.ChildByFieldName("object"))
-		index := unwrap(n.ChildByFieldName("index"))
-		if kind(object) == "identifier" &&
-			(kind(index) == "string" || kind(index) == "string_literal") {
-			if table, ok := w.objectConstants[w.text(object)]; ok {
-				if value, ok := table[decodeJSString(w.text(index))]; ok {
-					return value, evidenceFor(value)
-				}
-			}
-		}
+		return w.evalSubscript(n, scope, depth)
+	case "call_expression":
+		return w.evalCall(n, scope, depth)
 	case "new_expression":
-		if value, ok := w.foldURLConstructor(n); ok {
-			return value, evidenceFor(value)
-		}
+		return w.foldURLValue(n, scope, depth)
 	case "object":
+		// A config object used directly as a URL resolves its url member.
 		if value := w.objectValue(n, "url"); value != nil {
-			return w.resolveURLExpression(value)
+			return w.evalExpr(value, scope, depth+1)
 		}
 	}
-	return "", ""
+	return jsUnknown()
+}
+
+// jsNumberOpt parses a numeric literal the way JavaScript would: decimal,
+// hex, binary and octal spellings all fold; anything else stays unknown.
+func jsNumberOpt(raw string) jsValue {
+	if value, err := strconv.ParseInt(raw, 0, 64); err == nil {
+		return jsNumber(float64(value))
+	}
+	if value, err := strconv.ParseFloat(raw, 64); err == nil {
+		return jsNumber(value)
+	}
+	return jsPlaceholder("{}")
+}
+
+// optText renders one option for string concatenation.
+func optText(opt jsOpt) string {
+	if opt.isNum {
+		return formatJSNumber(opt.num)
+	}
+	return opt.text
+}
+
+// evalTemplate folds a template literal, resolving each substitution through
+// the same evaluator. Known substitutions inline their value; unknown ones
+// keep the "{}" placeholder between the known fragments.
+func (w *astWalker) evalTemplate(n *sitter.Node, scope *evalScope, depth int) jsValue {
+	parts := make([]jsValue, 0, n.NamedChildCount())
+	for i := uint(0); i < n.NamedChildCount(); i++ {
+		child := n.NamedChild(i)
+		switch child.Kind() {
+		case "string_fragment":
+			parts = append(parts, jsStr(w.text(child)))
+		case "escape_sequence":
+			parts = append(parts, jsStr(decodeJSEscapes(w.text(child))))
+		case "template_substitution":
+			inner := child.ChildByFieldName("expression")
+			if inner == nil && child.NamedChildCount() > 0 {
+				inner = child.NamedChild(0)
+			}
+			parts = append(parts, w.evalExpr(inner, scope, depth+1))
+		}
+	}
+	return w.joinParts(parts)
+}
+
+// joinParts concatenates a list of evaluated parts, expanding the cartesian
+// product when any part carries branch candidates.
+func (w *astWalker) joinParts(parts []jsValue) jsValue {
+	out := []jsOpt{{}}
+	for _, part := range parts {
+		part = capped(part)
+		next := make([]jsOpt, 0, len(out))
+		for _, left := range out {
+			rights := part.opts
+			if len(rights) == 0 {
+				rights = []jsOpt{{text: "{}", unknown: true}}
+			}
+			for _, right := range rights {
+				text := optText(left) + optText(right)
+				next = append(next, jsOpt{
+					text:    text,
+					unknown: left.unknown || right.unknown,
+				})
+			}
+		}
+		if len(next) > maxEvalOptions {
+			return jsUnknown()
+		}
+		out = next
+	}
+	return jsValue{opts: out}
+}
+
+// evalBinary folds binary expressions. "+" follows JavaScript semantics:
+// two numbers add numerically, anything else concatenates as strings.
+// The short-circuit operators are value-merges: either side is possible.
+func (w *astWalker) evalBinary(n *sitter.Node, scope *evalScope, depth int) jsValue {
+	operator := w.text(n.ChildByFieldName("operator"))
+	left := w.evalExpr(n.ChildByFieldName("left"), scope, depth+1)
+	right := w.evalExpr(n.ChildByFieldName("right"), scope, depth+1)
+	switch operator {
+	case "+":
+		return w.concatValues(left, right)
+	case "&&", "||", "??":
+		return capped(unionValues(left, right))
+	}
+	return jsUnknown()
+}
+
+// concatValues applies JavaScript "+" to two evaluated sides: number+number
+// is numeric addition, every other combination concatenates its ToString
+// forms, and a side with no evaluable structure contributes "{}".
+func (w *astWalker) concatValues(left, right jsValue) jsValue {
+	left, right = capped(left), capped(right)
+	lrights := left.opts
+	if len(lrights) == 0 {
+		lrights = []jsOpt{{text: "{}", unknown: true}}
+	}
+	rrights := right.opts
+	if len(rrights) == 0 {
+		rrights = []jsOpt{{text: "{}", unknown: true}}
+	}
+	if len(lrights)*len(rrights) > maxEvalOptions {
+		return jsUnknown()
+	}
+	out := make([]jsOpt, 0, len(lrights)*len(rrights))
+	for _, l := range lrights {
+		for _, r := range rrights {
+			if l.isNum && r.isNum && !l.unknown && !r.unknown {
+				out = append(out, jsOpt{
+					text:  formatJSNumber(l.num + r.num),
+					isNum: true, num: l.num + r.num,
+				})
+				continue
+			}
+			out = append(out, jsOpt{
+				text:    optText(l) + optText(r),
+				unknown: l.unknown || r.unknown,
+			})
+		}
+	}
+	return capped(jsValue{opts: out})
+}
+
+// unionValues merges two values' candidate sets, deduplicating by value.
+func unionValues(l, r jsValue) jsValue {
+	out := make([]jsOpt, 0, len(l.opts)+len(r.opts))
+	seen := map[jsOpt]bool{}
+	for _, opt := range append(append([]jsOpt{}, l.opts...), r.opts...) {
+		if !seen[opt] {
+			seen[opt] = true
+			out = append(out, opt)
+		}
+	}
+	return jsValue{opts: out}
+}
+
+// evalMember resolves property access: constant object tables first, then a
+// scalar binding whose trailing property cannot change its string value
+// (`const u = new URL(...); fetch(u.href)`), then `.href` on a folded URL
+// constructor call. Anything else stays unknown.
+func (w *astWalker) evalMember(n *sitter.Node, scope *evalScope, depth int) jsValue {
+	object := unwrap(n.ChildByFieldName("object"))
+	property := w.text(n.ChildByFieldName("property"))
+	if object == nil {
+		return jsUnknown()
+	}
+	if kind(object) == "identifier" {
+		if b, _ := w.lookup(w.text(object)); b != nil {
+			if len(b.opts) > 0 {
+				return jsValue{opts: b.opts}
+			}
+			if b.object != nil {
+				if value, ok := b.object[property]; ok {
+					return jsStr(value)
+				}
+				return jsUnknown()
+			}
+		}
+		return jsUnknown()
+	}
+	// new URL(...).href: fold the construction and hand back the full URL.
+	if kind(object) == "new_expression" && property == "href" {
+		if _, ok := w.constructorName(object); ok {
+			return w.foldURLValue(object, scope, depth+1)
+		}
+	}
+	return jsUnknown()
+}
+
+// evalSubscript resolves `routes["users"]`-style access over a constant
+// object table; a string index that misses the table stays unknown.
+func (w *astWalker) evalSubscript(n *sitter.Node, scope *evalScope, depth int) jsValue {
+	object := unwrap(n.ChildByFieldName("object"))
+	index := unwrap(n.ChildByFieldName("index"))
+	if object == nil || index == nil || kind(object) != "identifier" {
+		return jsUnknown()
+	}
+	if kind(index) != "string" {
+		return jsUnknown()
+	}
+	b, _ := w.lookup(w.text(object))
+	if b == nil || b.object == nil {
+		return jsUnknown()
+	}
+	if value, ok := b.object[decodeJSString(w.text(index))]; ok {
+		return jsStr(value)
+	}
+	return jsUnknown()
+}
+
+// evalCall folds the built-in calls static analysis can evaluate honestly:
+// string concat aliases (concat/join), first-hit replace vs replaceAll,
+// atob, and encodeURIComponent/decodeURIComponent. Any other function's
+// return value stays unknown — never a fabricated constant.
+func (w *astWalker) evalCall(n *sitter.Node, scope *evalScope, depth int) jsValue {
+	function := unwrap(n.ChildByFieldName("function"))
+	if function == nil {
+		return jsUnknown()
+	}
+	arguments := w.arguments(n)
+	// Bare atob("...") has an identifier callee that memberParts cannot
+	// describe, so it is handled before the member dispatch.
+	if kind(function) == "identifier" {
+		name := w.text(function)
+		switch name {
+		case "atob":
+			if len(arguments) != 1 {
+				return jsUnknown()
+			}
+			return w.evalBase64Decode(arguments[0], scope, depth)
+		case "encodeURIComponent", "decodeURIComponent":
+			if len(arguments) != 1 {
+				return jsUnknown()
+			}
+			return w.evalURIEscape(name, arguments[0], scope, depth)
+		}
+		return jsUnknown()
+	}
+	object, property, ok := w.memberParts(function)
+	if !ok {
+		return jsUnknown()
+	}
+	switch property {
+	case "concat":
+		parts := []jsValue{w.evalExpr(object, scope, depth+1)}
+		for _, arg := range arguments {
+			parts = append(parts, w.evalExpr(arg, scope, depth+1))
+		}
+		return w.joinParts(parts)
+	case "join":
+		if kind(unwrap(object)) != "array" {
+			return jsUnknown()
+		}
+		separator := ","
+		if len(arguments) == 1 {
+			sep, ok := w.evalExpr(arguments[0], scope, depth+1).exactString()
+			if !ok {
+				return jsUnknown()
+			}
+			separator = sep
+		}
+		elements := unwrap(object)
+		parts := make([]jsValue, 0, elements.NamedChildCount())
+		for i := uint(0); i < elements.NamedChildCount(); i++ {
+			parts = append(parts, w.evalExpr(elements.NamedChild(i), scope, depth+1))
+		}
+		return w.joinWithSeparator(parts, separator)
+	case "replace", "replaceAll":
+		return w.evalReplace(property, object, arguments, scope, depth)
+	case "atob":
+		// window.atob: same decoding as the bare global spelling.
+		if len(arguments) != 1 || kind(object) != "identifier" || w.text(object) != "window" {
+			return jsUnknown()
+		}
+		return w.evalBase64Decode(arguments[0], scope, depth)
+	}
+	return jsUnknown()
+}
+
+// joinWithSeparator folds array.join(sep) element by element, expanding
+// branch candidates across elements and degrading unknown elements to "{}".
+func (w *astWalker) joinWithSeparator(parts []jsValue, separator string) jsValue {
+	out := []jsOpt{{}}
+	for _, part := range parts {
+		part = capped(part)
+		rights := part.opts
+		if len(rights) == 0 {
+			rights = []jsOpt{{text: "{}", unknown: true}}
+		}
+		next := make([]jsOpt, 0, len(out))
+		for _, left := range out {
+			for _, right := range rights {
+				text := optText(left) + separator + optText(right)
+				next = append(next, jsOpt{text: text, unknown: left.unknown || right.unknown})
+			}
+		}
+		if len(next) > maxEvalOptions {
+			return jsUnknown()
+		}
+		out = next
+	}
+	return jsValue{opts: out}
+}
+
+// evalReplace folds String.replace/replaceAll. Only exact string patterns
+// and replacements with no "$" substitution markers are folded: replace
+// hits the first occurrence, replaceAll hits every one. Regex patterns and
+// substitution semantics degrade to unknown instead of a fabricated value.
+func (w *astWalker) evalReplace(
+	property string,
+	object *sitter.Node,
+	arguments []*sitter.Node,
+	scope *evalScope,
+	depth int,
+) jsValue {
+	if len(arguments) < 2 {
+		return jsUnknown()
+	}
+	subject := w.evalExpr(object, scope, depth+1)
+	patternV := w.evalExpr(arguments[0], scope, depth+1)
+	replacementV := w.evalExpr(arguments[1], scope, depth+1)
+	if kind(unwrap(arguments[0])) == "regex" {
+		// A regex pattern's match set cannot be folded honestly here.
+		return jsUnknown()
+	}
+	pattern, pok := patternV.exactString()
+	replacement, rok := replacementV.exactString()
+	if !pok || !rok || strings.Contains(replacement, "$") {
+		return jsUnknown()
+	}
+	count := 1
+	if property == "replaceAll" {
+		count = -1
+	}
+	out := make([]jsOpt, 0, len(subject.opts))
+	for _, opt := range capped(subject).opts {
+		text := optText(opt)
+		if text == "" && len(subject.opts) == 0 {
+			text = "{}"
+		}
+		out = append(out, jsOpt{
+			text:    strings.Replace(text, pattern, replacement, count),
+			unknown: true,
+		})
+	}
+	return jsValue{opts: out}
+}
+
+// evalBase64Decode folds atob(): the argument folds first, and only a
+// printable-ASCII decoding is returned.
+func (w *astWalker) evalBase64Decode(arg *sitter.Node, scope *evalScope, depth int) jsValue {
+	encoded, ok := w.evalExpr(arg, scope, depth+1).exactString()
+	if !ok {
+		return jsUnknown()
+	}
+	if decoded := decodeBase64String(encoded); decoded != "" {
+		return jsStr(decoded)
+	}
+	return jsUnknown()
+}
+
+// evalURIEscape folds encodeURIComponent/decodeURIComponent over an exact
+// argument. Both follow the spec byte-for-byte; an invalid escape sequence
+// (which throws at runtime) degrades to unknown.
+func (w *astWalker) evalURIEscape(name string, arg *sitter.Node, scope *evalScope, depth int) jsValue {
+	value, ok := w.evalExpr(arg, scope, depth+1).exactString()
+	if !ok {
+		return jsUnknown()
+	}
+	if name == "encodeURIComponent" {
+		return jsStr(jsEncodeURIComponent(value))
+	}
+	decoded, ok := jsDecodeURIComponent(value)
+	if !ok {
+		return jsUnknown()
+	}
+	return jsStr(decoded)
+}
+
+// jsEncodeURIComponent percent-encodes every byte outside the unreserved set
+// the spec keeps literal: A-Z a-z 0-9 - _ . ! ~ * ' ( ).
+func jsEncodeURIComponent(s string) string {
+	var out strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.', c == '!', c == '~', c == '*',
+			c == '\'', c == '(', c == ')':
+			out.WriteByte(c)
+		default:
+			out.WriteByte('%')
+			out.WriteByte(upperHex(c >> 4))
+			out.WriteByte(upperHex(c & 0x0f))
+		}
+	}
+	return out.String()
+}
+
+func upperHex(b byte) byte {
+	if b < 10 {
+		return '0' + b
+	}
+	return 'A' + b - 10
+}
+
+// jsDecodeURIComponent decodes %XX escape bytes; a malformed sequence or a
+// broken UTF-8 result is not decodable and reports false.
+func jsDecodeURIComponent(s string) (string, bool) {
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '%' {
+			out.WriteByte(s[i])
+			i++
+			continue
+		}
+		if i+2 >= len(s) {
+			return "", false
+		}
+		high, ok1 := parseHexDigit(s[i+1])
+		low, ok2 := parseHexDigit(s[i+2])
+		if !ok1 || !ok2 {
+			return "", false
+		}
+		out.WriteByte(high<<4 | low)
+		i += 3
+	}
+	return out.String(), true
+}
+
+func parseHexDigit(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
 }
 
 // resolveURLExpressions resolves a URL expression to every static value it
-// can yield. A conditional expression is the one shape with several results:
-// both branches are plausible request targets, so both are reported.
+// can yield — a conditional expression (now folded by the evaluator itself)
+// contributes all of its branch candidates.
 func (w *astWalker) resolveURLExpressions(n *sitter.Node) []string {
-	n = unwrap(n)
-	if kind(n) == "conditional_expression" {
-		seen := map[string]struct{}{}
-		var out []string
-		for _, field := range []string{"consequence", "alternative"} {
-			for _, raw := range w.resolveURLExpressions(n.ChildByFieldName(field)) {
-				if _, ok := seen[raw]; !ok {
-					seen[raw] = struct{}{}
-					out = append(out, raw)
-				}
-			}
+	v := w.evalExpr(n, w.currentScope(), 0)
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(v.opts))
+	for _, opt := range v.opts {
+		if opt.isNum || opt.text == "" {
+			continue
 		}
-		return out
+		if _, ok := seen[opt.text]; ok {
+			continue
+		}
+		seen[opt.text] = struct{}{}
+		out = append(out, opt.text)
 	}
-	if raw, _ := w.resolveURLExpression(n); raw != "" {
-		return []string{raw}
-	}
-	return nil
+	return out
 }
 
 // visitNewExpression records `new URL(path, base)` constructions as request
-// candidates when the folded value is path-shaped.
+// candidates when the folded values are path-shaped.
 func (w *astWalker) visitNewExpression(n *sitter.Node) {
 	if _, ok := w.constructorName(n); !ok {
 		return
 	}
-	value, ok := w.foldURLConstructor(n)
-	if !ok || !looksLikePath(value) {
-		return
+	for _, opt := range capped(w.foldURLValue(n, w.currentScope(), 0)).opts {
+		if opt.isNum || !looksLikePath(opt.text) {
+			continue
+		}
+		point := n.StartPosition()
+		ctx := w.lines.extract(int(n.StartByte()), contextSpanLines, opt.text)
+		w.calls = append(w.calls, apiCall{
+			Raw: opt.text, Method: "GET", Evidence: evidenceFor(opt.text),
+			Line: int(point.Row) + 1, Column: int(point.Column) + 1, Context: ctx,
+		})
 	}
-	point := n.StartPosition()
-	ctx := w.lines.extract(int(n.StartByte()), contextSpanLines, value)
-	w.calls = append(w.calls, apiCall{
-		Raw: value, Method: "GET", Evidence: evidenceFor(value),
-		Line: int(point.Row) + 1, Column: int(point.Column) + 1, Context: ctx,
-	})
 }
 
 // constructorName reports whether a new_expression constructs URL (directly
@@ -1890,45 +2755,75 @@ func (w *astWalker) constructorName(n *sitter.Node) (string, bool) {
 	return "", false
 }
 
-// foldURLConstructor statically evaluates `new URL(path[, base])`. Only the
-// common shapes are worth folding: an absolute path replaces the base, an
-// absolute URL wins outright, and a relative path appends to the base.
-func (w *astWalker) foldURLConstructor(n *sitter.Node) (string, bool) {
+// foldURLValue statically evaluates `new URL(path[, base])` through the
+// evaluator and resolves the result with real URL-reference semantics: an
+// absolute URL wins outright, a rooted path attaches to the base origin, a
+// relative path replaces the base's last segment, and query/fragment-only
+// references keep the base path. An unevaluable base keeps the shape of a
+// rooted or absolute path as a degraded placeholder.
+func (w *astWalker) foldURLValue(n *sitter.Node, scope *evalScope, depth int) jsValue {
 	if _, ok := w.constructorName(n); !ok {
-		return "", false
+		return jsUnknown()
 	}
 	args := w.arguments(n)
 	if len(args) == 0 {
-		return "", false
+		return jsUnknown()
 	}
-	path, ok := w.foldConcat(args[0], 0)
-	if !ok || path == "" {
-		return "", false
-	}
+	path := capped(w.evalExpr(args[0], scope, depth+1))
 	if len(args) < 2 {
-		return path, true
+		return path
 	}
-	base, ok := w.foldConcat(args[1], 0)
-	if !ok || base == "" {
-		return "", false
+	base := capped(w.evalExpr(args[1], scope, depth+1))
+	basePath, baseOK := base.exactString()
+	out := make([]jsOpt, 0, len(path.opts))
+	for _, opt := range path.opts {
+		if opt.isNum {
+			continue
+		}
+		if baseOK {
+			resolved, ok := resolveURLReference(basePath, opt.text)
+			if ok {
+				out = append(out, jsOpt{text: resolved, unknown: opt.unknown})
+			}
+			continue
+		}
+		// The base is unknown: a rooted or absolute path still keeps its
+		// recoverable structure, marked uncertain.
+		if len(base.opts) == 0 &&
+			(strings.HasPrefix(opt.text, "/") || strings.Contains(opt.text, "://")) {
+			out = append(out, jsOpt{text: opt.text, unknown: true})
+		}
 	}
-	return joinURLBase(base, path), true
+	return capped(jsValue{opts: out})
 }
 
-// joinURLBase combines a static base with a path the way new URL would for
-// the shapes that matter statically: an absolute URL replaces the base
-// entirely and a rooted path attaches to the base origin.
-func joinURLBase(base, path string) string {
-	if strings.Contains(path, "://") {
-		return path
+// resolveURLReference combines a base with a reference the way the URL
+// constructor (RFC 3986 reference resolution) does: an absolute reference
+// replaces the base, a rooted path attaches to the base origin, a relative
+// path drops the base's last segment, and ".."/"." segments collapse.
+// Query- and fragment-only references keep the base path.
+func resolveURLReference(base, ref string) (string, bool) {
+	base, ref = strings.TrimSpace(base), strings.TrimSpace(ref)
+	if ref == "" {
+		return base, base != ""
 	}
-	if strings.HasPrefix(path, "/") {
-		if parsed, err := url.Parse(base); err == nil && parsed.Host != "" {
-			return parsed.Scheme + "://" + parsed.Host + path
-		}
-		return path
+	if strings.Contains(ref, "://") {
+		return ref, true
 	}
-	return strings.TrimRight(base, "/") + "/" + path
+	baseURL, err := url.Parse(base)
+	if err != nil || (baseURL.Scheme == "" && baseURL.Host == "" && baseURL.Path == "") {
+		return "", false
+	}
+	refURL, err := url.Parse(ref)
+	if err != nil {
+		return "", false
+	}
+	resolved := baseURL.ResolveReference(refURL)
+	out := resolved.String()
+	if out == "" {
+		return "", false
+	}
+	return out, true
 }
 
 // decodeBase64String decodes an atob() argument. Only results made of
@@ -2147,7 +3042,7 @@ func (w *astWalker) contentType(args []*sitter.Node, bodyNodes []*sitter.Node) (
 		case "identifier":
 			// A builder variable bound earlier in the file implies the same
 			// encoding as its constructor would.
-			switch w.builders[w.text(body)] {
+			switch w.builderFor(w.text(body)) {
 			case "URLSearchParams":
 				return "application/x-www-form-urlencoded", model.EvidenceInferred
 			case "FormData":
@@ -2193,7 +3088,7 @@ func (w *astWalker) paramPairs(node *sitter.Node) []model.Param {
 // machinery: strings stay literal, runtime expressions become placeholders
 // carrying their source expression (e.g. `{t.loginName}`).
 func (w *astWalker) builderPairs(name string) []model.Param {
-	if w.builders[name] == "" {
+	if w.builderFor(name) == "" {
 		return nil
 	}
 	pairs := w.appends[name]
@@ -2319,7 +3214,9 @@ func (w *astWalker) objectPairs(object *sitter.Node, prefix string, depth int) [
 
 // valueOf renders a node as the best static value it yields, paired with the
 // evidence for that recovery: literals are verbatim, identifiers resolve
-// through known constants, and everything dynamic keeps a named placeholder.
+// through their scope binding, and everything dynamic keeps a placeholder —
+// a bare unknown identifier carries its source name ({tenantID}), a
+// concatenated unknown fragment degrades to "{}".
 func (w *astWalker) valueOf(n *sitter.Node) (string, string) {
 	n = unwrap(n)
 	switch kind(n) {
@@ -2327,30 +3224,38 @@ func (w *astWalker) valueOf(n *sitter.Node) (string, string) {
 		return decodeJSString(w.text(n)), model.EvidenceLiteral
 	case "number", "true", "false", "null", "undefined":
 		return w.text(n), model.EvidenceLiteral
-	case "identifier", "shorthand_property_identifier",
-		"shorthand_property_identifier_pattern":
-		name := w.text(n)
-		if value, ok := w.constants[name]; ok {
-			return value, model.EvidenceConstant
-		}
-		return "{" + name + "}", model.EvidencePlaceholder
-	case "template_string":
-		value := w.templatePlaceholder(n)
-		if strings.Contains(value, "{}") {
-			return value, model.EvidencePlaceholder
-		}
-		return value, model.EvidenceLiteral
-	case "binary_expression":
-		if w.text(n.ChildByFieldName("operator")) == "+" {
-			if value, ok := w.foldConcat(n, 0); ok {
-				if strings.Contains(value, "{}") {
-					return value, model.EvidencePlaceholder
-				}
-				return value, model.EvidenceConstant
-			}
-		}
 	}
-	return "", ""
+	v := w.evalExpr(n, w.currentScope(), 0)
+	if len(v.opts) == 0 {
+		// Nothing evaluable: keep the source expression as the placeholder so
+		// the report shows where the value flows in from.
+		if symbol := w.payloadSymbol(n); symbol != "" {
+			return "{" + symbol + "}", model.EvidencePlaceholder
+		}
+		return "", ""
+	}
+	opt := v.opts[0]
+	text := opt.text
+	if opt.isNum {
+		text = formatJSNumber(opt.num)
+	}
+	switch {
+	case opt.unknown:
+		if text == "{}" && (kind(n) == "identifier" ||
+			kind(n) == "shorthand_property_identifier" ||
+			kind(n) == "shorthand_property_identifier_pattern") {
+			return "{" + w.text(n) + "}", model.EvidencePlaceholder
+		}
+		return text, model.EvidencePlaceholder
+	case len(v.opts) > 1:
+		// Several branch candidates: the first is reported, but its value is
+		// not certain, so the evidence stays a placeholder.
+		return text, model.EvidencePlaceholder
+	case kind(n) == "template_string":
+		return text, model.EvidenceLiteral
+	default:
+		return text, model.EvidenceConstant
+	}
 }
 
 // jsonParamPairs reads key/value pairs from a JSON object written as a plain
@@ -2432,123 +3337,6 @@ func (w *astWalker) optionsMethod(n *sitter.Node) string {
 	return ""
 }
 
-func (w *astWalker) foldConcat(n *sitter.Node, depth int) (string, bool) {
-	if depth > 8 {
-		return "", false
-	}
-	n = unwrap(n)
-	switch kind(n) {
-	case "binary_expression":
-		if w.text(n.ChildByFieldName("operator")) != "+" {
-			return "", false
-		}
-		left, lok := w.foldConcat(n.ChildByFieldName("left"), depth+1)
-		right, rok := w.foldConcat(n.ChildByFieldName("right"), depth+1)
-		return left + right, lok && rok
-	case "string":
-		return decodeJSString(w.text(n)), true
-	case "identifier":
-		if value, ok := w.constants[w.text(n)]; ok {
-			return value, true
-		}
-		return "{}", true
-	case "call_expression":
-		// String.prototype.concat and Array.prototype.join are
-		// string-concatenation aliases of the + operator: fold them the same
-		// way so URLs assembled through them stop being blind spots. A part
-		// that cannot be folded degrades to the "{}" placeholder, matching
-		// the unknown-identifier behavior above.
-		function := unwrap(n.ChildByFieldName("function"))
-		// Bare atob("...") has an identifier callee that memberParts cannot
-		// describe, so it is handled before the member dispatch.
-		if kind(function) == "identifier" && w.text(function) == "atob" {
-			arguments := w.arguments(n)
-			if len(arguments) != 1 {
-				return "", false
-			}
-			encoded, ok := w.foldConcat(arguments[0], depth+1)
-			if !ok {
-				return "", false
-			}
-			if decoded := decodeBase64String(encoded); decoded != "" {
-				return decoded, true
-			}
-			return "", false
-		}
-		object, property, ok := w.memberParts(function)
-		if !ok {
-			return "", false
-		}
-		arguments := w.arguments(n)
-		switch property {
-		case "concat":
-			parts := make([]string, 0, len(arguments)+1)
-			if head, hok := w.foldConcat(object, depth+1); hok {
-				parts = append(parts, head)
-			} else {
-				parts = append(parts, "{}")
-			}
-			for _, arg := range arguments {
-				if part, pok := w.foldConcat(arg, depth+1); pok {
-					parts = append(parts, part)
-				} else {
-					parts = append(parts, "{}")
-				}
-			}
-			return strings.Join(parts, ""), true
-		case "join":
-			separator := ","
-			if len(arguments) == 1 {
-				sep, sok := w.foldConcat(arguments[0], depth+1)
-				if !sok {
-					return "", false
-				}
-				separator = sep
-			}
-			elements := unwrap(object)
-			if kind(elements) != "array" {
-				return "", false
-			}
-			parts := make([]string, 0, int(elements.NamedChildCount()))
-			for i := 0; i < int(elements.NamedChildCount()); i++ {
-				if part, pok := w.foldConcat(elements.NamedChild(uint(i)), depth+1); pok {
-					parts = append(parts, part)
-				} else {
-					parts = append(parts, "{}")
-				}
-			}
-			return strings.Join(parts, separator), true
-		case "replace", "replaceAll":
-			if len(arguments) < 2 {
-				return "", false
-			}
-			subject, sok := w.foldConcat(object, depth+1)
-			pattern, pok := w.foldConcat(arguments[0], depth+1)
-			replacement, rok := w.foldConcat(arguments[1], depth+1)
-			if !sok || !pok || !rok {
-				return "", false
-			}
-			return strings.ReplaceAll(subject, pattern, replacement), true
-		case "atob":
-			// window.atob: same decoding as the bare global spelling.
-			if len(arguments) != 1 || kind(object) != "identifier" ||
-				w.text(object) != "window" {
-				return "", false
-			}
-			encoded, ok := w.foldConcat(arguments[0], depth+1)
-			if !ok {
-				return "", false
-			}
-			if decoded := decodeBase64String(encoded); decoded != "" {
-				return decoded, true
-			}
-			return "", false
-		}
-		return "", false
-	}
-	return "", false
-}
-
 func (w *astWalker) templatePlaceholder(n *sitter.Node) string {
 	var result strings.Builder
 	for i := uint(0); i < n.NamedChildCount(); i++ {
@@ -2604,46 +3392,30 @@ func (w *astWalker) baseURLTarget(n *sitter.Node) (string, bool) {
 }
 
 // baseURLFromExpression recovers a base URL and the evidence for that
-// recovery: a literal scores highest, a resolved constant next, and a
-// template with substitutions degrades to a placeholder.
+// recovery: a literal scores highest, a resolved constant next, and a value
+// containing unresolved fragments (including template placeholders) degrades
+// to a placeholder. The value itself comes from the shared evaluator, so a
+// baseURL built by concatenation, alias or object property folds exactly like
+// a request URL would.
 func (w *astWalker) baseURLFromExpression(n *sitter.Node) (string, string) {
 	n = unwrap(n)
-	switch kind(n) {
-	case "string":
-		return decodeJSString(w.text(n)), model.EvidenceLiteral
-	case "identifier":
-		if value, ok := w.constants[w.text(n)]; ok {
-			return value, model.EvidenceConstant
-		}
-	case "template_string":
-		return w.templatePlaceholder(n), model.EvidencePlaceholder
-	case "binary_expression":
-		if w.text(n.ChildByFieldName("operator")) == "+" {
-			left, leftKind := w.baseURLFromExpression(n.ChildByFieldName("left"))
-			right, rightKind := w.baseURLFromExpression(n.ChildByFieldName("right"))
-			if left != "" && right != "" {
-				return left + right, weakerEvidence(leftKind, rightKind)
-			}
-			if left != "" {
-				return left, leftKind
-			}
-			return right, rightKind
-		}
+	v := w.evalExpr(n, w.currentScope(), 0)
+	if len(v.opts) == 0 {
+		return "", ""
 	}
-	return "", ""
-}
-
-// weakerEvidence returns the lower-confidence of two evidence levels.
-func weakerEvidence(a, b string) string {
-	rank := map[string]int{
-		model.EvidenceLiteral:     3,
-		model.EvidenceConstant:    2,
-		model.EvidencePlaceholder: 1,
+	opt := v.opts[0]
+	switch {
+	case opt.unknown:
+		return opt.text, model.EvidencePlaceholder
+	case kind(n) == "string":
+		return opt.text, model.EvidenceLiteral
+	case kind(n) == "template_string":
+		// Keep the historical template convention: a template baseURL keeps
+		// placeholder evidence even when every part resolved.
+		return opt.text, model.EvidencePlaceholder
+	default:
+		return opt.text, model.EvidenceConstant
 	}
-	if rank[a] <= rank[b] {
-		return a
-	}
-	return b
 }
 
 func (w *astWalker) memberParts(n *sitter.Node) (*sitter.Node, string, bool) {
